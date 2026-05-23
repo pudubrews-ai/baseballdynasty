@@ -149,25 +149,47 @@ function winProbability(homeTeam: TeamRow, awayTeam: TeamRow, gameId: number): n
 }
 
 // §5.1: Box score consistency validator
-export function validateBoxScore(result: GameResult, homeScore: number, awayScore: number): string[] {
+export function validateBoxScore(
+  result: {
+    homeHits: number;
+    awayHits: number;
+    homeWalks: number;
+    awayWalks: number;
+    batterLines: BatterBoxLine[];
+    pitcherLines: PitcherBoxLine[];
+  },
+  homeTeamId: number,
+  awayTeamId: number,
+  homeScore: number,
+  awayScore: number
+): string[] {
   const errors: string[] = [];
 
-  // Rule 1: hits >= runs - walks
-  const homeRuns = homeScore;
-  const awayRuns = awayScore;
-
-  if (result.homeHits < homeRuns - result.homeWalks) {
-    errors.push(`Home hits ${result.homeHits} < runs ${homeRuns} - walks ${result.homeWalks}`);
+  // Rule 1: team_hits >= team_runs - team_walks
+  if (result.homeHits < homeScore - result.homeWalks) {
+    errors.push(`Home hits ${result.homeHits} < runs ${homeScore} - walks ${result.homeWalks}`);
   }
-  if (result.awayHits < awayRuns - result.awayWalks) {
-    errors.push(`Away hits ${result.awayHits} < runs ${awayRuns} - walks ${result.awayWalks}`);
+  if (result.awayHits < awayScore - result.awayWalks) {
+    errors.push(`Away hits ${result.awayHits} < runs ${awayScore} - walks ${result.awayWalks}`);
   }
 
-  // Rule 2: RBI constraints
-  const homeRBI = result.batterLines.filter(b => b.teamId === homeScore).reduce((s, b) => s + b.rbi, 0);
-  const awayRBI = result.batterLines.filter(b => b.teamId !== homeScore).reduce((s, b) => s + b.rbi, 0);
+  // Rule 2: total_rbi <= team_runs AND >= max(0, team_runs - 1)
+  const homeRBI = result.batterLines.filter(b => b.teamId === homeTeamId).reduce((s, b) => s + b.rbi, 0);
+  const awayRBI = result.batterLines.filter(b => b.teamId === awayTeamId).reduce((s, b) => s + b.rbi, 0);
+  if (homeRBI > homeScore) errors.push(`Home RBI ${homeRBI} > runs ${homeScore}`);
+  if (awayRBI > awayScore) errors.push(`Away RBI ${awayRBI} > runs ${awayScore}`);
+  if (homeRBI < Math.max(0, homeScore - 1)) errors.push(`Home RBI ${homeRBI} < min ${Math.max(0, homeScore - 1)}`);
+  if (awayRBI < Math.max(0, awayScore - 1)) errors.push(`Away RBI ${awayRBI} < min ${Math.max(0, awayScore - 1)}`);
 
-  // Note: corrected rule from §5.1: total_rbi <= total_runs AND >= max(0, total_runs - 1)
+  // Rule 3: starting pitcher IP between 4.0 and 9.0
+  const homeStarterLine = result.pitcherLines.find(p => p.teamId === homeTeamId);
+  const awayStarterLine = result.pitcherLines.find(p => p.teamId === awayTeamId);
+  if (homeStarterLine && (homeStarterLine.inningsPitched < 4.0 || homeStarterLine.inningsPitched > 9.0)) {
+    errors.push(`Home starter IP ${homeStarterLine.inningsPitched} out of range`);
+  }
+  if (awayStarterLine && (awayStarterLine.inningsPitched < 4.0 || awayStarterLine.inningsPitched > 9.0)) {
+    errors.push(`Away starter IP ${awayStarterLine.inningsPitched} out of range`);
+  }
 
   return errors;
 }
@@ -221,20 +243,19 @@ export async function simulateGame(
 
   // §5.1 Rule 1: ensure hits >= runs - walks (generate extra walks if needed)
   if (homeHits < homeScore - homeWalks) {
-    const deficit = homeScore - homeWalks - homeHits;
-    homeWalks += deficit;
-    // Distribute extra walks to batters
+    const deficit = (homeScore - homeWalks) - homeHits;
     distributeExtraWalks(homeBatterLines, deficit, rng);
+    homeWalks = homeBatterLines.reduce((s, b) => s + b.walks, 0);
   }
   if (awayHits < awayScore - awayWalks) {
-    const deficit = awayScore - awayWalks - awayHits;
-    awayWalks += deficit;
+    const deficit = (awayScore - awayWalks) - awayHits;
     distributeExtraWalks(awayBatterLines, deficit, rng);
+    awayWalks = awayBatterLines.reduce((s, b) => s + b.walks, 0);
   }
 
-  // §5.1 Rule 2: clamp RBI
-  clampRBI(homeBatterLines, homeScore);
-  clampRBI(awayBatterLines, awayScore);
+  // §5.1 Rule 2: clamp RBI (pass seeded rng for determinism)
+  clampRBI(homeBatterLines, homeScore, rng);
+  clampRBI(awayBatterLines, awayScore, rng);
 
   // Generate pitcher lines
   const homePitcherLines = generatePitcherLines(
@@ -281,6 +302,56 @@ export async function simulateGame(
 
   const homeErrors = randInt(rng, 0, 2);
   const awayErrors = randInt(rng, 0, 2);
+
+  // §5.1 Box-score consistency gate (run before the transaction)
+  {
+    // Refresh hits/walks from current lines before validation
+    homeHits = homeBatterLines.reduce((s, b) => s + b.hits, 0);
+    awayHits = awayBatterLines.reduce((s, b) => s + b.hits, 0);
+    homeWalks = homeBatterLines.reduce((s, b) => s + b.walks, 0);
+    awayWalks = awayBatterLines.reduce((s, b) => s + b.walks, 0);
+
+    const allBatterLinesForValidation = [...homeBatterLines, ...awayBatterLines];
+    const allPitcherLinesForValidation = [...homePitcherLines, ...awayPitcherLines];
+
+    let validationErrors = validateBoxScore(
+      { homeHits, awayHits, homeWalks, awayWalks,
+        batterLines: allBatterLinesForValidation, pitcherLines: allPitcherLinesForValidation },
+      homeTeam.id, awayTeam.id, homeScore, awayScore
+    );
+
+    if (validationErrors.length > 0) {
+      console.warn(`[game ${gameId}] box-score validation failed: ${validationErrors.join('; ')}`);
+      for (let attempt = 0; attempt < 3 && validationErrors.length > 0; attempt++) {
+        // Re-apply rule 1 fix if needed
+        if (homeHits < homeScore - homeWalks) {
+          distributeExtraWalks(homeBatterLines, (homeScore - homeWalks) - homeHits, rng);
+          homeWalks = homeBatterLines.reduce((s, b) => s + b.walks, 0);
+        }
+        if (awayHits < awayScore - awayWalks) {
+          distributeExtraWalks(awayBatterLines, (awayScore - awayWalks) - awayHits, rng);
+          awayWalks = awayBatterLines.reduce((s, b) => s + b.walks, 0);
+        }
+        // Re-clamp RBI for rule 2
+        clampRBI(homeBatterLines, homeScore, rng);
+        clampRBI(awayBatterLines, awayScore, rng);
+
+        homeHits = homeBatterLines.reduce((s, b) => s + b.hits, 0);
+        awayHits = awayBatterLines.reduce((s, b) => s + b.hits, 0);
+        homeWalks = homeBatterLines.reduce((s, b) => s + b.walks, 0);
+        awayWalks = awayBatterLines.reduce((s, b) => s + b.walks, 0);
+
+        validationErrors = validateBoxScore(
+          { homeHits, awayHits, homeWalks, awayWalks,
+            batterLines: allBatterLinesForValidation, pitcherLines: allPitcherLinesForValidation },
+          homeTeam.id, awayTeam.id, homeScore, awayScore
+        );
+      }
+      if (validationErrors.length > 0) {
+        console.error(`[game ${gameId}] box-score still invalid after retries: ${validationErrors.join('; ')}`);
+      }
+    }
+  }
 
   // D9: All writes in one transaction including cache update
   const db = getDb();
@@ -394,7 +465,7 @@ function distributeExtraWalks(lines: BatterBoxLine[], extra: number, rng: () => 
   }
 }
 
-function clampRBI(lines: BatterBoxLine[], teamRuns: number): void {
+function clampRBI(lines: BatterBoxLine[], teamRuns: number, rng: () => number): void {
   // §5.1 Rule 2 (corrected): RBI <= runs, >= max(0, runs - 1)
   let totalRBI = lines.reduce((s, b) => s + b.rbi, 0);
 
@@ -402,7 +473,7 @@ function clampRBI(lines: BatterBoxLine[], teamRuns: number): void {
   while (totalRBI > teamRuns) {
     const highRBI = lines.filter(b => b.rbi > 0);
     if (highRBI.length === 0) break;
-    const idx = Math.floor(Math.random() * highRBI.length);
+    const idx = Math.floor(rng() * highRBI.length);
     const player = highRBI[idx];
     if (player && player.rbi > 0) {
       player.rbi--;
@@ -415,7 +486,7 @@ function clampRBI(lines: BatterBoxLine[], teamRuns: number): void {
   while (totalRBI < minRBI && totalRBI < teamRuns) {
     const hasHits = lines.filter(b => b.hits > 0);
     if (hasHits.length === 0) break;
-    const idx = Math.floor(Math.random() * hasHits.length);
+    const idx = Math.floor(rng() * hasHits.length);
     const player = hasHits[idx];
     if (player) {
       player.rbi++;

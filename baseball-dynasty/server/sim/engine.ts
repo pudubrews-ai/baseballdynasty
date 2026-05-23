@@ -5,7 +5,8 @@
 
 import { getDb, prepared, getActiveLeague, updateCache, getCachedState, type LeagueRow, type TeamRow } from '../db.js';
 import { generateWorld } from './worldgen.js';
-import { validatePostDraftRosters, runExpansionDraft } from './draft.js';
+import { runExpansionDraft } from './draft.js';
+import { validatePostDraftRosters } from './worldgen.js';
 import { generateSchedule, saveSchedule, getNextGame, isSeasonComplete, shouldFireTradeDeadline, fireTradeDeadline } from './season.js';
 import { simulateGame } from './game.js';
 import { runPlayoffs } from './playoffs.js';
@@ -120,10 +121,10 @@ export async function startNewLeague(options: NewLeagueBodyType): Promise<{ leag
     throw new Error('LEAGUE_EXISTS');
   }
 
-  const { leagueId, worldgenSeed } = await generateWorld({
-    seed: options.seed,
-    leagueName: options.leagueName,
-  });
+  const wgOptions: { seed?: number; leagueName?: string } = {};
+  if (options.seed !== undefined) wgOptions.seed = options.seed;
+  if (options.leagueName !== undefined) wgOptions.leagueName = options.leagueName;
+  const { leagueId, worldgenSeed } = await generateWorld(wgOptions);
 
   currentLeagueId = leagueId;
   currentSpeed = 'paused';
@@ -231,7 +232,8 @@ async function runTickLoop(league: LeagueRow): Promise<void> {
       }
     }
 
-    if (simRunning && currentSpeed !== 'paused') {
+    // currentSpeed may have changed since function entered; re-check as SimSpeed
+    if (simRunning && (currentSpeed as string) !== 'paused') {
       scheduleTick(currentLeague);
     }
   } catch (err) {
@@ -357,5 +359,4 @@ async function runOffseasonTick(league: LeagueRow, isTurbo: boolean): Promise<vo
   }
 }
 
-// Export for use in server/index.ts
-export { initEngine };
+// initEngine is already exported at the function declaration above
