@@ -3,6 +3,7 @@ import { prepared, getActiveLeague } from '../db.js';
 
 export const timelineRouter = Router();
 
+// §3.4: snake_case fields + notable_events per season
 timelineRouter.get('/', async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const league = getActiveLeague();
@@ -26,14 +27,35 @@ timelineRouter.get('/', async (_req: Request, res: Response, next: NextFunction)
       mvp_player_name: string | null;
     }>;
 
-    res.json(seasons.map(s => ({
-      seasonNumber: s.season_number,
-      championTeamId: s.champion_team_id,
-      championTeamName: s.champion_team_name,
-      mvpPlayerId: s.mvp_player_id,
-      mvpPlayerName: s.mvp_player_name,
-      narrative: s.narrative,
-      year: 2025 + s.season_number,
-    })));
+    const result = seasons.map(s => {
+      // Pull notable events from game_log for this season
+      const eventsRaw = prepared(
+        `SELECT notable_events_json FROM game_log
+         WHERE league_id = ? AND season_number = ? AND notable_events_json != '[]'
+         LIMIT 100`
+      ).all(league.id, s.season_number) as Array<{ notable_events_json: string }>;
+
+      const allEvents: unknown[] = [];
+      for (const row of eventsRaw) {
+        try {
+          const arr = JSON.parse(row.notable_events_json);
+          if (Array.isArray(arr)) allEvents.push(...arr);
+        } catch { /* ignore malformed JSON */ }
+      }
+      const notable_events = allEvents.slice(0, 10);
+
+      return {
+        season_number: s.season_number,
+        champion_team_id: s.champion_team_id,
+        champion_team_name: s.champion_team_name,
+        mvp_player_id: s.mvp_player_id,
+        mvp_player_name: s.mvp_player_name,
+        narrative: s.narrative,
+        year: 2025 + s.season_number,
+        notable_events,
+      };
+    });
+
+    res.json(result);
   } catch (err) { next(err); }
 });

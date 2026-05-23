@@ -58,6 +58,60 @@ export interface WorldgenOptions {
   leagueName?: string;
 }
 
+// §2.11: Market-size quota selection — exactly 2 mega + 4 large + 8 medium + 6 small
+function selectCitiesWithMarketQuota(rng: () => number, allCities: CityData[]): CityData[] {
+  const quotas: Record<string, number> = { mega: 2, large: 4, medium: 8, small: 6 };
+  const remaining: Record<string, number> = { ...quotas };
+
+  const shuffled = [...allCities];
+  shuffle(rng, shuffled);
+
+  const usedRegions = new Set<string>();
+  const selected: CityData[] = [];
+
+  // First pass: greedy by market size, honoring region uniqueness
+  for (const city of shuffled) {
+    if (selected.length >= 20) break;
+    if ((remaining[city.market_size] ?? 0) <= 0) continue;
+    if (usedRegions.has(city.region)) continue;
+    selected.push(city);
+    usedRegions.add(city.region);
+    remaining[city.market_size]!--;
+  }
+
+  // Second pass: if any quota unmet (region exhaustion), relax region uniqueness
+  if (selected.length < 20) {
+    for (const city of shuffled) {
+      if (selected.length >= 20) break;
+      if (selected.includes(city)) continue;
+      if ((remaining[city.market_size] ?? 0) <= 0) continue;
+      console.warn(`[worldgen] Relaxing region uniqueness to satisfy market-size quota for ${city.name}`);
+      selected.push(city);
+      remaining[city.market_size]!--;
+    }
+  }
+
+  return selected;
+}
+
+// §3.1: Generate unique team abbreviation from nickname + city
+function generateAbbreviation(nickname: string, city: string, takenAbbrevs: Set<string>): string {
+  let abbrev = nickname.slice(0, 3).toUpperCase();
+  if (!takenAbbrevs.has(abbrev)) {
+    takenAbbrevs.add(abbrev);
+    return abbrev;
+  }
+  abbrev = (city.slice(0, 2) + nickname.slice(0, 1)).toUpperCase();
+  let suffix = 0;
+  while (takenAbbrevs.has(abbrev)) {
+    suffix++;
+    abbrev = (city.slice(0, 2) + suffix).toUpperCase();
+    if (suffix > 99) break;
+  }
+  takenAbbrevs.add(abbrev);
+  return abbrev;
+}
+
 export async function generateWorld(options: WorldgenOptions): Promise<{ leagueId: number; worldgenSeed: number }> {
   const db = getDb();
   const seed = resolveSeed(options.seed);
@@ -99,27 +153,8 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
   potentialArray.length = 800;
   shuffle(rng, potentialArray);
 
-  // Pick 20 cities (no two from the same region)
-  const usedRegions = new Set<string>();
-  const availableCities = [...CITIES];
-  shuffle(rng, availableCities);
-  const selectedCities: CityData[] = [];
-  for (const city of availableCities) {
-    if (!usedRegions.has(city.region)) {
-      usedRegions.add(city.region);
-      selectedCities.push(city);
-      if (selectedCities.length === 20) break;
-    }
-  }
-  // If we couldn't get 20 unique regions (shouldn't happen), fill remainder
-  if (selectedCities.length < 20) {
-    const remaining = availableCities.filter(c => !selectedCities.includes(c));
-    for (const city of remaining) {
-      if (selectedCities.length >= 20) break;
-      console.warn(`[worldgen] Region constraint relaxed for city: ${city.name}`);
-      selectedCities.push(city);
-    }
-  }
+  // Pick 20 cities with market-size quota: exactly 2 mega + 4 large + 8 medium + 6 small (§2.11)
+  const selectedCities = selectCitiesWithMarketQuota(rng, [...CITIES]);
 
   // Pick 20 nicknames (no duplicates)
   const shuffledNicknames = [...NICKNAMES];
@@ -130,7 +165,7 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
     'INSERT INTO leagues (name, season_number, phase, sim_speed, current_game_date, current_game_number, last_pick_id, last_game_id, worldgen_seed, archived, created_at) VALUES (?, 1, ?, ?, 0, 0, 0, 0, ?, 0, ?)'
   );
   const insertTeam = db.prepare(
-    `INSERT INTO teams (league_id, name, city, state_province, region, market_size, conference, division, color, wins, losses, runs_scored, runs_allowed, games_played, payroll_budget, current_payroll, revenue, gm_name, gm_philosophy, gm_risk_tolerance, gm_focus, manager_name, manager_style, owner_name, owner_personality, owner_age, job_security) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 5)`
+    `INSERT INTO teams (league_id, name, city, state_province, region, market_size, conference, division, color, wins, losses, runs_scored, runs_allowed, games_played, payroll_budget, current_payroll, revenue, gm_name, gm_philosophy, gm_risk_tolerance, gm_focus, manager_name, manager_style, owner_name, owner_personality, owner_age, job_security, abbreviation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 5, ?)`
   );
   const insertPlayer = db.prepare(
     `INSERT INTO players (league_id, team_id, first_name, last_name, age, position, overall_rating, potential, potential_revealed, contact, power, speed, fielding, arm, pitching_velocity, pitching_control, pitching_stamina, is_on_mlb_roster, annual_salary, contract_years_remaining, service_time, injury_prone, coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country, is_drafted) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
@@ -150,6 +185,7 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
     // Assign conferences and divisions
     const conferences = ['American', 'National'];
     const teamIds: number[] = [];
+    const takenAbbrevs = new Set<string>();
 
     for (let i = 0; i < 20; i++) {
       const city = selectedCities[i]!;
@@ -196,6 +232,8 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
       const ownerFirst = pickRandomName(rng, 'us', 'first');
       const ownerLast = pickRandomName(rng, 'us', 'last');
 
+      const abbreviation = generateAbbreviation(nickname, city.name, takenAbbrevs);
+
       const teamResult = insertTeam.run(
         leagueId,
         nickname,
@@ -216,7 +254,8 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
         managerStyle,
         `${ownerFirst} ${ownerLast}`,
         ownerPersonality,
-        ownerAge
+        ownerAge,
+        abbreviation
       );
       teamIds.push(teamResult.lastInsertRowid as number);
     }
@@ -371,10 +410,10 @@ function autoBalance(
   ).get(position, leagueId, needyTeam.id) as { id: number; name: string; cnt: number } | undefined;
 
   if (!surplusTeams) {
-    // Try minors pool
+    // Try minors pool (fixed parameter order: leagueId, position — §2.8)
     const minorPlayer = db.prepare(
       'SELECT id FROM players WHERE league_id = ? AND position = ? AND is_on_mlb_roster = 0 AND is_drafted = 1 ORDER BY overall_rating DESC LIMIT 1'
-    ).get(position, leagueId) as { id: number } | undefined;
+    ).get(leagueId, position) as { id: number } | undefined;
 
     if (minorPlayer) {
       db.prepare('UPDATE players SET team_id = ?, is_on_mlb_roster = 1 WHERE id = ?').run(needyTeam.id, minorPlayer.id);

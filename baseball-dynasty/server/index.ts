@@ -48,7 +48,7 @@ function rateLimitLeagueNew(_req: Request, res: Response, next: NextFunction): v
     res.status(429).json({ error: 'rate_limited', retryAfterMs: 30_000 - (now - lastLeagueCreateMs) });
     return;
   }
-  lastLeagueCreateMs = now;
+  // Do NOT set lastLeagueCreateMs here — set it only after success (§4.7)
   next();
 }
 
@@ -67,7 +67,22 @@ app.get('/api/state', async (req: Request, res: Response, next: NextFunction): P
     const sinceGameId = req.query['sinceGameId'] ? parseInt(String(req.query['sinceGameId']), 10) : 0;
     const state = await getActiveLeagueState(sincePickId, sinceGameId);
     if (!state) {
-      res.json({ noLeague: true });
+      // §3.5: Return full shape even when no league exists
+      res.json({
+        leagueId: null,
+        phase: 'no_league',
+        seasonNumber: 0,
+        simSpeed: 'paused',
+        noLeague: true,
+        currentGameDate: 0,
+        currentGameNumber: 0,
+        lastPickId: 0,
+        lastGameId: 0,
+        llmStatus: { dailyBudgetRemaining: 2000, circuitBreakerOpen: false, retryAfterMs: 0 },
+        worldgenSeed: 0,
+        picksDelta: [],
+        gamesDelta: [],
+      });
       return;
     }
     res.json(state);
@@ -79,12 +94,24 @@ app.get('/api/state', async (req: Request, res: Response, next: NextFunction): P
 app.post('/api/league/new', rateLimitLeagueNew, validateBody(NewLeagueBody), async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const result = await startNewLeague(req.body);
-    res.status(201).json(result);
+    lastLeagueCreateMs = Date.now(); // Set only on success (§4.7)
+    res.status(200).json({ leagueId: result.leagueId, phase: 'draft' }); // HTTP 200, phase:"draft" (§2.14)
   } catch (err: unknown) {
     if (err instanceof Error && err.message === 'LEAGUE_EXISTS') {
-      res.status(409).json({ error: 'active_league_exists', message: 'An active league already exists. DELETE /api/league/current first.' });
+      lastLeagueCreateMs = Date.now(); // Also lock on legitimate 409 (§4.7)
+      res.status(409).json({ error: 'League already exists. Use /api/league/reset to start over.' }); // §2.16.4
       return;
     }
+    next(err);
+  }
+});
+
+// Alias POST /api/league/reset → same as DELETE /api/league/current (§2.16.4)
+app.post('/api/league/reset', async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    await deleteCurrentLeague();
+    res.json({ ok: true });
+  } catch (err) {
     next(err);
   }
 });
@@ -98,9 +125,15 @@ app.delete('/api/league/current', async (_req: Request, res: Response, next: Nex
   }
 });
 
-app.post('/api/sim/speed', validateBody(SimSpeedBody), async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+// §2.16.3: Route-specific validator to return spec-verbatim error for invalid speed
+app.post('/api/sim/speed', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    await setSimSpeed(req.body.speed);
+    const result = SimSpeedBody.safeParse(req.body);
+    if (!result.success) {
+      res.status(400).json({ error: 'Invalid speed. Must be paused|normal|fast|turbo' });
+      return;
+    }
+    await setSimSpeed(result.data.speed);
     res.json({ ok: true });
   } catch (err: unknown) {
     if (err instanceof Error && err.message === 'NO_ACTIVE_LEAGUE') {
@@ -135,6 +168,17 @@ app.use('/api/players', playersRouter);
 app.use('/api/games', gamesRouter);
 app.use('/api/timeline', timelineRouter);
 
+// §2.9: Draft order endpoint for UI to show correct pick order
+app.get('/api/draft/order', async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const { getActiveLeague } = await import('./db.js');
+    const league = getActiveLeague();
+    if (!league) { res.json({ teamOrder: [] }); return; }
+    const { getExpansionDraftOrder } = await import('./sim/draft.js');
+    res.json({ teamOrder: getExpansionDraftOrder(league.id) });
+  } catch (err) { next(err); }
+});
+
 app.get('/api/standings', async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { getStandings } = await import('./routes/standings.js');
@@ -155,16 +199,8 @@ app.get('/api/transactions', async (_req: Request, res: Response, next: NextFunc
   }
 });
 
-// Error handler — never serialize raw errors
-function scrubError(err: unknown): { code: string; message: string } {
-  const msg = err instanceof Error ? err.message : String(err);
-  const code = (err as Record<string, unknown>)?.['status'] ? `http_${(err as Record<string, unknown>)['status']}` : 'server_error';
-  const scrubbed = msg
-    .replace(/sk-ant-[a-zA-Z0-9_-]+/g, '[REDACTED_KEY]')
-    .replace(/authorization[^,}\n]*/gi, 'authorization: [REDACTED]')
-    .replace(/x-api-key[^,}\n]*/gi, 'x-api-key: [REDACTED]');
-  return { code, message: scrubbed };
-}
+// §5.1: Use shared scrubError utility
+import { scrubError } from './util/scrub.js';
 
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction): void => {
   console.error('[server]', scrubError(err));
@@ -176,8 +212,8 @@ async function main() {
   try {
     await initDb();
     await initEngine(); // D17: Restore active league, force paused
-    app.listen(PORT, () => {
-      console.log(`[server] Baseball Dynasty server running on http://localhost:${PORT}`);
+    app.listen(PORT, '127.0.0.1', () => {
+      console.log(`[server] Baseball Dynasty server running on http://127.0.0.1:${PORT} (localhost only)`);
     });
   } catch (err) {
     console.error('[server] Fatal startup error:', err);

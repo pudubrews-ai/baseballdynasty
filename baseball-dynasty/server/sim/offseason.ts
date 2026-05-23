@@ -33,7 +33,7 @@ export async function runOffseason(league: LeagueRow, isTurbo: boolean): Promise
         await runDevelopmentStep(leagueId, league.worldgen_seed ^ league.season_number);
         break;
       case 'free_agency':
-        await runFreeAgencyStep(leagueId);
+        await runFreeAgencyStep(leagueId, league.season_number);
         break;
       case 'front_office':
         await runFrontOfficeStep(leagueId, league.season_number, league.worldgen_seed ^ league.season_number);
@@ -122,7 +122,7 @@ async function runDevelopmentStep(leagueId: number, seed: number): Promise<void>
 }
 
 // Step 3: Free agency — D20
-async function runFreeAgencyStep(leagueId: number): Promise<void> {
+async function runFreeAgencyStep(leagueId: number, seasonNumber?: number): Promise<void> {
   const db = getDb();
 
   // Players with 0 contract years remaining become free agents
@@ -172,15 +172,20 @@ async function runFreeAgencyStep(leagueId: number): Promise<void> {
 
     if (bestTeamId !== null && bestBid > 0) {
       const signingTeam = teams.find(t => t.id === bestTeamId);
-      const contractYears = randInt(seedFor('fa_contract', Date.now()), 1, 3);
+      // §4.1: Use deterministic seed (player id + season) instead of Date.now()
+      const leagueRow = prepared('SELECT worldgen_seed, season_number FROM leagues WHERE id = ?').get(leagueId) as { worldgen_seed: number; season_number: number } | undefined;
+      const fa_seed_base = (leagueRow?.worldgen_seed ?? 0) ^ (leagueRow?.season_number ?? 1);
+      const contractYears = randInt(seedFor(`fa_contract_${fa.id}`, fa_seed_base), 1, 3);
       prepared('UPDATE players SET team_id = ?, is_on_mlb_roster = 1, annual_salary = ?, contract_years_remaining = ? WHERE id = ?')
         .run(bestTeamId, bestBid, contractYears, fa.id);
       prepared('UPDATE teams SET current_payroll = current_payroll + ? WHERE id = ?').run(bestBid, bestTeamId);
 
+      // §4.2: Use actual season_number, not hardcoded 1
+      const actualSeason = seasonNumber ?? leagueRow?.season_number ?? 1;
       db.prepare(
         'INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
       ).run(
-        leagueId, 1, 'free_agent_signing',
+        leagueId, actualSeason, 'free_agent_signing',
         bestTeamId, fa.id,
         `${signingTeam?.city ?? 'Unknown'} signs ${fa.first_name} ${fa.last_name} for $${(bestBid / 1_000_000).toFixed(1)}M`,
         Date.now()
@@ -286,9 +291,7 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
     }
   }
 
-  // Reset win/loss for new season
-  db.prepare('UPDATE teams SET wins = 0, losses = 0, runs_scored = 0, runs_allowed = 0, games_played = 0 WHERE league_id = ?').run(leagueId);
-
+  // NOTE: W/L reset moved to finalizeOffseason() — must happen AFTER annual_draft reads standings (§2.6)
   console.log(`[offseason] Front office changes complete`);
 }
 
@@ -315,6 +318,9 @@ async function finalizeOffseason(leagueId: number, previousSeason: number): Prom
   db.prepare(
     'UPDATE leagues SET season_number = ?, phase = ?, offseason_step = NULL, current_game_number = 0, current_game_date = 0, last_game_id = 0 WHERE id = ?'
   ).run(newSeason, 'regular_season', leagueId);
+
+  // Reset W/L/runs/games_played for the new season — must happen AFTER annual_draft (§2.6)
+  db.prepare('UPDATE teams SET wins = 0, losses = 0, runs_scored = 0, runs_allowed = 0, games_played = 0 WHERE league_id = ?').run(leagueId);
 
   // D21: Remaining undrafted players from original pool become free agents
   db.prepare(

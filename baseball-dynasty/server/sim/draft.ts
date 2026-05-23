@@ -91,7 +91,7 @@ function getBiggestNeed(needs: Record<string, number>): string {
   return best;
 }
 
-// Select top N available players by PAV
+// Select top N available players by PAV — using scarcity estimate in SQL (§4.5)
 function selectTopN(
   league_id: number,
   round: number,
@@ -101,11 +101,22 @@ function selectTopN(
   const minOverall = round <= 15 ? 50 : 30;
   const maxOverall = round <= 15 ? 99 : 49;
 
+  // Pull top 50 by estimated PAV (includes scarcity in SQL) so catchers/SSes/SPs aren't filtered out
   const players = prepared(
-    'SELECT * FROM players WHERE league_id = ? AND is_drafted = 0 AND overall_rating >= ? AND overall_rating <= ? ORDER BY overall_rating DESC LIMIT 50'
+    `SELECT *, (overall_rating + CASE position
+       WHEN 'C' THEN 5
+       WHEN 'SS' THEN 4
+       WHEN 'CF' THEN 3
+       WHEN 'CL' THEN 4
+       WHEN 'SP' THEN MAX(0, CAST((overall_rating - 60) AS REAL) * 0.6)
+       ELSE 0
+     END) as estimated_pav
+     FROM players
+     WHERE league_id = ? AND is_drafted = 0 AND overall_rating >= ? AND overall_rating <= ?
+     ORDER BY estimated_pav DESC LIMIT 50`
   ).all(league_id, minOverall, maxOverall) as PlayerRow[];
 
-  // Sort by PAV
+  // Sort by full PAV (with age bonus) in JS and slice to top n
   players.sort((a, b) => positionAdjustedValue(b) - positionAdjustedValue(a));
   return players.slice(0, n);
 }
@@ -229,7 +240,9 @@ async function handleExhaustedPool(
   isExpansion: boolean
 ): Promise<number | null> {
   console.warn('[draft] Draft pool exhausted, generating replacement-level player');
-  const rng = seedFor('draft_fill', Date.now());
+  // §4.1: Use deterministic seed (team_id + round + pickNumber + worldgen_seed)
+  const leagueRow = prepared('SELECT worldgen_seed FROM leagues WHERE id = ?').get(leagueId) as { worldgen_seed: number } | undefined;
+  const rng = seedFor(`draft_fill_${teamId}_${round}_${pickNumber}`, leagueRow?.worldgen_seed ?? 0);
   const overall = randInt(rng, 30, 44);
 
   const db = getDb();
@@ -298,7 +311,14 @@ export function assignRosterLevels(leagueId: number): void {
   }
 }
 
-// Run the full expansion draft
+// Export draft order for the API route (§2.9)
+export function getExpansionDraftOrder(leagueId: number): number[] {
+  const league = prepared('SELECT * FROM leagues WHERE id = ?').get(leagueId) as LeagueRow | undefined;
+  if (!league) return [];
+  return generateExpansionDraftOrder(leagueId, league.worldgen_seed);
+}
+
+// Run the full expansion draft (resume-aware — §2.7)
 export async function runExpansionDraft(
   league: LeagueRow,
   isTurbo: boolean,
@@ -307,23 +327,27 @@ export async function runExpansionDraft(
   const leagueId = league.id;
   const teamOrder = generateExpansionDraftOrder(leagueId, league.worldgen_seed);
   const totalRounds = 30;
+  const totalPicks = totalRounds * teamOrder.length;
 
-  for (let round = 1; round <= totalRounds; round++) {
-    // Snake order: odd rounds go forward, even rounds go backward
-    const order = round % 2 === 1 ? [...teamOrder] : [...teamOrder].reverse();
+  // Resume: find the last completed pick_number for this league+season
+  const lastCompleted = prepared(
+    'SELECT COALESCE(MAX(pick_number), 0) as max_pick FROM draft_picks WHERE league_id = ? AND season_number = ? AND is_expansion_draft = 1'
+  ).get(leagueId, league.season_number) as { max_pick: number };
 
-    for (let pickIdx = 0; pickIdx < order.length; pickIdx++) {
-      const teamId = order[pickIdx]!;
-      const team = prepared('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow;
-      const pickNumber = (round - 1) * 20 + pickIdx + 1;
+  for (let pickNumber = lastCompleted.max_pick + 1; pickNumber <= totalPicks; pickNumber++) {
+    const round = Math.floor((pickNumber - 1) / teamOrder.length) + 1;
+    const pickIdxInRound = (pickNumber - 1) % teamOrder.length;
+    // Snake order: odd rounds forward, even rounds reversed
+    const orderForRound = round % 2 === 1 ? teamOrder : [...teamOrder].reverse();
+    const teamId = orderForRound[pickIdxInRound]!;
+    const team = prepared('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow;
 
-      const currentLeague = prepared('SELECT * FROM leagues WHERE id = ?').get(leagueId) as LeagueRow;
+    const currentLeague = prepared('SELECT * FROM leagues WHERE id = ?').get(leagueId) as LeagueRow;
 
-      const pickId = await runDraftPick(currentLeague, team, round, pickNumber, true, isTurbo);
+    const pickId = await runDraftPick(currentLeague, team, round, pickNumber, true, isTurbo);
 
-      if (pickId && onPickComplete) {
-        onPickComplete(pickId, round, pickNumber);
-      }
+    if (pickId && onPickComplete) {
+      onPickComplete(pickId, round, pickNumber);
     }
   }
 
@@ -331,7 +355,7 @@ export async function runExpansionDraft(
   assignRosterLevels(leagueId);
 }
 
-// Run the annual draft (reverse standings, straight order)
+// Run the annual draft (reverse standings, straight order) — resume-aware (§2.7)
 export async function runAnnualDraft(
   league: LeagueRow,
   isTurbo: boolean,
@@ -340,24 +364,34 @@ export async function runAnnualDraft(
   const leagueId = league.id;
   const teamOrder = generateAnnualDraftOrder(leagueId);
   const totalRounds = 30;
+  const totalPicks = totalRounds * teamOrder.length;
 
-  // Generate new players for the annual draft pool
-  // (In v0.1.0, we generate prospects for the annual draft)
-  generateDraftClass(leagueId, league.worldgen_seed ^ league.season_number);
+  // Generate new players for the annual draft pool (only if not resuming)
+  const existingPicks = prepared(
+    'SELECT COUNT(*) as cnt FROM draft_picks WHERE league_id = ? AND season_number = ? AND is_expansion_draft = 0'
+  ).get(leagueId, league.season_number) as { cnt: number };
 
-  for (let round = 1; round <= totalRounds; round++) {
-    // Straight order (not snake) per C5
-    for (let pickIdx = 0; pickIdx < teamOrder.length; pickIdx++) {
-      const teamId = teamOrder[pickIdx]!;
-      const team = prepared('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow;
-      const pickNumber = (round - 1) * 20 + pickIdx + 1;
+  if (existingPicks.cnt === 0) {
+    generateDraftClass(leagueId, league.worldgen_seed ^ league.season_number);
+  }
 
-      const currentLeague = prepared('SELECT * FROM leagues WHERE id = ?').get(leagueId) as LeagueRow;
-      const pickId = await runDraftPick(currentLeague, team, round, pickNumber, false, isTurbo);
+  // Resume: find the last completed pick_number for this league+season
+  const lastCompleted = prepared(
+    'SELECT COALESCE(MAX(pick_number), 0) as max_pick FROM draft_picks WHERE league_id = ? AND season_number = ? AND is_expansion_draft = 0'
+  ).get(leagueId, league.season_number) as { max_pick: number };
 
-      if (pickId && onPickComplete) {
-        onPickComplete(pickId, round, pickNumber);
-      }
+  for (let pickNumber = lastCompleted.max_pick + 1; pickNumber <= totalPicks; pickNumber++) {
+    const round = Math.floor((pickNumber - 1) / teamOrder.length) + 1;
+    const pickIdxInRound = (pickNumber - 1) % teamOrder.length;
+    // Straight order per C5 (not snake)
+    const teamId = teamOrder[pickIdxInRound]!;
+    const team = prepared('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow;
+
+    const currentLeague = prepared('SELECT * FROM leagues WHERE id = ?').get(leagueId) as LeagueRow;
+    const pickId = await runDraftPick(currentLeague, team, round, pickNumber, false, isTurbo);
+
+    if (pickId && onPickComplete) {
+      onPickComplete(pickId, round, pickNumber);
     }
   }
 

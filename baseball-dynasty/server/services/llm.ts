@@ -140,15 +140,22 @@ export function parseLlmJson<T>(
   return { ok: true, value: result.data };
 }
 
-// §4.4: Sanitize LLM-generated narrative strings before DB write
+// §4.6: Sanitize LLM-generated narrative strings before DB write — loop-until-stable
 export function sanitizeNarrative(s: string): string {
-  return s
-    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '') // strip control chars
-    .replace(/<[^>]*>/g, '')                             // strip HTML tags entirely
-    .replace(/javascript:/gi, '')
-    .replace(/data:/gi, '')
-    .slice(0, 280)                                       // cap length (D14)
-    .trim();
+  if (typeof s !== 'string') return '';
+  // Strip control chars first
+  let cur = s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '');
+  // Loop HTML and protocol strips until input is stable (prevents bypass via nested tags)
+  let prev: string;
+  do {
+    prev = cur;
+    cur = cur
+      .replace(/<[^>]*>?/g, '')          // tolerate missing closing >
+      .replace(/javascript:/gi, '')
+      .replace(/data:/gi, '')
+      .replace(/vbscript:/gi, '');
+  } while (cur !== prev);
+  return cur.slice(0, 280).trim();
 }
 
 // §4.1: Error scrubber — strips API keys from error messages
@@ -209,7 +216,7 @@ function enqueue<T>(fn: () => Promise<T>): Promise<T> {
 
 // Make a raw Claude Haiku call
 async function callClaude(prompt: string): Promise<string> {
-  recordLlmCall();
+  // §5.5: Record call only after success (not before — a failed call shouldn't consume budget)
   rollingCallTimestamps.push(Date.now());
 
   const response = await client.messages.create({
@@ -218,9 +225,11 @@ async function callClaude(prompt: string): Promise<string> {
     messages: [{ role: 'user', content: prompt }],
   });
 
+  recordLlmCall(); // Count only on success
+
   const content = response.content[0];
-  if (content?.type === 'text') {
-    return content.text;
+  if (typeof content === 'object' && content !== null && 'type' in content && content.type === 'text' && 'text' in content) {
+    return (content as { type: 'text'; text: string }).text;
   }
   throw new Error('No text content in LLM response');
 }

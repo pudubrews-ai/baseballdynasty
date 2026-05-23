@@ -5,10 +5,12 @@ export type SimSpeed = 'paused' | 'normal' | 'fast' | 'turbo';
 export type LeaguePhase =
   | 'setup'
   | 'expansion_draft'
+  | 'annual_draft'
+  | 'draft'         // API-facing alias for expansion_draft | annual_draft (§2.14)
   | 'regular_season'
   | 'playoffs'
   | 'offseason'
-  | 'annual_draft';
+  | 'no_league';    // API-facing state when no league exists (§3.5)
 
 export type OffseasonStep =
   | 'retirement'

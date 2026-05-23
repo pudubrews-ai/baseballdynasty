@@ -1,5 +1,9 @@
 // Playoff bracket generation and series simulation
 // D18: Tiebreakers: H2H → intra-div → run diff → coin flip
+// Architect-locked v0.1.0 series lengths:
+// Division Series = best-of-5 (first to 3)
+// Championship Series = best-of-7 (first to 4)
+// World Series = best-of-7 (first to 4)
 
 import { getDb, prepared, type TeamRow, type LeagueRow } from '../db.js';
 import { seedFor, randInt } from './prng.js';
@@ -25,6 +29,19 @@ export interface PlayoffSeries {
   awayWins: number;
   isComplete: boolean;
   winnerId: number | null;
+}
+
+// §4.4: Memoized tiebreaker — prevents non-deterministic sort due to repeated comparator calls
+let tiebreakerCache: Map<string, number> = new Map();
+
+function pairKey(a: TeamRow, b: TeamRow): string {
+  const lo = Math.min(a.id, b.id);
+  const hi = Math.max(a.id, b.id);
+  return `${lo}_${hi}`;
+}
+
+export function clearTiebreakerCache(): void {
+  tiebreakerCache = new Map();
 }
 
 // D18: Compare two teams for playoff seeding
@@ -54,13 +71,22 @@ function compareTeams(a: TeamRow, b: TeamRow, league: LeagueRow, rng: () => numb
   const bRD = b.runs_scored - b.runs_allowed;
   if (aRD !== bRD) return bRD - aRD; // higher RD first
 
-  // 5. Deterministic coin flip via tiebreaker seed
-  return rng() > 0.5 ? 1 : -1;
+  // 5. Memoized coin flip — prevents non-deterministic sort behavior (§4.4)
+  const key = pairKey(a, b);
+  if (!tiebreakerCache.has(key)) {
+    tiebreakerCache.set(key, rng() > 0.5 ? 1 : -1);
+  }
+  const cached = tiebreakerCache.get(key)!;
+  // Flip sign if (a,b) is in reversed order from (lo,hi)
+  return a.id < b.id ? cached : -cached;
 }
 
 export function buildPlayoffBracket(leagueId: number): PlayoffSeed[] {
   const league = prepared('SELECT * FROM leagues WHERE id = ?').get(leagueId) as LeagueRow;
   const teams = prepared('SELECT * FROM teams WHERE league_id = ? ORDER BY wins DESC').all(leagueId) as TeamRow[];
+
+  // Clear tiebreaker cache at start of each bracket build (§4.4)
+  clearTiebreakerCache();
 
   const rng = seedFor('tiebreaker', league.worldgen_seed ^ league.season_number);
 
@@ -113,10 +139,10 @@ export async function runPlayoffs(leagueId: number): Promise<void> {
   const americanSeeds = seeds.filter(s => s.conference === 'American');
   const nationalSeeds = seeds.filter(s => s.conference === 'National');
 
-  const amerDS1winner = await runSeries(leagueId, americanSeeds[0]!, americanSeeds[3]!, 5, 'American DS');
-  const amerDS2winner = await runSeries(leagueId, americanSeeds[1]!, americanSeeds[2]!, 5, 'American DS');
-  const natDS1winner = await runSeries(leagueId, nationalSeeds[0]!, nationalSeeds[3]!, 5, 'National DS');
-  const natDS2winner = await runSeries(leagueId, nationalSeeds[1]!, nationalSeeds[2]!, 5, 'National DS');
+  const amerDS1winner = await runSeries(leagueId, americanSeeds[0]!, americanSeeds[3]!, 5, 'DS', 'American', league.season_number);
+  const amerDS2winner = await runSeries(leagueId, americanSeeds[1]!, americanSeeds[2]!, 5, 'DS', 'American', league.season_number);
+  const natDS1winner = await runSeries(leagueId, nationalSeeds[0]!, nationalSeeds[3]!, 5, 'DS', 'National', league.season_number);
+  const natDS2winner = await runSeries(leagueId, nationalSeeds[1]!, nationalSeeds[2]!, 5, 'DS', 'National', league.season_number);
 
   if (!amerDS1winner || !amerDS2winner || !natDS1winner || !natDS2winner) {
     console.error('[playoffs] DS failed to produce winners');
@@ -124,8 +150,8 @@ export async function runPlayoffs(leagueId: number): Promise<void> {
   }
 
   // Championship Series (best-of-7)
-  const amerCSWinner = await runSeries(leagueId, amerDS1winner, amerDS2winner, 7, 'American CS');
-  const natCSWinner = await runSeries(leagueId, natDS1winner, natDS2winner, 7, 'National CS');
+  const amerCSWinner = await runSeries(leagueId, amerDS1winner, amerDS2winner, 7, 'CS', 'American', league.season_number);
+  const natCSWinner = await runSeries(leagueId, natDS1winner, natDS2winner, 7, 'CS', 'National', league.season_number);
 
   if (!amerCSWinner || !natCSWinner) {
     console.error('[playoffs] CS failed to produce winners');
@@ -133,17 +159,18 @@ export async function runPlayoffs(leagueId: number): Promise<void> {
   }
 
   // World Series (best-of-7)
-  const worldSeriesWinner = await runSeries(leagueId, amerCSWinner, natCSWinner, 7, 'World Series');
+  const worldSeriesWinner = await runSeries(leagueId, amerCSWinner, natCSWinner, 7, 'WS', null, league.season_number);
 
   if (!worldSeriesWinner) {
     console.error('[playoffs] World Series failed to produce a winner');
     return;
   }
 
-  // Record champion
+  // Record champion with procedural MVP (§5.4)
   const winnerId = worldSeriesWinner.teamId;
-  prepared('INSERT OR REPLACE INTO season_narratives (league_id, season_number, champion_team_id) VALUES (?, ?, ?)')
-    .run(leagueId, league.season_number, winnerId);
+  const mvp = pickSeasonMVP(leagueId, league.season_number, winnerId);
+  prepared('INSERT OR REPLACE INTO season_narratives (league_id, season_number, champion_team_id, mvp_player_id) VALUES (?, ?, ?, ?)')
+    .run(leagueId, league.season_number, winnerId, mvp?.id ?? null);
 
   console.log(`[playoffs] Season ${league.season_number} champion: ${worldSeriesWinner.teamName} (team ${winnerId})`);
 
@@ -157,7 +184,9 @@ async function runSeries(
   seed1: PlayoffSeed,
   seed2: PlayoffSeed,
   bestOf: number,
-  seriesName: string
+  roundName: string,
+  conference: string | null,
+  seasonNumber: number
 ): Promise<PlayoffSeed | null> {
   if (!seed1 || !seed2) return null;
 
@@ -177,10 +206,10 @@ async function runSeries(
     const homeTeam = isHome1 ? team1 : team2;
     const awayTeam = isHome1 ? team2 : team1;
 
-    const preGameNum = league.current_game_number;
     await simulateGame(
       gameNum, homeTeam, awayTeam, gameNum,
-      league.current_game_date, league.season_number, leagueId
+      league.current_game_date, league.season_number, leagueId,
+      true // isPlayoff — don't update regular-season standings (§2.4)
     );
 
     // Check who won
@@ -200,6 +229,42 @@ async function runSeries(
   }
 
   const winner = wins1 >= winsNeeded ? seed1 : seed2;
-  console.log(`[playoffs] ${seriesName}: ${seed1.teamName} vs ${seed2.teamName} → ${winner.teamName}`);
+  const seriesLabel = conference ? `${conference} ${roundName}` : roundName;
+  console.log(`[playoffs] ${seriesLabel}: ${seed1.teamName} vs ${seed2.teamName} → ${winner.teamName}`);
+
+  // Record series result in playoff_series table (§2.4 Fix step D)
+  prepared(
+    'INSERT INTO playoff_series (league_id, season_number, round_name, conference, team1_id, team2_id, winner_team_id, team1_wins, team2_wins, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(leagueId, seasonNumber, roundName, conference, seed1.teamId, seed2.teamId, winner.teamId, wins1, wins2, Date.now());
+
   return winner;
+}
+
+// §5.4: Procedural MVP selection — hitter if winning OPS > 0.950, else pitcher
+function pickSeasonMVP(leagueId: number, seasonNumber: number, winnerId: number): { id: number } | null {
+  // Check top hitter OPS on winning team
+  const topHitter = prepared(
+    `SELECT p.id,
+       (CAST(ss.hits AS REAL) / NULLIF(ss.at_bats, 0) +
+        (CAST(ss.hits + ss.walks AS REAL) / NULLIF(ss.at_bats + ss.walks, 0))) as ops
+     FROM season_stats ss
+     JOIN players p ON p.id = ss.player_id
+     WHERE ss.league_id = ? AND ss.season_number = ? AND ss.team_id = ? AND ss.at_bats >= 50
+     ORDER BY ops DESC LIMIT 1`
+  ).get(leagueId, seasonNumber, winnerId) as { id: number; ops: number } | undefined;
+
+  if (topHitter && topHitter.ops > 0.950) {
+    return { id: topHitter.id };
+  }
+
+  // Fall back to lowest ERA pitcher
+  const topPitcher = prepared(
+    `SELECT p.id
+     FROM season_stats ss
+     JOIN players p ON p.id = ss.player_id
+     WHERE ss.league_id = ? AND ss.season_number = ? AND ss.team_id = ? AND ss.innings_pitched >= 20
+     ORDER BY (CAST(ss.earned_runs AS REAL) * 9.0 / ss.innings_pitched) ASC LIMIT 1`
+  ).get(leagueId, seasonNumber, winnerId) as { id: number } | undefined;
+
+  return topPitcher ?? topHitter ?? null;
 }

@@ -129,11 +129,13 @@ export interface TeamRow {
   league_id: number;
   name: string;
   city: string;
+  state_province?: string;
   region: string;
   market_size: string;
   conference: string;
   division: string;
   color: string;
+  abbreviation: string | null;  // §3.1 — added by migration 004
   wins: number;
   losses: number;
   runs_scored: number;

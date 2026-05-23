@@ -6,80 +6,92 @@ export const playersRouter = Router();
 
 const playerIdSchema = z.coerce.number().int().positive();
 
+// §2.15: Leaders response shape — {hitting: [...], pitching: [...]} with player_name, team_name, stat_value
 playersRouter.get('/leaders', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const league = getActiveLeague();
-    if (!league) { res.json({}); return; }
+    if (!league) { res.json({ hitting: [], pitching: [] }); return; }
 
     const season = league.season_number;
 
-    // Batting avg leaders (min 50 AB)
-    const battingAvg = prepared(
-      `SELECT p.id, p.first_name, p.last_name, t.city || ' ' || t.name as team_name, t.id as team_id,
+    type LeaderRow = { first_name: string; last_name: string; team_name: string; value: number; };
+    const mapLeader = (category: string) => (row: LeaderRow) => ({
+      player_name: `${row.first_name} ${row.last_name}`,
+      team_name: row.team_name,
+      stat_value: row.value,
+      category,
+    });
+
+    // Batting avg leaders (min 100 AB — raised from 50 per §2.15)
+    const battingAvg = (prepared(
+      `SELECT p.first_name, p.last_name, t.city || ' ' || t.name as team_name,
        CAST(ss.hits AS REAL) / NULLIF(ss.at_bats, 0) as value
        FROM season_stats ss
        JOIN players p ON p.id = ss.player_id
        LEFT JOIN teams t ON t.id = ss.team_id
-       WHERE ss.league_id = ? AND ss.season_number = ? AND ss.at_bats >= 50
+       WHERE ss.league_id = ? AND ss.season_number = ? AND ss.at_bats >= 100
        ORDER BY value DESC LIMIT 10`
-    ).all(league.id, season);
+    ).all(league.id, season) as LeaderRow[]).map(mapLeader('AVG'));
 
     // HR leaders
-    const homeRuns = prepared(
-      `SELECT p.id, p.first_name, p.last_name, t.city || ' ' || t.name as team_name, t.id as team_id,
+    const homeRuns = (prepared(
+      `SELECT p.first_name, p.last_name, t.city || ' ' || t.name as team_name,
        ss.home_runs as value
        FROM season_stats ss
        JOIN players p ON p.id = ss.player_id
        LEFT JOIN teams t ON t.id = ss.team_id
        WHERE ss.league_id = ? AND ss.season_number = ?
        ORDER BY ss.home_runs DESC LIMIT 10`
-    ).all(league.id, season);
+    ).all(league.id, season) as LeaderRow[]).map(mapLeader('HR'));
 
     // RBI leaders
-    const rbi = prepared(
-      `SELECT p.id, p.first_name, p.last_name, t.city || ' ' || t.name as team_name, t.id as team_id,
+    const rbi = (prepared(
+      `SELECT p.first_name, p.last_name, t.city || ' ' || t.name as team_name,
        ss.rbi as value
        FROM season_stats ss
        JOIN players p ON p.id = ss.player_id
        LEFT JOIN teams t ON t.id = ss.team_id
        WHERE ss.league_id = ? AND ss.season_number = ?
        ORDER BY ss.rbi DESC LIMIT 10`
-    ).all(league.id, season);
+    ).all(league.id, season) as LeaderRow[]).map(mapLeader('RBI'));
 
-    // ERA leaders (min 20 IP)
-    const era = prepared(
-      `SELECT p.id, p.first_name, p.last_name, t.city || ' ' || t.name as team_name, t.id as team_id,
-       CASE WHEN ss.innings_pitched >= 20 THEN (ss.earned_runs * 9.0) / ss.innings_pitched ELSE 99.0 END as value
+    // ERA leaders (min 30 IP — raised from 20 per §2.15)
+    const era = (prepared(
+      `SELECT p.first_name, p.last_name, t.city || ' ' || t.name as team_name,
+       (ss.earned_runs * 9.0) / ss.innings_pitched as value
        FROM season_stats ss
        JOIN players p ON p.id = ss.player_id
        LEFT JOIN teams t ON t.id = ss.team_id
-       WHERE ss.league_id = ? AND ss.season_number = ? AND ss.innings_pitched >= 20
+       WHERE ss.league_id = ? AND ss.season_number = ? AND ss.innings_pitched >= 30
        ORDER BY value ASC LIMIT 10`
-    ).all(league.id, season);
+    ).all(league.id, season) as LeaderRow[]).map(mapLeader('ERA'));
 
     // Strikeout leaders (pitchers)
-    const strikeouts = prepared(
-      `SELECT p.id, p.first_name, p.last_name, t.city || ' ' || t.name as team_name, t.id as team_id,
+    const strikeouts = (prepared(
+      `SELECT p.first_name, p.last_name, t.city || ' ' || t.name as team_name,
        ss.strikeouts_pitching as value
        FROM season_stats ss
        JOIN players p ON p.id = ss.player_id
        LEFT JOIN teams t ON t.id = ss.team_id
        WHERE ss.league_id = ? AND ss.season_number = ? AND ss.innings_pitched > 0
        ORDER BY ss.strikeouts_pitching DESC LIMIT 10`
-    ).all(league.id, season);
+    ).all(league.id, season) as LeaderRow[]).map(mapLeader('K'));
 
-    // WHIP leaders (min 20 IP)
-    const whip = prepared(
-      `SELECT p.id, p.first_name, p.last_name, t.city || ' ' || t.name as team_name, t.id as team_id,
-       CASE WHEN ss.innings_pitched >= 20 THEN (ss.walks_pitching + ss.hits) / ss.innings_pitched ELSE 99.0 END as value
+    // WHIP leaders (min 30 IP — raised from 20 per §2.15)
+    const whip = (prepared(
+      `SELECT p.first_name, p.last_name, t.city || ' ' || t.name as team_name,
+       (ss.walks_pitching + ss.hits) / ss.innings_pitched as value
        FROM season_stats ss
        JOIN players p ON p.id = ss.player_id
        LEFT JOIN teams t ON t.id = ss.team_id
-       WHERE ss.league_id = ? AND ss.season_number = ? AND ss.innings_pitched >= 20
+       WHERE ss.league_id = ? AND ss.season_number = ? AND ss.innings_pitched >= 30
        ORDER BY value ASC LIMIT 10`
-    ).all(league.id, season);
+    ).all(league.id, season) as LeaderRow[]).map(mapLeader('WHIP'));
 
-    res.json({ battingAvg, homeRuns, rbi, era, strikeouts, whip });
+    res.json({
+      hitting: [...battingAvg, ...homeRuns, ...rbi],
+      pitching: [...era, ...strikeouts, ...whip],
+    });
   } catch (err) { next(err); }
 });
 
@@ -100,12 +112,12 @@ playersRouter.get('/search', async (req: Request, res: Response, next: NextFunct
 
     res.json(players.map(p => ({
       id: p.id,
-      firstName: p.first_name,
-      lastName: p.last_name,
+      first_name: p.first_name,
+      last_name: p.last_name,
       age: p.age,
       position: p.position,
-      overallRating: p.overall_rating,
-      teamName: p.team_name,
+      overall_rating: p.overall_rating,
+      team_name: p.team_name,
     })));
   } catch (err) { next(err); }
 });
@@ -117,7 +129,7 @@ playersRouter.get('/:id', async (req: Request, res: Response, next: NextFunction
 
     const league = getActiveLeague();
     const player = prepared('SELECT * FROM players WHERE id = ?').get(idResult.data) as PlayerRow | undefined;
-    if (!player) { res.status(404).json({ error: 'not_found' }); return; }
+    if (!player) { res.status(404).json({ error: 'Player not found' }); return; } // §2.16.2
 
     const team = player.team_id
       ? prepared('SELECT city, name FROM teams WHERE id = ?').get(player.team_id) as { city: string; name: string } | undefined
@@ -130,36 +142,36 @@ playersRouter.get('/:id', async (req: Request, res: Response, next: NextFunction
 
     res.json({
       id: player.id,
-      firstName: player.first_name,
-      lastName: player.last_name,
+      first_name: player.first_name,
+      last_name: player.last_name,
       age: player.age,
       position: player.position,
-      overallRating: player.overall_rating,
+      overall_rating: player.overall_rating,
       potential: player.potential,
-      potentialRevealed: player.potential_revealed === 1,
-      teamId: player.team_id,
-      teamName: team ? `${team.city} ${team.name}` : null,
-      isOnMlbRoster: player.is_on_mlb_roster === 1,
-      minorLevel: player.minor_level,
+      potential_revealed: player.potential_revealed === 1,
+      team_id: player.team_id,
+      team_name: team ? `${team.city} ${team.name}` : null,
+      is_on_mlb_roster: player.is_on_mlb_roster === 1,
+      minor_level: player.minor_level,
       contact: player.contact,
       power: player.power,
       speed: player.speed,
       fielding: player.fielding,
       arm: player.arm,
-      pitchingVelocity: player.pitching_velocity,
-      pitchingControl: player.pitching_control,
-      pitchingStamina: player.pitching_stamina,
-      annualSalary: player.annual_salary,
-      contractYearsRemaining: player.contract_years_remaining,
+      pitching_velocity: player.pitching_velocity,
+      pitching_control: player.pitching_control,
+      pitching_stamina: player.pitching_stamina,
+      annual_salary: player.annual_salary,
+      contract_years_remaining: player.contract_years_remaining,
       origin: player.origin,
-      birthplaceCountry: player.birthplace_country,
-      careerHits: player.career_hits,
-      careerHR: player.career_hr,
-      careerRBI: player.career_rbi,
-      careerIP: player.career_ip,
-      careerK: player.career_k,
-      careerWins: player.career_wins,
-      seasonStats,
+      birthplace_country: player.birthplace_country,
+      career_hits: player.career_hits,
+      career_hr: player.career_hr,
+      career_rbi: player.career_rbi,
+      career_ip: player.career_ip,
+      career_k: player.career_k,
+      career_wins: player.career_wins,
+      season_stats: seasonStats,
     });
   } catch (err) { next(err); }
 });

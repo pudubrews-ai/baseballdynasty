@@ -51,8 +51,15 @@ export function generateSchedule(leagueId: number, seed: number): ScheduleGame[]
   // To ensure exactly 25H/25A per team (7H/7A inter-conference per team):
   // - Twice-played pairs: 1 home + 1 away → 4H+4A per team
   // - Single-played pairs: need exactly 3H+3A per team
-  // Uses quota-based greedy assignment for single-game pairs (proven to produce exact balance)
-  function generateInterConferenceGames(americanTeams: TeamRow[], nationalTeams: TeamRow[], allGames: ScheduleGame[]): void {
+  // Uses quota-based greedy assignment with retry-on-imbalance (§4.3)
+  function tryAssignInterConference(
+    americanTeams: TeamRow[],
+    nationalTeams: TeamRow[],
+    allGames: ScheduleGame[],
+    attempt: number
+  ): boolean {
+    const interGamesStart = allGames.length;
+
     // Collect all single-game pairs first
     const singlePairs: Array<[TeamRow, TeamRow]> = [];
 
@@ -73,11 +80,16 @@ export function generateSchedule(leagueId: number, seed: number): ScheduleGame[]
       }
     }
 
-    // Sort single-game pairs deterministically
-    singlePairs.sort((a, b) => (a[0]?.id ?? 0) - (b[0]?.id ?? 0) || (a[1]?.id ?? 0) - (b[1]?.id ?? 0));
+    // Sort single-game pairs — use sub-stream seed for retry attempts
+    if (attempt === 0) {
+      singlePairs.sort((a, b) => (a[0]?.id ?? 0) - (b[0]?.id ?? 0) || (a[1]?.id ?? 0) - (b[1]?.id ?? 0));
+    } else {
+      // Retry: shuffle pair iteration order with attempt-specific seed
+      const retryRng = seedFor(`schedule_attempt_${attempt}`, seed);
+      shuffle(retryRng, singlePairs);
+    }
 
     // Quota-based greedy: each team needs exactly 3 home games from singles
-    // (after 4H from doubles, total inter-conference home = 4+3 = 7 per team)
     const homeQuota = new Map<number, number>();
     for (const team of [...americanTeams, ...nationalTeams]) {
       homeQuota.set(team.id, 3);
@@ -91,21 +103,51 @@ export function generateSchedule(leagueId: number, seed: number): ScheduleGame[]
       let awayTeam: TeamRow;
 
       if (aQuota > 0 && nQuota > 0) {
-        // Both can be home — deterministic tiebreak by (aId + nId * 7) % 2
-        const aIsHome = (aTeam.id + nTeam.id * 7) % 2 === 0;
+        const aIsHome = (aTeam.id + nTeam.id * 7 + attempt) % 2 === 0;
         homeTeam = aIsHome ? aTeam : nTeam;
         awayTeam = aIsHome ? nTeam : aTeam;
       } else if (aQuota > 0) {
         homeTeam = aTeam;
         awayTeam = nTeam;
-      } else {
+      } else if (nQuota > 0) {
         homeTeam = nTeam;
         awayTeam = aTeam;
+      } else {
+        // Both exhausted — assign American home as fallback (may break balance, caught by validator)
+        homeTeam = aTeam;
+        awayTeam = nTeam;
       }
 
       allGames.push({ gameNumber: 0, dateMs: 0, homeTeamId: homeTeam.id, awayTeamId: awayTeam.id });
       homeQuota.set(homeTeam.id, (homeQuota.get(homeTeam.id) ?? 0) - 1);
     }
+
+    // Validate balance for inter-conference games
+    const interGames = allGames.slice(interGamesStart);
+    const homeCounts = new Map<number, number>();
+    const awayCounts = new Map<number, number>();
+    for (const g of interGames) {
+      homeCounts.set(g.homeTeamId, (homeCounts.get(g.homeTeamId) ?? 0) + 1);
+      awayCounts.set(g.awayTeamId, (awayCounts.get(g.awayTeamId) ?? 0) + 1);
+    }
+
+    for (const team of [...americanTeams, ...nationalTeams]) {
+      const h = homeCounts.get(team.id) ?? 0;
+      const a = awayCounts.get(team.id) ?? 0;
+      if (h + a !== 14 || h !== 7 || a !== 7) {
+        // Remove inter-conference games added in this attempt
+        allGames.splice(interGamesStart);
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function generateInterConferenceGames(americanTeams: TeamRow[], nationalTeams: TeamRow[], allGames: ScheduleGame[]): void {
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (tryAssignInterConference(americanTeams, nationalTeams, allGames, attempt)) return;
+    }
+    throw new Error('Inter-conference schedule could not balance 25H/25A within 5 attempts');
   }
 
   generateIntraConferenceGames(americanConf, games);
@@ -185,16 +227,24 @@ export function isSeasonComplete(leagueId: number): boolean {
 
 // Check if trade deadline should fire (median team at game 35)
 export function shouldFireTradeDeadline(leagueId: number, seasonNumber: number): boolean {
-  // Count how many teams have played >= 35 games this season
+  // Count total games per team (home + away), then count teams at >= 35
   const teamsAt35 = prepared(
-    `SELECT COUNT(DISTINCT CASE WHEN home_team_id IS NOT NULL THEN home_team_id END) as cnt
-     FROM (
-       SELECT home_team_id, COUNT(*) as gc FROM game_log
-       WHERE league_id = ? AND season_number = ? AND is_complete = 1
-       GROUP BY home_team_id
+    `SELECT COUNT(*) as cnt FROM (
+       SELECT team_id, SUM(cnt) as gc FROM (
+         SELECT home_team_id as team_id, COUNT(*) as cnt
+         FROM game_log
+         WHERE league_id = ? AND season_number = ? AND is_complete = 1
+         GROUP BY home_team_id
+         UNION ALL
+         SELECT away_team_id as team_id, COUNT(*) as cnt
+         FROM game_log
+         WHERE league_id = ? AND season_number = ? AND is_complete = 1
+         GROUP BY away_team_id
+       )
+       GROUP BY team_id
        HAVING gc >= 35
      )`
-  ).get(leagueId, seasonNumber) as { cnt: number };
+  ).get(leagueId, seasonNumber, leagueId, seasonNumber) as { cnt: number };
 
   // Also check if trade deadline already fired this season
   const alreadyFired = prepared(

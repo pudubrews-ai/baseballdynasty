@@ -12,6 +12,7 @@ import { simulateGame } from './game.js';
 import { runPlayoffs } from './playoffs.js';
 import { runOffseason } from './offseason.js';
 import { getLlmStatus } from '../services/llm.js';
+import { scrubError } from '../util/scrub.js';
 import type { LeagueStateSnapshot, SimSpeed } from '../../shared/types.js';
 import type { NewLeagueBodyType } from '../../shared/schemas.js';
 
@@ -53,9 +54,22 @@ async function refreshCache(leagueId: number): Promise<LeagueStateSnapshot> {
   const league = prepared('SELECT * FROM leagues WHERE id = ?').get(leagueId) as LeagueRow | undefined;
   if (!league) throw new Error('League not found');
 
+  // §2.14: Map internal DB phases to API-exposed phase values
+  function mapPhase(dbPhase: string): LeagueStateSnapshot['phase'] {
+    switch (dbPhase) {
+      case 'expansion_draft':
+      case 'annual_draft':
+        return 'draft';
+      case 'regular_season': return 'regular_season';
+      case 'playoffs': return 'playoffs';
+      case 'offseason': return 'offseason';
+      default: return dbPhase as LeagueStateSnapshot['phase'];
+    }
+  }
+
   const snapshot: LeagueStateSnapshot = {
     leagueId: league.id,
-    phase: league.phase as LeagueStateSnapshot['phase'],
+    phase: mapPhase(league.phase),
     seasonNumber: league.season_number,
     currentGameDate: league.current_game_date,
     currentGameNumber: league.current_game_number,
@@ -161,7 +175,6 @@ export async function setSimSpeed(speed: SimSpeed): Promise<void> {
   const league = getActiveLeague();
   if (!league) throw new Error('NO_ACTIVE_LEAGUE');
 
-  const prevSpeed = currentSpeed;
   currentSpeed = speed;
   prepared('UPDATE leagues SET sim_speed = ? WHERE id = ?').run(speed, league.id);
   await refreshCache(league.id);
@@ -169,8 +182,9 @@ export async function setSimSpeed(speed: SimSpeed): Promise<void> {
   if (speed === 'paused') {
     // D29: Pause is honored after in-flight LLM completes — handled by the tick loop
     stopTick();
-  } else if (prevSpeed === 'paused') {
-    // Start ticking
+  } else if (!simRunning) {
+    // Restart tick loop whenever speed is non-paused and engine is not currently running (§2.10)
+    // This handles the case where draft completed (simRunning=false) and user now sets a speed
     startTick(league);
   }
 }
@@ -237,7 +251,7 @@ async function runTickLoop(league: LeagueRow): Promise<void> {
       scheduleTick(currentLeague);
     }
   } catch (err) {
-    console.error('[engine] Tick error:', err);
+    console.error('[engine] Tick error:', scrubError(err).message);
     simRunning = false;
   }
 }
@@ -296,7 +310,7 @@ async function runDraftTick(league: LeagueRow, isTurbo: boolean): Promise<void> 
     if (err instanceof Error && err.message === 'DRAFT_PAUSED') {
       console.log('[engine] Draft paused');
     } else {
-      console.error('[engine] Draft tick error:', err);
+      console.error('[engine] Draft tick error:', scrubError(err).message);
     }
   } finally {
     draftRunning = false;
@@ -347,7 +361,7 @@ async function runPlayoffTick(league: LeagueRow): Promise<void> {
   try {
     await runPlayoffs(league.id);
   } catch (err) {
-    console.error('[engine] Playoff error:', err);
+    console.error('[engine] Playoff error:', scrubError(err).message);
   }
 }
 
@@ -355,7 +369,7 @@ async function runOffseasonTick(league: LeagueRow, isTurbo: boolean): Promise<vo
   try {
     await runOffseason(league, isTurbo);
   } catch (err) {
-    console.error('[engine] Offseason error:', err);
+    console.error('[engine] Offseason error:', scrubError(err).message);
   }
 }
 
