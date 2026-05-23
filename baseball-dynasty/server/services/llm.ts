@@ -150,7 +150,10 @@ export function sanitizeNarrative(s: string): string {
   do {
     prev = cur;
     cur = cur
-      .replace(/<[^>]*>?/g, '')          // tolerate missing closing >
+      .replace(/<[^>]*>?/g, '')          // strip full tags first
+      .replace(/</g, '')                 // strip any remaining bare <
+      .replace(/>/g, '')                 // strip any remaining bare >
+      .replace(/script/gi, '')           // strip "script" keyword (defense-in-depth)
       .replace(/javascript:/gi, '')
       .replace(/data:/gi, '')
       .replace(/vbscript:/gi, '');

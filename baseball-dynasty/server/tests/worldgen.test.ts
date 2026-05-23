@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import { CITIES } from '../data/cities.js';
+import { seedFor, shuffle } from '../sim/prng.js';
 
 // D23: Worldgen tests — tier counts and distribution validation
 // These test the pure functions and constants
@@ -77,6 +79,78 @@ describe('Position allocation (§8)', () => {
       .reduce((a, b) => a + b, 0);
     const pct = pitcherCount / 800;
     expect(pct).toBeCloseTo(0.15, 1);
+  });
+});
+
+// §6.8: Market-size quota test — verify the selection algorithm produces exactly 2/4/8/6
+// (Tests the logic inline since selectCitiesWithMarketQuota is not exported)
+function selectCitiesWithMarketQuota(rng: () => number, allCities: typeof CITIES) {
+  const quotas: Record<string, number> = { mega: 2, large: 4, medium: 8, small: 6 };
+  const remaining: Record<string, number> = { ...quotas };
+  const shuffled = [...allCities];
+  shuffle(rng, shuffled);
+  const usedRegions = new Set<string>();
+  const selected: typeof CITIES = [];
+  for (const city of shuffled) {
+    if (selected.length >= 20) break;
+    if ((remaining[city.market_size] ?? 0) <= 0) continue;
+    if (usedRegions.has(city.region)) continue;
+    selected.push(city);
+    usedRegions.add(city.region);
+    remaining[city.market_size]!--;
+  }
+  if (selected.length < 20) {
+    for (const city of shuffled) {
+      if (selected.length >= 20) break;
+      if (selected.includes(city)) continue;
+      if ((remaining[city.market_size] ?? 0) <= 0) continue;
+      selected.push(city);
+      remaining[city.market_size]!--;
+    }
+  }
+  return selected;
+}
+
+describe('Market-size city quota (§2.11 / §6.8)', () => {
+  it('city pool has enough cities for each market size', () => {
+    const megaCount = CITIES.filter(c => c.market_size === 'mega').length;
+    const largeCount = CITIES.filter(c => c.market_size === 'large').length;
+    const mediumCount = CITIES.filter(c => c.market_size === 'medium').length;
+    const smallCount = CITIES.filter(c => c.market_size === 'small').length;
+    expect(megaCount).toBeGreaterThanOrEqual(2);
+    expect(largeCount).toBeGreaterThanOrEqual(4);
+    expect(mediumCount).toBeGreaterThanOrEqual(8);
+    expect(smallCount).toBeGreaterThanOrEqual(6);
+  });
+
+  it('selects exactly 2 mega, 4 large, 8 medium, 6 small for seed=42', () => {
+    const rng = seedFor('worldgen', 42);
+    const selected = selectCitiesWithMarketQuota(rng, CITIES);
+    expect(selected.length).toBe(20);
+    const counts: Record<string, number> = { mega: 0, large: 0, medium: 0, small: 0 };
+    for (const c of selected) counts[c.market_size]!++;
+    expect(counts['mega']).toBe(2);
+    expect(counts['large']).toBe(4);
+    expect(counts['medium']).toBe(8);
+    expect(counts['small']).toBe(6);
+  });
+
+  it('selects exactly 2 mega, 4 large, 8 medium, 6 small for seed=99999', () => {
+    const rng = seedFor('worldgen', 99999);
+    const selected = selectCitiesWithMarketQuota(rng, CITIES);
+    expect(selected.length).toBe(20);
+    const counts: Record<string, number> = { mega: 0, large: 0, medium: 0, small: 0 };
+    for (const c of selected) counts[c.market_size]!++;
+    expect(counts['mega']).toBe(2);
+    expect(counts['large']).toBe(4);
+    expect(counts['medium']).toBe(8);
+    expect(counts['small']).toBe(6);
+  });
+
+  it('Ironbrook is in the city pool as a small market city', () => {
+    const ironbrook = CITIES.find(c => c.name === 'Ironbrook');
+    expect(ironbrook).toBeDefined();
+    expect(ironbrook?.market_size).toBe('small');
   });
 });
 
