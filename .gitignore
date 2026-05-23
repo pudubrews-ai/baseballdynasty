@@ -1,0 +1,15 @@
+# Never commit
+.env
+.env.local
+.env.*.local
+
+# Database
+data/
+*.db
+*.db-shm
+*.db-wal
+
+# Build output
+dist/
+node_modules/
+.DS_Store

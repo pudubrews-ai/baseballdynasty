@@ -1,0 +1,394 @@
+// Expansion draft and annual draft logic
+// Expansion draft: snake order, 30 rounds, 20 teams = 600 total picks
+// Annual draft: straight reverse-standings order
+
+import { getDb, prepared, type PlayerRow, type LeagueRow, type TeamRow } from '../db.js';
+import { seedFor, randInt, shuffle } from './prng.js';
+import { callDraftPick } from '../services/llm.js';
+
+export interface DraftPlayer {
+  id: number;
+  firstName: string;
+  lastName: string;
+  age: number;
+  position: string;
+  overallRating: number;
+  potential: string;
+  positionAdjustedValue: number;
+  keyStrengths: string;
+}
+
+// §5.7: Smooth SP scarcity bonus (replaces the cliff at overall=70)
+// sp_bonus = max(0, (overall - 60) * 0.6) → 0 at <60, +6 at 70, +12 at 80, +18 at 90
+// Note: spec had a cliff at overall 70+, this is the corrected smooth version per §5.7
+function spSmoothBonus(overall: number): number {
+  return Math.max(0, (overall - 60) * 0.6);
+}
+
+export function positionAdjustedValue(player: PlayerRow): number {
+  let scarcityBonus = 0;
+  switch (player.position) {
+    case 'C':  scarcityBonus = 5; break;
+    case 'SS': scarcityBonus = 4; break;
+    case 'CF': scarcityBonus = 3; break;
+    case 'SP': scarcityBonus = spSmoothBonus(player.overall_rating); break; // smooth per §5.7
+    case 'CL': scarcityBonus = 4; break;
+    default:   scarcityBonus = 0;
+  }
+
+  let ageBonus = 0;
+  if (player.age <= 24) ageBonus = 3;
+  else if (player.age <= 28) ageBonus = 1;
+  else if (player.age <= 32) ageBonus = 0;
+  else ageBonus = -2;
+
+  return player.overall_rating + scarcityBonus + ageBonus;
+}
+
+function getKeyStrengths(player: PlayerRow): string {
+  const isPitcher = ['SP', 'RP', 'CL'].includes(player.position);
+  const strengths: string[] = [];
+  if (isPitcher) {
+    if (player.pitching_velocity >= 70) strengths.push('velocity');
+    if (player.pitching_control >= 70) strengths.push('control');
+    if (player.pitching_stamina >= 70) strengths.push('stamina');
+  } else {
+    if (player.contact >= 70) strengths.push('contact');
+    if (player.power >= 70) strengths.push('power');
+    if (player.speed >= 70) strengths.push('speed');
+    if (player.fielding >= 70) strengths.push('defense');
+  }
+  return strengths.slice(0, 3).join(', ') || 'versatile';
+}
+
+// Get the team's roster needs by position
+function getRosterNeeds(teamId: number): Record<string, number> {
+  const positions = ['C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'DH', 'SP', 'RP', 'CL'];
+  const counts = prepared(
+    'SELECT position, COUNT(*) as cnt FROM players WHERE team_id = ? AND is_drafted = 1 GROUP BY position'
+  ).all(teamId) as Array<{ position: string; cnt: number }>;
+  const posMap = new Map<string, number>();
+  for (const row of counts) posMap.set(row.position, row.cnt);
+  const needs: Record<string, number> = {};
+  for (const pos of positions) {
+    needs[pos] = posMap.get(pos) ?? 0;
+  }
+  return needs;
+}
+
+// Find the position with the greatest need (fewest players, with weighted priority)
+function getBiggestNeed(needs: Record<string, number>): string {
+  const priority = ['C', 'SS', 'CF', 'SP', 'CL', '1B', '2B', '3B', 'LF', 'RF', 'RP', 'DH'];
+  let best = 'SP';
+  let bestCount = Infinity;
+  for (const pos of priority) {
+    const cnt = needs[pos] ?? 0;
+    if (cnt < bestCount) {
+      bestCount = cnt;
+      best = pos;
+    }
+  }
+  return best;
+}
+
+// Select top N available players by PAV
+function selectTopN(
+  league_id: number,
+  round: number,
+  n: number = 10
+): PlayerRow[] {
+  // C4: Round gating
+  const minOverall = round <= 15 ? 50 : 30;
+  const maxOverall = round <= 15 ? 99 : 49;
+
+  const players = prepared(
+    'SELECT * FROM players WHERE league_id = ? AND is_drafted = 0 AND overall_rating >= ? AND overall_rating <= ? ORDER BY overall_rating DESC LIMIT 50'
+  ).all(league_id, minOverall, maxOverall) as PlayerRow[];
+
+  // Sort by PAV
+  players.sort((a, b) => positionAdjustedValue(b) - positionAdjustedValue(a));
+  return players.slice(0, n);
+}
+
+// Procedural fallback: best available by position need
+export function pickProcedural(teamId: number, leagueId: number, round: number): PlayerRow | null {
+  const needs = getRosterNeeds(teamId);
+  const neededPos = getBiggestNeed(needs);
+
+  const minOverall = round <= 15 ? 50 : 30;
+  const maxOverall = round <= 15 ? 99 : 49;
+
+  // Try to fill biggest need first
+  const byNeed = prepared(
+    'SELECT * FROM players WHERE league_id = ? AND is_drafted = 0 AND position = ? AND overall_rating >= ? AND overall_rating <= ? ORDER BY overall_rating DESC LIMIT 1'
+  ).get(leagueId, neededPos, minOverall, maxOverall) as PlayerRow | undefined;
+
+  if (byNeed) return byNeed;
+
+  // Fall back to best available overall
+  return prepared(
+    'SELECT * FROM players WHERE league_id = ? AND is_drafted = 0 AND overall_rating >= ? AND overall_rating <= ? ORDER BY overall_rating DESC LIMIT 1'
+  ).get(leagueId, minOverall, maxOverall) as PlayerRow | null;
+}
+
+export async function runDraftPick(
+  league: LeagueRow,
+  team: TeamRow,
+  round: number,
+  pickNumber: number,
+  isExpansion: boolean,
+  isTurbo: boolean
+): Promise<number | null> {
+  const leagueId = league.id;
+  const topPlayers = selectTopN(leagueId, round, 10);
+
+  if (topPlayers.length === 0) {
+    // Draft pool exhausted — generate a replacement-level player
+    return await handleExhaustedPool(leagueId, team.id, round, pickNumber, isExpansion);
+  }
+
+  let selectedPlayer: PlayerRow | null = null;
+  let reasoning: string | null = null;
+
+  if (!isTurbo) {
+    // Try LLM
+    const needsJson = JSON.stringify(getRosterNeeds(team.id));
+    const playersJson = JSON.stringify(topPlayers.map((p, idx) => ({
+      index: idx,
+      name: `${p.first_name} ${p.last_name}`,
+      age: p.age,
+      position: p.position,
+      overall_rating: p.overall_rating,
+      potential: p.potential,
+      key_strengths: getKeyStrengths(p),
+    })));
+
+    const llmResult = await callDraftPick(
+      `${team.city} ${team.name}`,
+      team.gm_philosophy,
+      team.gm_risk_tolerance,
+      team.gm_focus,
+      needsJson,
+      playersJson
+    );
+
+    if (llmResult.ok) {
+      const idx = llmResult.pickIndex;
+      const candidate = topPlayers[idx];
+      // Verify not already drafted (top-N was pre-filtered, but double-check)
+      if (candidate && candidate.is_drafted === 0) {
+        selectedPlayer = candidate;
+        reasoning = llmResult.reasoning;
+      } else {
+        console.warn(`[draft] LLM returned already-drafted player at index ${idx}, using procedural fallback`);
+      }
+    }
+  }
+
+  if (!selectedPlayer) {
+    selectedPlayer = pickProcedural(team.id, leagueId, round);
+  }
+
+  if (!selectedPlayer) return null;
+
+  // Record the pick
+  const db = getDb();
+  const insertPick = db.transaction(() => {
+    db.prepare('UPDATE players SET is_drafted = 1, team_id = ? WHERE id = ?').run(team.id, selectedPlayer!.id);
+
+    const pickResult = db.prepare(
+      'INSERT INTO draft_picks (league_id, season_number, round, pick_number, team_id, player_id, reasoning, is_expansion_draft, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(
+      leagueId,
+      league.season_number,
+      round,
+      pickNumber,
+      team.id,
+      selectedPlayer!.id,
+      reasoning,
+      isExpansion ? 1 : 0,
+      Date.now()
+    );
+
+    const pickId = pickResult.lastInsertRowid as number;
+
+    // Update last_pick_id on league
+    db.prepare('UPDATE leagues SET last_pick_id = ? WHERE id = ?').run(pickId, leagueId);
+
+    return pickId;
+  });
+
+  return insertPick() as number;
+}
+
+async function handleExhaustedPool(
+  leagueId: number,
+  teamId: number,
+  round: number,
+  pickNumber: number,
+  isExpansion: boolean
+): Promise<number | null> {
+  console.warn('[draft] Draft pool exhausted, generating replacement-level player');
+  const rng = seedFor('draft_fill', Date.now());
+  const overall = randInt(rng, 30, 44);
+
+  const db = getDb();
+  const insertResult = db.prepare(
+    `INSERT INTO players (league_id, team_id, first_name, last_name, age, position, overall_rating, potential, contact, power, speed, fielding, arm, pitching_velocity, pitching_control, pitching_stamina, is_on_mlb_roster, annual_salary, contract_years_remaining, service_time, injury_prone, coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country, is_drafted) VALUES (?, ?, 'Replacement', 'Player', 25, 'LF', ?, 'D', ?, ?, ?, ?, ?, ?, ?, ?, 0, 500000, 1, 0, 5, 5, 5, 5, 'us', '', 'USA', 1)`
+  ).run(leagueId, teamId, overall, overall, overall, overall, overall, overall, overall, overall, overall);
+
+  const playerId = insertResult.lastInsertRowid as number;
+  const league = db.prepare('SELECT season_number FROM leagues WHERE id = ?').get(leagueId) as { season_number: number };
+
+  const pickResult = db.prepare(
+    'INSERT INTO draft_picks (league_id, season_number, round, pick_number, team_id, player_id, reasoning, is_expansion_draft, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(leagueId, league.season_number, round, pickNumber, teamId, playerId, 'Pool exhausted — generated replacement player', isExpansion ? 1 : 0, Date.now());
+
+  db.prepare('UPDATE leagues SET last_pick_id = ? WHERE id = ?').run(pickResult.lastInsertRowid, leagueId);
+  return pickResult.lastInsertRowid as number;
+}
+
+// Generate expansion draft order (snake)
+export function generateExpansionDraftOrder(leagueId: number, seed: number): number[] {
+  const teams = prepared('SELECT id FROM teams WHERE league_id = ? ORDER BY id').all(leagueId) as Array<{ id: number }>;
+  const teamIds = teams.map(t => t.id);
+
+  // Random shuffle for expansion draft (coin flip simulation)
+  const rng = seedFor('draft_order', seed);
+  shuffle(rng, teamIds);
+
+  return teamIds;
+}
+
+// Generate annual draft order (reverse standings)
+export function generateAnnualDraftOrder(leagueId: number): number[] {
+  const teams = prepared(
+    'SELECT id, wins, losses FROM teams WHERE league_id = ? ORDER BY wins ASC, losses DESC'
+  ).all(leagueId) as Array<{ id: number; wins: number; losses: number }>;
+
+  return teams.map(t => t.id);
+}
+
+// After expansion draft: assign top 25 to MLB, picks 26-30 to minors
+export function assignRosterLevels(leagueId: number): void {
+  const teams = prepared('SELECT id FROM teams WHERE league_id = ?').all(leagueId) as Array<{ id: number }>;
+
+  for (const team of teams) {
+    // Get all drafted players for this team, ordered by PAV desc
+    const drafted = prepared(
+      'SELECT p.* FROM players p WHERE p.team_id = ? AND p.is_drafted = 1 ORDER BY p.overall_rating DESC'
+    ).all(team.id) as PlayerRow[];
+
+    for (let i = 0; i < drafted.length; i++) {
+      const player = drafted[i]!;
+      if (i < 25) {
+        // MLB roster
+        prepared('UPDATE players SET is_on_mlb_roster = 1, minor_level = NULL WHERE id = ?').run(player.id);
+      } else {
+        // Minors — tier by rating
+        let level: string;
+        if (player.overall_rating >= 60) level = 'AAA';
+        else if (player.overall_rating >= 50) level = 'AA';
+        else if (player.overall_rating >= 40) level = 'A';
+        else level = 'Rookie';
+
+        prepared('UPDATE players SET is_on_mlb_roster = 0, minor_level = ? WHERE id = ?').run(level, player.id);
+      }
+    }
+  }
+}
+
+// Run the full expansion draft
+export async function runExpansionDraft(
+  league: LeagueRow,
+  isTurbo: boolean,
+  onPickComplete?: (pickId: number, round: number, pick: number) => void
+): Promise<void> {
+  const leagueId = league.id;
+  const teamOrder = generateExpansionDraftOrder(leagueId, league.worldgen_seed);
+  const totalRounds = 30;
+
+  for (let round = 1; round <= totalRounds; round++) {
+    // Snake order: odd rounds go forward, even rounds go backward
+    const order = round % 2 === 1 ? [...teamOrder] : [...teamOrder].reverse();
+
+    for (let pickIdx = 0; pickIdx < order.length; pickIdx++) {
+      const teamId = order[pickIdx]!;
+      const team = prepared('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow;
+      const pickNumber = (round - 1) * 20 + pickIdx + 1;
+
+      const currentLeague = prepared('SELECT * FROM leagues WHERE id = ?').get(leagueId) as LeagueRow;
+
+      const pickId = await runDraftPick(currentLeague, team, round, pickNumber, true, isTurbo);
+
+      if (pickId && onPickComplete) {
+        onPickComplete(pickId, round, pickNumber);
+      }
+    }
+  }
+
+  // After draft: assign roster levels
+  assignRosterLevels(leagueId);
+}
+
+// Run the annual draft (reverse standings, straight order)
+export async function runAnnualDraft(
+  league: LeagueRow,
+  isTurbo: boolean,
+  onPickComplete?: (pickId: number, round: number, pick: number) => void
+): Promise<void> {
+  const leagueId = league.id;
+  const teamOrder = generateAnnualDraftOrder(leagueId);
+  const totalRounds = 30;
+
+  // Generate new players for the annual draft pool
+  // (In v0.1.0, we generate prospects for the annual draft)
+  generateDraftClass(leagueId, league.worldgen_seed ^ league.season_number);
+
+  for (let round = 1; round <= totalRounds; round++) {
+    // Straight order (not snake) per C5
+    for (let pickIdx = 0; pickIdx < teamOrder.length; pickIdx++) {
+      const teamId = teamOrder[pickIdx]!;
+      const team = prepared('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow;
+      const pickNumber = (round - 1) * 20 + pickIdx + 1;
+
+      const currentLeague = prepared('SELECT * FROM leagues WHERE id = ?').get(leagueId) as LeagueRow;
+      const pickId = await runDraftPick(currentLeague, team, round, pickNumber, false, isTurbo);
+
+      if (pickId && onPickComplete) {
+        onPickComplete(pickId, round, pickNumber);
+      }
+    }
+  }
+
+  assignRosterLevels(leagueId);
+}
+
+// Generate a draft class for the annual draft
+function generateDraftClass(leagueId: number, seed: number): void {
+  const rng = seedFor('draft_class', seed);
+  const db = getDb();
+
+  // Generate 200 new prospects
+  for (let i = 0; i < 200; i++) {
+    const overall = randInt(rng, 30, 65);
+    const age = randInt(rng, 18, 22);
+    const positions = ['SP', 'RP', 'C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF'];
+    const position = positions[Math.floor(rng() * positions.length)] ?? 'LF';
+    const sub = (base: number) => Math.max(1, Math.min(99, randInt(rng, base - 10, base + 10)));
+
+    db.prepare(
+      `INSERT INTO players (league_id, team_id, first_name, last_name, age, position, overall_rating, potential, contact, power, speed, fielding, arm, pitching_velocity, pitching_control, pitching_stamina, is_on_mlb_roster, annual_salary, contract_years_remaining, service_time, injury_prone, coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country, is_drafted) VALUES (?, NULL, 'Prospect', ?, ?, ?, ?, 'C', ?, ?, ?, ?, ?, ?, ?, ?, 0, 575000, 6, 0, ?, ?, ?, ?, 'us', '', 'USA', 0)`
+    ).run(
+      leagueId,
+      `Draft${i + 1}`,
+      age,
+      position,
+      overall,
+      sub(overall), sub(overall), sub(overall), sub(overall), sub(overall),
+      sub(overall), sub(overall), sub(overall),
+      randInt(rng, 1, 8),
+      randInt(rng, 1, 10), randInt(rng, 1, 10), randInt(rng, 1, 10)
+    );
+  }
+}
