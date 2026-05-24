@@ -7,16 +7,66 @@ export const teamsRouter = Router();
 const teamIdSchema = z.coerce.number().int().positive();
 
 // Helper to build the minors nested object (§3.3)
+// v0.2.0: includes live stats from season_stats for minor leaguers
 function buildMinorsObject(teamId: number): Record<string, unknown[]> {
-  const minorsRaw = prepared(
-    'SELECT id, first_name, last_name, age, position, overall_rating, potential, minor_level FROM players WHERE team_id = ? AND is_on_mlb_roster = 0 AND is_drafted = 1'
-  ).all(teamId) as Array<{ id: number; first_name: string; last_name: string; age: number; position: string; overall_rating: number; potential: string; minor_level: string }>;
+  const league = getActiveLeague();
 
-  const minors: Record<string, typeof minorsRaw> = { AAA: [], AA: [], A: [], Rookie: [] };
+  const minorsRaw = prepared(
+    `SELECT p.id, p.first_name, p.last_name, p.age, p.position, p.overall_rating, p.potential,
+            p.minor_level, p.prospect_visible, p.service_time_days
+     FROM players p
+     WHERE p.team_id = ? AND p.is_on_mlb_roster = 0 AND p.is_drafted = 1`
+  ).all(teamId) as Array<{
+    id: number; first_name: string; last_name: string; age: number; position: string;
+    overall_rating: number; potential: string; minor_level: string;
+    prospect_visible: number; service_time_days: number;
+  }>;
+
+  // Fetch live stats if league is active
+  const statsMap = new Map<number, Record<string, unknown>>();
+  if (league) {
+    const statsRaw = prepared(
+      `SELECT ss.player_id,
+              ss.games_played, ss.at_bats, ss.hits, ss.home_runs, ss.rbi,
+              ss.innings_pitched, ss.earned_runs, ss.strikeouts_pitching
+       FROM season_stats ss
+       WHERE ss.league_id = ? AND ss.season_number = ? AND ss.player_id IN
+         (SELECT id FROM players WHERE team_id = ? AND is_on_mlb_roster = 0 AND is_drafted = 1)`
+    ).all(league.id, league.season_number, teamId) as Array<{
+      player_id: number; games_played: number; at_bats: number; hits: number;
+      home_runs: number; rbi: number; innings_pitched: number; earned_runs: number;
+      strikeouts_pitching: number;
+    }>;
+
+    for (const s of statsRaw) {
+      const isPitcher = s.innings_pitched > 0;
+      if (isPitcher) {
+        statsMap.set(s.player_id, {
+          games: s.games_played,
+          ip: s.innings_pitched,
+          era: s.innings_pitched > 0 ? Math.round((s.earned_runs * 9.0 / s.innings_pitched) * 100) / 100 : null,
+          k: s.strikeouts_pitching,
+        });
+      } else {
+        statsMap.set(s.player_id, {
+          games: s.games_played,
+          ab: s.at_bats,
+          avg: s.at_bats > 0 ? Math.round(s.hits / s.at_bats * 1000) / 1000 : null,
+          hr: s.home_runs,
+          rbi: s.rbi,
+        });
+      }
+    }
+  }
+
+  const minors: Record<string, unknown[]> = { AAA: [], AA: [], A: [], Rookie: [] };
   for (const p of minorsRaw) {
     const level = p.minor_level ?? 'Rookie';
     if (minors[level]) {
-      minors[level]!.push(p);
+      minors[level]!.push({
+        ...p,
+        stats: statsMap.get(p.id) ?? null,
+      });
     }
   }
   return minors;

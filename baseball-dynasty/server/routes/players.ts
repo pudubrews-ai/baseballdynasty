@@ -122,6 +122,34 @@ playersRouter.get('/search', async (req: Request, res: Response, next: NextFunct
   } catch (err) { next(err); }
 });
 
+// GET /api/players/:id/transactions — full transaction history for a player
+playersRouter.get('/:id/transactions', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const idResult = playerIdSchema.safeParse(req.params['id']);
+    if (!idResult.success) { res.status(400).json({ error: 'invalid_id' }); return; }
+
+    const league = getActiveLeague();
+    if (!league) { res.json([]); return; }
+
+    const transactions = prepared(
+      `SELECT t.id, t.league_id, t.season_number, t.transaction_type, t.team_id,
+              t.player_id, t.narrative, t.created_at,
+              tm.city || ' ' || tm.name as team_name
+       FROM transactions t
+       LEFT JOIN teams tm ON tm.id = t.team_id
+       WHERE t.league_id = ? AND t.player_id = ?
+       ORDER BY t.created_at DESC
+       LIMIT 100`
+    ).all(league.id, idResult.data) as Array<{
+      id: number; league_id: number; season_number: number; transaction_type: string;
+      team_id: number | null; player_id: number | null; narrative: string | null;
+      created_at: number; team_name: string | null;
+    }>;
+
+    res.json(transactions);
+  } catch (err) { next(err); }
+});
+
 playersRouter.get('/:id', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const idResult = playerIdSchema.safeParse(req.params['id']);
