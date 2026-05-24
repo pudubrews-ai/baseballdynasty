@@ -4,13 +4,15 @@
 
 import { getDb, prepared, type TeamRow, type PlayerRow } from '../db.js';
 import { dfaPlayer } from './waivers.js';
+import { insertRosterNewsItem } from './news.js';
 
 // Evaluate and execute send-downs for a team.
 // Called from rosterMaintenance at 5-game per-team cadence (shared with call-ups).
 export function evaluateSendDowns(
   team: TeamRow,
   leagueId: number,
-  seasonNumber: number
+  seasonNumber: number,
+  currentGameNumber: number = 0
 ): void {
   const db = getDb();
 
@@ -42,7 +44,7 @@ export function evaluateSendDowns(
       if (!aaaReplacement || aaaReplacement.overall_rating <= player.overall_rating) continue;
 
       // Send down or DFA
-      executeSendDown(player, team, leagueId, seasonNumber, db);
+      executeSendDown(player, team, leagueId, seasonNumber, db, currentGameNumber);
       break; // One send-down per eval pass to avoid cascade
     }
 
@@ -69,7 +71,7 @@ export function evaluateSendDowns(
 
       if (!aaaSp) continue;
 
-      executeSendDown(sp, team, leagueId, seasonNumber, db);
+      executeSendDown(sp, team, leagueId, seasonNumber, db, currentGameNumber);
       break;
     }
   });
@@ -86,7 +88,8 @@ function executeSendDown(
   team: TeamRow,
   leagueId: number,
   seasonNumber: number,
-  db: ReturnType<typeof import('../db.js').getDb>
+  db: ReturnType<typeof import('../db.js').getDb>,
+  currentGameNumber: number = 0
 ): void {
   if ((player.options_remaining ?? 0) > 0) {
     // Options remaining: send to AAA (stays on 40-man)
@@ -98,16 +101,29 @@ function executeSendDown(
        WHERE id = ?`
     ).run(player.id);
 
-    db.prepare(
+    const sdResult = db.prepare(
       `INSERT INTO transactions
          (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
        VALUES (?, ?, 'send_down', ?, ?, NULL, ?)`
     ).run(leagueId, seasonNumber, team.id, player.id, Date.now());
 
+    // §1.1(a): Insert send-down news item
+    insertRosterNewsItem({
+      leagueId,
+      seasonNumber,
+      gameNumber: currentGameNumber,
+      eventType: 'send_down',
+      teamId: team.id,
+      playerId: player.id,
+      sourceTable: 'transactions',
+      sourceId: sdResult.lastInsertRowid as number,
+    });
+
     console.log(`[sendDown] ${player.first_name} ${player.last_name} sent down to AAA`);
   } else {
     // No options remaining: DFA instead (AB-04 trigger 1)
-    dfaPlayer(player.id, team.id, team.games_played, leagueId, seasonNumber);
+    // dfaPlayer now writes its own DFA news item — do NOT double-insert here
+    dfaPlayer(player.id, team.id, team.games_played, leagueId, seasonNumber, currentGameNumber);
     console.log(`[sendDown] ${player.first_name} ${player.last_name} DFA'd (no options remaining)`);
   }
 }

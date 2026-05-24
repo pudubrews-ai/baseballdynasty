@@ -24,11 +24,9 @@ function NewsTicker({ lastNewsId }: { lastNewsId: number }) {
   useEffect(() => {
     fetch('/api/news?limit=5')
       .then(r => r.ok ? r.json() : [])
-      .then((data: TickerItem[]) => setItems(data))
+      .then((data: TickerItem[]) => setItems(data.slice(0, 5)))
       .catch(() => {});
   }, [lastNewsId]);
-
-  if (items.length === 0) return null;
 
   return (
     <div
@@ -161,7 +159,7 @@ function AppContent() {
               </div>
             )}
             <button
-              data-testid="new-dynasty-button"
+              data-testid="new-dynasty-button-header"
               onClick={handleNewDynasty}
               style={{ background: '#3b82f6', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer' }}
             >
@@ -175,7 +173,7 @@ function AppContent() {
           {tabs.map(tab => (
             <button
               key={tab.id}
-              data-testid={`nav-${tab.id}`}
+              data-testid={tab.id === 'news' ? 'news-tab' : `nav-${tab.id}`}
               onClick={() => {
                 hasUserNavigatedRef.current = true;
                 setActiveTab(tab.id);
@@ -195,8 +193,8 @@ function AppContent() {
           ))}
         </nav>
 
-        {/* News ticker — shown during active sim when news items exist */}
-        {state && state.phase !== 'no_league' && (
+        {/* News ticker — shown on all tabs during active sim phases */}
+        {state && ['regular_season', 'playoffs', 'offseason', 'draft'].includes(state.phase) && (
           <NewsTicker lastNewsId={state.lastNewsId ?? 0} />
         )}
 
@@ -210,7 +208,7 @@ function AppContent() {
                   Start a new dynasty to begin your journey as a baseball franchise manager.
                 </p>
                 <button
-                  data-testid="new-dynasty-button"
+                  data-testid="new-dynasty-button-welcome"
                   onClick={handleNewDynasty}
                   style={{ background: '#3b82f6', color: 'white', border: 'none', padding: '12px 24px', borderRadius: '8px', cursor: 'pointer', fontSize: '16px' }}
                 >

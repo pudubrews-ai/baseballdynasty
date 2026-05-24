@@ -5,6 +5,7 @@
 
 import { getDb, prepared, type PlayerRow, type TeamRow } from '../db.js';
 import { seedFor } from './prng.js';
+import { insertRosterNewsItem, insertTransactionNewsItem } from './news.js';
 
 // Count players on the 40-man roster (is_on_mlb_roster=1) for a team
 export function count40Man(teamId: number): number {
@@ -22,7 +23,8 @@ export function dfaPlayer(
   teamId: number,
   teamGamesPlayed: number,
   leagueId: number,
-  seasonNumber: number
+  seasonNumber: number,
+  currentGameNumber?: number
 ): void {
   prepared(
     `UPDATE players
@@ -34,11 +36,27 @@ export function dfaPlayer(
      WHERE id = ?`
   ).run(teamId, teamGamesPlayed + 3, playerId);
 
-  prepared(
+  const txResult = prepared(
     `INSERT INTO transactions
        (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
      VALUES (?, ?, 'dfa', ?, ?, NULL, ?)`
   ).run(leagueId, seasonNumber, teamId, playerId, Date.now());
+
+  // §1.1(a): Insert DFA news item
+  const gameNum = currentGameNumber ?? (prepared(
+    'SELECT current_game_number FROM leagues WHERE id = ?'
+  ).get(leagueId) as { current_game_number: number } | undefined)?.current_game_number ?? 0;
+
+  insertRosterNewsItem({
+    leagueId,
+    seasonNumber,
+    gameNumber: gameNum,
+    eventType: 'dfa',
+    teamId,
+    playerId,
+    sourceTable: 'transactions',
+    sourceId: txResult.lastInsertRowid as number,
+  });
 }
 
 // Find the best DFA candidate for a team by archetype (AB-04 RULING §3 trigger 2).
@@ -244,11 +262,23 @@ function resolveWaiverEntry(
       if (result.changes === 0) return; // already resolved
 
       // Log claim transaction
-      db.prepare(
+      const claimTxResult = db.prepare(
         `INSERT INTO transactions
            (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
          VALUES (?, ?, 'waiver_claim', ?, ?, NULL, ?)`
       ).run(leagueId, seasonNumber, claimingTeam.id, player.id, Date.now());
+
+      // §1.1(a): Insert waiver claim news item
+      insertTransactionNewsItem({
+        leagueId,
+        seasonNumber,
+        gameNumber: currentGameNumber,
+        eventType: 'waiver_claim',
+        teamId: claimingTeam.id,
+        playerId: player.id,
+        sourceTable: 'transactions',
+        sourceId: claimTxResult.lastInsertRowid as number,
+      });
 
       console.log(
         `[waivers] ${player.first_name} ${player.last_name} claimed by team ${claimingTeam.id} (${claimingTeam.name})`

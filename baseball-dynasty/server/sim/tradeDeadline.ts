@@ -8,6 +8,7 @@
 
 import { getDb, prepared, type TeamRow, type PlayerRow } from '../db.js';
 import { getArchetype } from './archetypes.js';
+import { insertTransactionNewsItem } from './news.js';
 
 const TRADE_WINDOW_START = 30;
 const TRADE_WINDOW_END = 37;
@@ -48,7 +49,7 @@ function countTeamTrades(teamId: number, leagueId: number, seasonNumber: number)
 
 // Find trade package: buyer gets veteran (age >= 28, contract_years <= 2),
 // seller gets 1-2 prospects (AAA/AA).
-function findTradePackage(
+export function findTradePackage(
   buyer: TeamRow,
   seller: TeamRow,
   leagueId: number
@@ -75,29 +76,30 @@ function findTradePackage(
   const buyerArchetype = getArchetype(buyer.gm_archetype ?? 'balanced');
   const sellerArchetype = getArchetype(seller.gm_archetype ?? 'balanced');
 
-  // How many prospects seller demands (analytics demands more)
-  const prospectsRequired = (sellerArchetype === ARCHETYPES_DATA['analytics'] || seller.gm_archetype === 'analytics') ? 2 : 1;
+  // §2.6: How many prospects seller demands — read from ARCHETYPES table (draft_potential_weight)
+  // analytics has draft_potential_weight=1.5 (>= 1.3 threshold) → demands 2 prospects
+  const prospectsRequired = sellerArchetype.draft_potential_weight >= 1.3 ? 2 : 1;
+
+  // §2.6: old-school seller demands proven (older) players: sort buyer prospects by age DESC
+  const prospectOrder = buyerArchetype.veteran_loyalty > 1.0
+    ? 'age DESC, overall_rating DESC'   // old-school buyer: proven prospects back
+    : 'overall_rating DESC';            // default: best upside
 
   const prospects = prepared(
     `SELECT * FROM players
      WHERE team_id = ? AND minor_level IN ('AAA','AA') AND waiver_state = 'none'
        AND age <= 26
-     ORDER BY overall_rating DESC
+     ORDER BY ${prospectOrder}
      LIMIT ?`
   ).all(buyer.id, prospectsRequired) as PlayerRow[];
 
   if (prospects.length < 1) return null; // Need at least 1 prospect
 
   // Buyer (analytics) demands fair return: veteran must be worth the prospects
-  if (buyer.gm_archetype === 'analytics' && veteran.overall_rating < 65) return null;
+  if (buyerArchetype.draft_potential_weight >= 1.3 && veteran.overall_rating < 65) return null;
 
   return { veteran, prospects };
 }
-
-// Needed for the prospectsRequired calculation
-const ARCHETYPES_DATA = {
-  analytics: { nontender_arb_year: 3 }
-} as const;
 
 // Execute a single trade between buyer and seller
 function executeTrade(
@@ -107,7 +109,8 @@ function executeTrade(
   prospects: PlayerRow[],
   leagueId: number,
   seasonNumber: number,
-  db: ReturnType<typeof import('../db.js').getDb>
+  db: ReturnType<typeof import('../db.js').getDb>,
+  currentGameNumber: number = 0
 ): void {
   // Transfer veteran from seller to buyer
   db.prepare(
@@ -122,11 +125,24 @@ function executeTrade(
   const narrative = `${buyer.city} ${buyer.name} acquire ${veteran.position} from ${seller.city} ${seller.name}`;
 
   // Log trade for buyer team
-  db.prepare(
+  const buyerTxResult = db.prepare(
     `INSERT INTO transactions
        (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
      VALUES (?, ?, 'trade', ?, ?, ?, ?)`
   ).run(leagueId, seasonNumber, buyer.id, veteran.id, narrative, Date.now());
+
+  // §1.1(d): Insert one trade news item (for buyer — one per trade)
+  insertTransactionNewsItem({
+    leagueId,
+    seasonNumber,
+    gameNumber: currentGameNumber,
+    eventType: 'trade',
+    teamId: buyer.id,
+    secondaryTeamId: seller.id,
+    playerId: veteran.id,
+    sourceTable: 'transactions',
+    sourceId: buyerTxResult.lastInsertRowid as number,
+  });
 
   // Log trade for seller team (with prospect info)
   for (const prospect of prospects) {
@@ -188,6 +204,9 @@ export function evaluateTradeDeadline(
       t.interim_gm === 0
     );
 
+    const leagueRow = prepared('SELECT current_game_number FROM leagues WHERE id = ?').get(leagueId) as { current_game_number: number } | undefined;
+    const currentGameNumber = leagueRow?.current_game_number ?? 0;
+
     for (const seller of sellers) {
       const sellerTeamTrades = countTeamTrades(seller.id, leagueId, seasonNumber);
       if (sellerTeamTrades >= PER_TEAM_CAP) continue;
@@ -196,7 +215,7 @@ export function evaluateTradeDeadline(
       if (!pkg) continue;
 
       const tradeTx = db.transaction(() => {
-        executeTrade(team, seller, pkg.veteran, pkg.prospects, leagueId, seasonNumber, db);
+        executeTrade(team, seller, pkg.veteran, pkg.prospects, leagueId, seasonNumber, db, currentGameNumber);
       });
       tradeTx();
       break; // One trade attempt per evaluation pass
@@ -256,8 +275,11 @@ export function forceMinimumTrades(
 
     if (prospects.length === 0) continue;
 
+    const leagueRow = prepared('SELECT current_game_number FROM leagues WHERE id = ?').get(leagueId) as { current_game_number: number } | undefined;
+    const currentGameNumber = leagueRow?.current_game_number ?? 0;
+
     const tradeTx = db.transaction(() => {
-      executeTrade(buyer, seller, veteran, prospects, leagueId, seasonNumber, db);
+      executeTrade(buyer, seller, veteran, prospects, leagueId, seasonNumber, db, currentGameNumber);
     });
 
     try {

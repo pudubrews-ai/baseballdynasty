@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useLeagueState } from '../hooks/useLeagueState.js';
 
 type NewsBadge = 'ROSTER' | 'TRANSACTION' | 'FRONT OFFICE' | 'INJURY' | 'MILESTONE' | 'GAME';
-type NewsFilter = 'all' | 'transactions' | 'frontoffice' | 'injuries' | 'milestones';
+type NewsFilter = 'all' | 'roster' | 'transactions' | 'frontoffice' | 'injuries' | 'milestones';
 
 interface NewsItem {
   id: number;
@@ -30,6 +30,7 @@ const BADGE_COLORS: Record<NewsBadge, { bg: string; text: string }> = {
 
 const FILTER_LABELS: Record<NewsFilter, string> = {
   all: 'All',
+  roster: 'Roster',
   transactions: 'Transactions',
   frontoffice: 'Front Office',
   injuries: 'Injuries',
@@ -68,7 +69,7 @@ export default function News() {
   }, [filter, state?.lastNewsId]);
 
   return (
-    <div data-testid="news-tab" style={{ maxWidth: '900px', margin: '0 auto' }}>
+    <div data-testid="news-view" style={{ maxWidth: '900px', margin: '0 auto' }}>
       <h2 style={{ marginTop: 0, marginBottom: '16px' }}>News Feed</h2>
 
       {/* Filter buttons */}

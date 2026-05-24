@@ -1,6 +1,7 @@
 node_modules/
 dist/
-data/
+# Only ignore root-level data directory (not server/data/ which contains source files)
+/data/
 *.db
 *.db-journal
 *.db-wal

@@ -5,6 +5,7 @@ import { getDb, prepared, type LeagueRow, type TeamRow, type PlayerRow } from '.
 import { seedFor, randInt, randNormal } from './prng.js';
 import { runAnnualDraft } from './draft.js';
 import { callSeasonNarrative } from '../services/llm.js';
+import { insertTransactionNewsItem, insertFrontOfficeNewsItem } from './news.js';
 
 const GM_PHILOSOPHIES: Array<'win-now' | 'rebuild' | 'balanced'> = ['win-now', 'rebuild', 'balanced'];
 const GM_RISK_TOLERANCES: Array<'conservative' | 'moderate' | 'aggressive'> = ['conservative', 'moderate', 'aggressive'];
@@ -181,11 +182,23 @@ async function runNonTenderStep(leagueId: number, seasonNumber: number): Promise
           'UPDATE players SET team_id = NULL, is_on_mlb_roster = 0, is_on_25man = 0, minor_level = NULL WHERE id = ?'
         ).run(player.id);
 
-        db.prepare(
+        const ntResult = db.prepare(
           `INSERT INTO transactions
              (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
            VALUES (?, ?, 'non_tender', ?, ?, NULL, ?)`
         ).run(leagueId, seasonNumber, team.id, player.id, Date.now());
+
+        // §1.1(e): Insert non-tender news item
+        insertTransactionNewsItem({
+          leagueId,
+          seasonNumber,
+          gameNumber: 0,
+          eventType: 'non_tender',
+          teamId: team.id,
+          playerId: player.id,
+          sourceTable: 'transactions',
+          sourceId: ntResult.lastInsertRowid as number,
+        });
 
         totalNonTenders++;
       }
@@ -209,11 +222,23 @@ async function runNonTenderStep(leagueId: number, seasonNumber: number): Promise
           'UPDATE players SET team_id = NULL, is_on_mlb_roster = 0, is_on_25man = 0, minor_level = NULL WHERE id = ?'
         ).run(forcedCandidate.id);
 
-        db.prepare(
+        const forcedNtResult = db.prepare(
           `INSERT INTO transactions
              (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
            VALUES (?, ?, 'non_tender', ?, ?, NULL, ?)`
         ).run(leagueId, seasonNumber, forcedCandidate.team_id, forcedCandidate.id, Date.now());
+
+        // §1.1(e): Insert forced non-tender news item
+        insertTransactionNewsItem({
+          leagueId,
+          seasonNumber,
+          gameNumber: 0,
+          eventType: 'non_tender',
+          teamId: forcedCandidate.team_id,
+          playerId: forcedCandidate.id,
+          sourceTable: 'transactions',
+          sourceId: forcedNtResult.lastInsertRowid as number,
+        });
 
         totalNonTenders++;
         console.log(`[offseason] Forced non-tender: ${forcedCandidate.first_name} ${forcedCandidate.last_name}`);
@@ -286,7 +311,7 @@ async function runFreeAgencyStep(leagueId: number, seasonNumber?: number): Promi
 
       // §4.2: Use actual season_number, not hardcoded 1
       const actualSeason = seasonNumber ?? leagueRow?.season_number ?? 1;
-      db.prepare(
+      const faSignResult = db.prepare(
         'INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
       ).run(
         leagueId, actualSeason, 'free_agent_signing',
@@ -294,6 +319,18 @@ async function runFreeAgencyStep(leagueId: number, seasonNumber?: number): Promi
         `${signingTeam?.city ?? 'Unknown'} signs ${fa.first_name} ${fa.last_name} for $${(bestBid / 1_000_000).toFixed(1)}M`,
         Date.now()
       );
+
+      // §1.1(e): Insert FA signing news item
+      insertTransactionNewsItem({
+        leagueId,
+        seasonNumber: actualSeason,
+        gameNumber: 0,
+        eventType: 'free_agent_signing',
+        teamId: bestTeamId,
+        playerId: fa.id,
+        sourceTable: 'transactions',
+        sourceId: faSignResult.lastInsertRowid as number,
+      });
     }
   }
 
@@ -313,7 +350,7 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
       const newLast = ['Johnson', 'Smith', 'Williams', 'Brown', 'Jones'][Math.floor(rng() * 5)] ?? 'Johnson';
       const newStyle = MANAGER_STYLES[Math.floor(rng() * 3)] ?? 'balanced';
 
-      db.prepare(
+      const mgrFoeResult = db.prepare(
         'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
       ).run(
         leagueId, seasonNumber, team.id, 'manager_fired',
@@ -322,6 +359,17 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
         `${team.manager_name} fired after poor performance. ${newFirst} ${newLast} hired as new manager.`,
         Date.now()
       );
+
+      // §1.1(e): Insert offseason manager firing news item
+      insertFrontOfficeNewsItem({
+        leagueId,
+        seasonNumber,
+        gameNumber: 0,
+        eventType: 'manager_fired',
+        teamId: team.id,
+        sourceTable: 'front_office_events',
+        sourceId: mgrFoeResult.lastInsertRowid as number,
+      });
 
       db.prepare(
         'UPDATE teams SET manager_name = ?, manager_style = ?, job_security = 5, interim_manager = 0 WHERE id = ?'
@@ -343,7 +391,7 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
       const newRisk = GM_RISK_TOLERANCES[Math.floor(rng() * 3)] ?? 'moderate';
       const newFocus = GM_FOCUSES[Math.floor(rng() * 3)] ?? 'hitting';
 
-      db.prepare(
+      const gmFoeResult = db.prepare(
         'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
       ).run(
         leagueId, seasonNumber, team.id, 'gm_fired',
@@ -351,6 +399,17 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
         `${team.gm_name} dismissed. ${newFirst} ${newLast} takes over as GM with a ${newPhilosophy} philosophy.`,
         Date.now()
       );
+
+      // §1.1(e): Insert offseason GM firing news item
+      insertFrontOfficeNewsItem({
+        leagueId,
+        seasonNumber,
+        gameNumber: 0,
+        eventType: 'gm_fired',
+        teamId: team.id,
+        sourceTable: 'front_office_events',
+        sourceId: gmFoeResult.lastInsertRowid as number,
+      });
 
       db.prepare(
         'UPDATE teams SET gm_name = ?, gm_philosophy = ?, gm_risk_tolerance = ?, gm_focus = ?, interim_gm = 0 WHERE id = ?'
@@ -376,7 +435,7 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
       const newLast = ['Thompson', 'Anderson', 'Taylor', 'Moore', 'Jackson'][Math.floor(rng() * 5)] ?? 'Thompson';
       const newPersonality = OWNER_PERSONALITIES[Math.floor(rng() * OWNER_PERSONALITIES.length)] ?? 'moderate';
 
-      db.prepare(
+      const soldFoeResult = db.prepare(
         'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
       ).run(
         leagueId, seasonNumber, team.id, 'owner_sold_team',
@@ -384,6 +443,17 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
         `${team.owner_name} sells the franchise to ${newFirst} ${newLast}.`,
         Date.now()
       );
+
+      // §1.1(e): Insert owner sold team news item
+      insertFrontOfficeNewsItem({
+        leagueId,
+        seasonNumber,
+        gameNumber: 0,
+        eventType: 'owner_sold_team',
+        teamId: team.id,
+        sourceTable: 'front_office_events',
+        sourceId: soldFoeResult.lastInsertRowid as number,
+      });
 
       db.prepare('UPDATE teams SET owner_name = ?, owner_personality = ? WHERE id = ?')
         .run(`${newFirst} ${newLast}`, newPersonality, team.id);
@@ -395,7 +465,7 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
       const heirFirst = ['Robert', 'Henry', 'Arthur', 'Charles', 'Winston'][Math.floor(rng() * 5)] ?? 'Robert';
       const heirLast = team.owner_name.split(' ')[1] ?? 'Heir'; // Same surname for heir
 
-      db.prepare(
+      const diedFoeResult = db.prepare(
         'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
       ).run(
         leagueId, seasonNumber, team.id, 'owner_died',
@@ -403,6 +473,17 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
         `${team.owner_name} passed away. Heir ${heirFirst} ${heirLast} takes control of the franchise.`,
         Date.now()
       );
+
+      // §1.1(e): Insert owner died news item
+      insertFrontOfficeNewsItem({
+        leagueId,
+        seasonNumber,
+        gameNumber: 0,
+        eventType: 'owner_died',
+        teamId: team.id,
+        sourceTable: 'front_office_events',
+        sourceId: diedFoeResult.lastInsertRowid as number,
+      });
 
       const heirPersonality = OWNER_PERSONALITIES[Math.floor(rng() * OWNER_PERSONALITIES.length)] ?? 'moderate';
       db.prepare('UPDATE teams SET owner_name = ?, owner_personality = ? WHERE id = ?').run(`${heirFirst} ${heirLast}`, heirPersonality, team.id);

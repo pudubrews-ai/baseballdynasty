@@ -14,7 +14,8 @@ import { runOffseason } from './offseason.js';
 import { springCutsNeeded, runSpringCuts } from './springCuts.js';
 import { runRosterMaintenance } from './rosterMaintenance.js';
 import { forceMinimumTrades } from './tradeDeadline.js';
-import { getLlmStatus } from '../services/llm.js';
+import { getLlmStatus, resetNewsCallsThisSeason } from '../services/llm.js';
+import { insertGameNewsItem, fillPendingHeadlines, fillPendingTransactionFlavors } from './news.js';
 import { scrubError } from '../util/scrub.js';
 import type { LeagueStateSnapshot, SimSpeed } from '../../shared/types.js';
 import type { NewLeagueBodyType } from '../../shared/schemas.js';
@@ -425,21 +426,61 @@ async function runGameTick(league: LeagueRow): Promise<void> {
     league.id
   );
 
+  // §1.1(f): Insert game result news item (score-only, no LLM, immediate)
+  try {
+    const gameRow = prepared(
+      'SELECT home_score, away_score FROM game_log WHERE league_id = ? AND game_number = ? AND season_number = ? ORDER BY id DESC LIMIT 1'
+    ).get(league.id, nextGame.gameNumber, league.season_number) as { home_score: number; away_score: number } | undefined;
+    if (gameRow) {
+      insertGameNewsItem({
+        leagueId: league.id,
+        seasonNumber: league.season_number,
+        gameNumber: nextGame.gameNumber,
+        homeTeamId: nextGame.homeTeamId,
+        awayTeamId: nextGame.awayTeamId,
+        homeScore: gameRow.home_score,
+        awayScore: gameRow.away_score,
+        homeTeamName: `${homeTeam.city} ${homeTeam.name}`,
+        awayTeamName: `${awayTeam.city} ${awayTeam.name}`,
+      });
+    }
+  } catch (err) {
+    console.warn('[engine] Game news insert error:', scrubError(err).message);
+  }
+
   // AB-18/AB-03: roster maintenance runs AFTER simulateGame, unconditionally
   // (including skipped-game ticks — the hook is here, not in simulateGame).
   // Crash-gap acceptance: if crash here, next tick re-evaluates idempotent conditions.
   runRosterMaintenance(league.id, nextGame.homeTeamId, nextGame.awayTeamId, nextGame.gameNumber);
 
+  // §1.1(g): Fill pending headlines once per game tick (async, non-blocking)
+  fillPendingHeadlines(league.id).catch(err =>
+    console.warn('[engine] fillPendingHeadlines error:', scrubError(err).message)
+  );
+
+  // §1.1(h): Fill pending transaction flavors once per game tick
+  fillPendingTransactionFlavors(league.id).catch(err =>
+    console.warn('[engine] fillPendingTransactionFlavors error:', scrubError(err).message)
+  );
+
   // Check if season complete after this game
   if (isSeasonComplete(league.id)) {
     prepared('UPDATE leagues SET phase = ? WHERE id = ?').run('playoffs', league.id);
     console.log('[engine] Regular season complete after game', nextGame.gameNumber);
+    // Flush trailing pending headlines at phase transition (AB-07)
+    fillPendingHeadlines(league.id).catch(err =>
+      console.warn('[engine] Phase transition fillPendingHeadlines error:', scrubError(err).message)
+    );
   }
 }
 
 async function runPlayoffTick(league: LeagueRow): Promise<void> {
   try {
     await runPlayoffs(league.id);
+    // Flush pending headlines at each playoff tick
+    fillPendingHeadlines(league.id).catch(err =>
+      console.warn('[engine] Playoff fillPendingHeadlines error:', scrubError(err).message)
+    );
   } catch (err) {
     console.error('[engine] Playoff error:', scrubError(err).message);
   }
@@ -448,6 +489,15 @@ async function runPlayoffTick(league: LeagueRow): Promise<void> {
 async function runOffseasonTick(league: LeagueRow, isTurbo: boolean): Promise<void> {
   try {
     await runOffseason(league, isTurbo);
+    // Flush pending headlines at offseason phase (AB-07 phase transition flush)
+    await fillPendingHeadlines(league.id);
+    await fillPendingTransactionFlavors(league.id);
+    // Reset news call season cap at offseason→new-season boundary (CB-5)
+    const freshLeague = prepared('SELECT phase, offseason_step FROM leagues WHERE id = ?').get(league.id) as { phase: string; offseason_step: string | null } | undefined;
+    if (freshLeague?.phase === 'regular_season') {
+      // Offseason just completed (transitioned to regular_season)
+      resetNewsCallsThisSeason();
+    }
   } catch (err) {
     console.error('[engine] Offseason error:', scrubError(err).message);
   }

@@ -1,3 +1,7 @@
-port: 3001
-pid: 99820
-started: Sun May 24 00:32:44 EDT 2026
+# Server Port Info
+
+- Server port: 3001
+- Server PID: 14183
+- Client port: 5173
+- Client PID: 14192
+- Started: 2026-05-24

@@ -6,6 +6,7 @@
 import { getDb, prepared, type TeamRow, type PlayerRow } from '../db.js';
 import { count40Man, dfaPlayer, findDfaCandidate } from './waivers.js';
 import { seedFor } from './prng.js';
+import { insertRosterNewsItem } from './news.js';
 
 // AB-05: service-time constants
 export const FREE_AGENT_SERVICE_GAMES = 180;
@@ -93,11 +94,23 @@ function promotePlayer(
   ).run(team.id, currentGameNumber, player.id);
 
   // Log call-up transaction
-  db.prepare(
+  const callUpResult = db.prepare(
     `INSERT INTO transactions
        (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
      VALUES (?, ?, 'call_up', ?, ?, NULL, ?)`
   ).run(leagueId, seasonNumber, team.id, player.id, Date.now());
+
+  // §1.1(a): Insert call-up news item
+  insertRosterNewsItem({
+    leagueId,
+    seasonNumber,
+    gameNumber: currentGameNumber,
+    eventType: 'call_up',
+    teamId: team.id,
+    playerId: player.id,
+    sourceTable: 'transactions',
+    sourceId: callUpResult.lastInsertRowid as number,
+  });
 }
 
 // Evaluate and execute call-ups for a team.
@@ -114,12 +127,13 @@ export function evaluateCallUps(
   if (!league) return;
 
   const callUpTx = db.transaction(() => {
-    // Trigger 1: roster < 23 active (injuries)
+    // Trigger 1: roster < 25 (restore-to-25 trigger; fires whenever a send-down/DFA opens a slot)
+    // §1.3: Changed from < 23 (unreachable without injuries) to < 25 (restore-to-full)
     const active25Man = (prepared(
       'SELECT COUNT(*) as cnt FROM players WHERE team_id = ? AND is_on_25man = 1'
     ).get(team.id) as { cnt: number }).cnt;
 
-    if (active25Man < 23) {
+    if (active25Man < 25) {
       // Call up best available from pipeline — roster is short, promote anyone
       // Priority: positions with fewest players first (SP/RP/CL for game coverage)
       const posCounts = prepared(

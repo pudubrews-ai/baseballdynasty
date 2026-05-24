@@ -79,8 +79,10 @@ describe('Interim GM persistence', () => {
     const team = teams[1] as any; // use second team
 
     // Set up conditions for GM firing
+    // Set last_firing_check_game = games_played - 3 so manager check is NOT due (< 5 gap)
+    // This prevents the §3.5 double-fire guard from blocking the GM check in this test
     prepared(
-      "UPDATE teams SET owner_personality = 'win-now', wins = 0, losses = 20, games_played = 20, interim_gm = 0, last_gm_firing_check_game = 0 WHERE id = ?"
+      "UPDATE teams SET owner_personality = 'win-now', wins = 0, losses = 20, games_played = 20, interim_gm = 0, last_gm_firing_check_game = 0, last_firing_check_game = 18 WHERE id = ?"
     ).run(team.id);
 
     const freshTeam = prepared('SELECT * FROM teams WHERE id = ?').get(team.id) as any;

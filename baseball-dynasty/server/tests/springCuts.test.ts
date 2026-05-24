@@ -73,20 +73,14 @@ describe('Spring Training Cuts — Phase 4 gate', () => {
     const teams = prepared('SELECT id, name FROM teams WHERE league_id = ?').all(leagueId) as Array<{ id: number; name: string }>;
     expect(teams.length).toBeGreaterThan(0);
 
-    // Spring cuts reduce to TARGET_25MAN (25) while respecting position minimums.
-    // A team that started with exactly the minimum at a position may retain more than 25
-    // if cutting to 25 would violate a minimum. Per AB-08: "position minimums take precedence."
-    // So we assert: no team significantly exceeds 25 (allow up to 30 for edge cases with
-    // many minimums), and no team that started >= 25 was left unchanged at an extreme.
+    // §2.2: Spring cuts must result in exactly 25 on the 25-man per team.
+    // repairPositionMinimums and fillTo25 ensure every team ends up at exactly 25.
     for (const team of teams) {
       const count = (prepared(
         'SELECT COUNT(*) as cnt FROM players WHERE team_id = ? AND is_on_25man = 1'
       ).get(team.id) as { cnt: number }).cnt;
 
-      // Must be at most 25 OR stuck at minimum (position minimums prevent further cuts)
-      // The expansion draft creates 40-man rosters; teams aim for 25
-      // Practically: should be <= 30 after cuts respecting minimums
-      expect(count, `Team ${team.name} has ${count} on 25-man (expected <= 30)`).toBeLessThanOrEqual(30);
+      expect(count, `Team ${team.name} has ${count} on 25-man (expected === 25)`).toBe(25);
     }
   });
 

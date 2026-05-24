@@ -1,6 +1,50 @@
 import { useState, useEffect } from 'react';
 import { getTeams, getTeam, getTeamRoster, getTeamMinors, getTeamHistory } from '../api.js';
 
+interface WaiverEntry {
+  player_id: number;
+  player_name: string;
+  position: string;
+  overall_rating: number;
+  claim_window_games_remaining: number;
+  dfa_team_name: string;
+}
+
+function WaiversPanel() {
+  const [waivers, setWaivers] = useState<WaiverEntry[]>([]);
+
+  useEffect(() => {
+    fetch('/api/waivers')
+      .then(r => r.ok ? r.json() : [])
+      .then((data: WaiverEntry[]) => setWaivers(data))
+      .catch(() => {});
+  }, []);
+
+  return (
+    <div style={{ marginTop: '16px' }}>
+      <h3 style={{ marginTop: 0, marginBottom: '8px', fontSize: '14px', color: '#f59e0b' }}>Waiver Wire</h3>
+      <div data-testid="waivers-list" style={{ background: '#0f172a', borderRadius: '6px', padding: '8px' }}>
+        {waivers.length === 0 ? (
+          <div style={{ color: '#64748b', fontSize: '12px', padding: '8px' }}>No players on waivers</div>
+        ) : (
+          waivers.map(w => (
+            <div
+              key={w.player_id}
+              data-testid={`waiver-player-${w.player_id}`}
+              style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #1e293b', fontSize: '12px' }}
+            >
+              <span>{w.player_name}</span>
+              <span style={{ color: '#94a3b8' }}>{w.position}</span>
+              <span style={{ color: '#60a5fa' }}>{w.overall_rating}</span>
+              <span style={{ color: '#64748b' }}>DFA'd by {w.dfa_team_name} ({w.claim_window_games_remaining}g left)</span>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
 interface TeamSummary {
   id: number;
   name: string;
@@ -75,7 +119,7 @@ export default function Teams() {
 
   return (
     <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '16px' }}>
-      {/* Team grid */}
+      {/* Team grid + Waivers */}
       <div>
         <h2 style={{ marginTop: 0 }}>Teams</h2>
         <div data-testid="team-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '8px' }}>
@@ -101,6 +145,7 @@ export default function Teams() {
             </button>
           ))}
         </div>
+        <WaiversPanel />
       </div>
 
       {/* Team detail panel */}
@@ -167,7 +212,7 @@ export default function Teams() {
                     <div key={level} style={{ marginBottom: '8px' }}>
                       <div style={{ color: '#f59e0b', fontSize: '11px', fontWeight: 'bold', marginBottom: '4px' }}>{level}</div>
                       {players.map(p => (
-                        <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #334155', fontSize: '12px' }}>
+                        <div key={p.id} data-testid={`minors-stats-${p.id}`} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #334155', fontSize: '12px' }}>
                           <span>{p.first_name} {p.last_name}</span>
                           <span style={{ color: '#94a3b8' }}>{p.position}</span>
                           <span style={{ color: '#60a5fa' }}>{p.overall_rating}</span>

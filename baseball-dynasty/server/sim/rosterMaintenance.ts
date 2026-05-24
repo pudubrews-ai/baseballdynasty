@@ -25,21 +25,56 @@ import { runProspectDev } from './prospectDev.js';
 import { evaluateTradeDeadline, setTradePosture } from './tradeDeadline.js';
 import { evaluateFirings } from './firings.js';
 
-// Roster invariant: each team should have <= 25 on is_on_25man=1 (hard cap after cuts).
-// During regular season, we log a warning if any team exceeds 25.
+// Roster invariant: each team should have exactly 25 on is_on_25man=1 (hard cap after cuts).
+// During regular season, log warnings for violations. Auto-trim >25, auto-promote <25.
 function checkRosterInvariant(leagueId: number): void {
-  const violations = prepared(
-    `SELECT team_id, COUNT(*) as cnt
-     FROM players
-     WHERE league_id = ? AND is_on_25man = 1
-     GROUP BY team_id
-     HAVING cnt > 25`
+  const league = prepared('SELECT season_number FROM leagues WHERE id = ?').get(leagueId) as { season_number: number } | undefined;
+  if (!league) return;
+
+  const counts = prepared(
+    `SELECT team_id, COUNT(*) as cnt FROM players WHERE league_id = ? AND is_on_25man = 1 GROUP BY team_id`
   ).all(leagueId) as Array<{ team_id: number; cnt: number }>;
 
-  for (const v of violations) {
-    console.warn(
-      `[rosterMaintenance] Invariant violation: team ${v.team_id} has ${v.cnt} on 25-man (expected <=25)`
-    );
+  for (const v of counts) {
+    if (v.cnt > 25) {
+      console.warn(
+        `[rosterMaintenance] Invariant violation: team ${v.team_id} has ${v.cnt} on 25-man (expected 25) — trimming`
+      );
+      // Trim: remove lowest-rated players over 25
+      let excess = v.cnt - 25;
+      while (excess > 0) {
+        const lowest = prepared(
+          `SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 ORDER BY overall_rating ASC LIMIT 1`
+        ).get(v.team_id) as { id: number; options_remaining: number; overall_rating: number } | undefined;
+        if (!lowest) break;
+        if ((lowest.options_remaining ?? 0) > 0) {
+          prepared(
+            `UPDATE players SET is_on_25man = 0, minor_level = 'AAA', options_remaining = options_remaining - 1 WHERE id = ?`
+          ).run(lowest.id);
+        } else {
+          prepared(
+            `UPDATE players SET is_on_25man = 0, is_on_mlb_roster = 0, team_id = NULL, minor_level = NULL WHERE id = ?`
+          ).run(lowest.id);
+        }
+        excess--;
+      }
+    } else if (v.cnt < 25) {
+      // Auto-promote reserves from 40-man or minors
+      let deficit = 25 - v.cnt;
+      while (deficit > 0) {
+        const fromMinors = prepared(
+          `SELECT * FROM players WHERE team_id = ? AND is_on_mlb_roster = 1 AND is_on_25man = 0 AND minor_level IS NOT NULL
+           ORDER BY overall_rating DESC LIMIT 1`
+        ).get(v.team_id) as { id: number } | undefined;
+        if (fromMinors) {
+          prepared('UPDATE players SET is_on_25man = 1, minor_level = NULL WHERE id = ?').run(fromMinors.id);
+          deficit--;
+          continue;
+        }
+        // No more 40-man reserves — leave short
+        break;
+      }
+    }
   }
 }
 
@@ -84,14 +119,27 @@ export function runRosterMaintenance(
         // AB-01: 5-game per-team cadence for call-ups/send-downs
         const callUpDue = team.games_played - team.last_call_up_check_game >= 5;
         if (callUpDue) {
-          evaluateSendDowns(team, leagueId, league.season_number);
+          // §2.7: Reset recent_* windows every 5 games (sliding window approximation)
+          // This makes recent stats reflect only the last ~5 games, not season totals
+          try {
+            prepared(
+              `UPDATE season_stats
+               SET recent_ab = 0, recent_hits = 0, recent_hr = 0, recent_walks = 0,
+                   recent_er = 0, recent_ip = 0, recent_starts = 0
+               WHERE league_id = ? AND season_number = ?
+                 AND player_id IN (SELECT id FROM players WHERE team_id = ?)`
+            ).run(leagueId, league.season_number, teamId);
+          } catch (err) {
+            console.warn(`[rosterMaintenance] recent_* reset error for team ${teamId}:`, err);
+          }
+          evaluateSendDowns(team, leagueId, league.season_number, gameNumber);
           evaluateCallUps(team, leagueId, league.season_number, gameNumber);
           // Note: last_call_up_check_game is updated inside evaluateCallUps
         }
 
         // Firing evaluation (Phase 9): every tick (cadence is gated inside evaluateFirings)
         try {
-          evaluateFirings(team, leagueId, league.season_number);
+          evaluateFirings(team, leagueId, league.season_number, gameNumber);
         } catch (err) {
           console.warn(`[rosterMaintenance] Firing eval error for team ${teamId}:`, err);
         }

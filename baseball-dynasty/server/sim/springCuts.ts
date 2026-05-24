@@ -4,6 +4,7 @@
 // Spec: each team trims from 40-man to exactly 25 on is_on_25man=1.
 
 import { getDb, prepared, type LeagueRow, type TeamRow, type PlayerRow } from '../db.js';
+import { insertTransactionNewsItem, insertRosterNewsItem } from './news.js';
 
 // Position minimums that must be preserved on the 25-man (matches worldgen checks)
 const POSITION_MINIMUMS: Array<{ pos: string; min: number }> = [
@@ -106,88 +107,195 @@ function runSpringCutsForTeam(
     'SELECT COUNT(*) as cnt FROM players WHERE team_id = ? AND is_on_25man = 1'
   ).get(team.id) as { cnt: number }).cnt;
 
-  if (current25Man <= TARGET_25MAN) {
-    // Already at or below target — no cuts needed
-    return;
+  // Step 1: if over 25, cut excess players first (before repair so repair doesn't fight trim)
+  if (current25Man > TARGET_25MAN) {
+    const excess = current25Man - TARGET_25MAN;
+    const cutCandidates = getCutCandidates(team.id, team.gm_archetype ?? 'balanced');
+
+    let cutsMade = 0;
+
+    for (const player of cutCandidates) {
+      if (cutsMade >= excess) break;
+
+      // Build current position map to check minimums
+      const posMap = buildPosMap(team.id);
+
+      // Do not cut if it would violate position minimums
+      if (wouldViolateMinimum(player.position, posMap)) {
+        continue;
+      }
+
+      const hasOptions = (player.options_remaining ?? 3) > 0;
+      const isReleaseable =
+        player.overall_rating < 45 &&
+        player.potential === 'D' &&
+        player.age >= 24;
+
+      if (isReleaseable) {
+        // Release directly to FA pool
+        releaseToFa(player, team.id, seasonNumber, leagueId);
+        cutsMade++;
+      } else if (hasOptions) {
+        // Send down to AAA — stays on 40-man (is_on_mlb_roster=1), off 25-man
+        prepared(
+          `UPDATE players
+           SET is_on_25man = 0,
+               minor_level = 'AAA',
+               options_remaining = options_remaining - 1
+           WHERE id = ?`
+        ).run(player.id);
+
+        // Log transaction
+        const scSendResult = prepared(
+          `INSERT INTO transactions
+             (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
+           VALUES (?, ?, 'send_down', ?, ?, ?, ?)`
+        ).run(
+          leagueId,
+          seasonNumber,
+          team.id,
+          player.id,
+          null,
+          Date.now()
+        );
+
+        // §1.1(b): Insert spring cuts send-down news item
+        insertRosterNewsItem({
+          leagueId,
+          seasonNumber,
+          gameNumber: 0,
+          eventType: 'send_down',
+          teamId: team.id,
+          playerId: player.id,
+          sourceTable: 'transactions',
+          sourceId: scSendResult.lastInsertRowid as number,
+        });
+
+        cutsMade++;
+      } else {
+        // options_remaining = 0 and not releasable by rule a:
+        // AB-14: spring cuts never use waivers — release to FA directly
+        releaseToFa(player, team.id, seasonNumber, leagueId);
+        cutsMade++;
+      }
+    }
   }
 
-  const excess = current25Man - TARGET_25MAN;
-  const candidates = getCutCandidates(team.id, team.gm_archetype ?? 'balanced');
+  // Step 2: repair position minimums (may push count above 25 if team was short on a position)
+  repairPositionMinimums(team, seasonNumber, leagueId);
 
-  let cutsMade = 0;
+  // Step 3: trim back to exactly 25 if repair pushed us over
+  // (Always run — handles cases where team started at exactly 25 but repair added players)
+  let postRepair25Man = (prepared(
+    'SELECT COUNT(*) as cnt FROM players WHERE team_id = ? AND is_on_25man = 1'
+  ).get(team.id) as { cnt: number }).cnt;
 
-  for (const player of candidates) {
-    if (cutsMade >= excess) break;
-
-    // Build current position map to check minimums
+  while (postRepair25Man > TARGET_25MAN) {
     const posMap = buildPosMap(team.id);
+    // Get all players on 25-man, ordered by priority to cut (lowest rating first)
+    const trimCandidates = prepared(
+      `SELECT * FROM players
+       WHERE team_id = ? AND is_on_25man = 1
+       ORDER BY overall_rating ASC, age ASC`
+    ).all(team.id) as PlayerRow[];
 
-    // Do not cut if it would violate position minimums
-    if (wouldViolateMinimum(player.position, posMap)) {
-      continue;
+    // Find first non-minimum-protected candidate
+    const overage = trimCandidates.find(p => !wouldViolateMinimum(p.position, posMap));
+
+    if (!overage) {
+      // All remaining are minimum-protected — accept the slight overcount
+      break;
     }
 
-    const hasOptions = (player.options_remaining ?? 3) > 0;
-    const isReleaseable =
-      player.overall_rating < 45 &&
-      player.potential === 'D' &&
-      player.age >= 24;
-
-    if (isReleaseable) {
-      // Release directly to FA pool
-      releaseToFa(player, team.id, seasonNumber, leagueId);
-      cutsMade++;
-    } else if (hasOptions) {
-      // Send down to AAA — stays on 40-man (is_on_mlb_roster=1), off 25-man
+    const hasOptions = (overage.options_remaining ?? 3) > 0;
+    if (hasOptions) {
       prepared(
-        `UPDATE players
-         SET is_on_25man = 0,
-             minor_level = 'AAA',
-             options_remaining = options_remaining - 1
-         WHERE id = ?`
-      ).run(player.id);
-
-      // Log transaction
-      prepared(
-        `INSERT INTO transactions
-           (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
-         VALUES (?, ?, 'send_down', ?, ?, ?, ?)`
-      ).run(
-        leagueId,
-        seasonNumber,
-        team.id,
-        player.id,
-        null,
-        Date.now()
-      );
-
-      cutsMade++;
+        `UPDATE players SET is_on_25man = 0, minor_level = 'AAA', options_remaining = options_remaining - 1 WHERE id = ?`
+      ).run(overage.id);
+      const sdResult = prepared(
+        `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at) VALUES (?, ?, 'send_down', ?, ?, NULL, ?)`
+      ).run(leagueId, seasonNumber, team.id, overage.id, Date.now());
+      insertRosterNewsItem({
+        leagueId, seasonNumber, gameNumber: 0, eventType: 'send_down',
+        teamId: team.id, playerId: overage.id,
+        sourceTable: 'transactions', sourceId: sdResult.lastInsertRowid as number,
+      });
     } else {
-      // options_remaining = 0 and not releasable by rule a:
-      // AB-14: spring cuts never use waivers — release to FA directly
-      releaseToFa(player, team.id, seasonNumber, leagueId);
-      cutsMade++;
+      releaseToFa(overage, team.id, seasonNumber, leagueId);
     }
+
+    postRepair25Man--;
   }
 
-  // Validate position minimums post-cut — warn if violated (should not happen)
-  const finalPosMap = buildPosMap(team.id);
-  for (const { pos, min } of POSITION_MINIMUMS) {
-    const have = finalPosMap.get(pos) ?? 0;
-    if (have < min) {
-      console.warn(
-        `[springCuts] Team ${team.id} (${team.name}) has only ${have}/${min} ${pos} after spring cuts`
-      );
-    }
-  }
+  // Step 4: fill up to 25 if we are short
+  fillTo25(team, seasonNumber, leagueId);
 
   const final25Man = (prepared(
     'SELECT COUNT(*) as cnt FROM players WHERE team_id = ? AND is_on_25man = 1'
   ).get(team.id) as { cnt: number }).cnt;
 
   console.log(
-    `[springCuts] Team ${team.id} (${team.name}): ${current25Man} → ${final25Man} on 25-man (${cutsMade} cuts)`
+    `[springCuts] Team ${team.id} (${team.name}): ${current25Man} → ${final25Man} on 25-man`
   );
+}
+
+// Fill team up to exactly 25 on the 25-man, promoting from 40-man then minors then FA.
+function fillTo25(team: TeamRow, seasonNumber: number, leagueId: number): void {
+  let count = (prepared(
+    'SELECT COUNT(*) as cnt FROM players WHERE team_id = ? AND is_on_25man = 1'
+  ).get(team.id) as { cnt: number }).cnt;
+
+  if (count >= TARGET_25MAN) return;
+
+  // First try 40-man reserves (on mlb roster but not 25-man)
+  while (count < TARGET_25MAN) {
+    const from40 = prepared(
+      `SELECT * FROM players WHERE team_id = ? AND is_on_mlb_roster = 1 AND is_on_25man = 0 AND minor_level IS NOT NULL
+       ORDER BY overall_rating DESC LIMIT 1`
+    ).get(team.id) as PlayerRow | undefined;
+
+    if (from40) {
+      prepared('UPDATE players SET is_on_25man = 1, minor_level = NULL WHERE id = ?').run(from40.id);
+      prepared(
+        `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at) VALUES (?, ?, 'call_up', ?, ?, NULL, ?)`
+      ).run(leagueId, seasonNumber, team.id, from40.id, Date.now());
+      count++;
+      continue;
+    }
+
+    // Try any minors player on this team
+    const fromMinors = prepared(
+      `SELECT * FROM players WHERE team_id = ? AND minor_level IS NOT NULL AND waiver_state = 'none'
+       ORDER BY overall_rating DESC LIMIT 1`
+    ).get(team.id) as PlayerRow | undefined;
+
+    if (fromMinors) {
+      prepared('UPDATE players SET is_on_mlb_roster = 1, is_on_25man = 1, minor_level = NULL WHERE id = ?').run(fromMinors.id);
+      prepared(
+        `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at) VALUES (?, ?, 'call_up', ?, ?, NULL, ?)`
+      ).run(leagueId, seasonNumber, team.id, fromMinors.id, Date.now());
+      count++;
+      continue;
+    }
+
+    // Try FA
+    const fromFa = prepared(
+      `SELECT * FROM players WHERE league_id = ? AND team_id IS NULL AND is_drafted = 1
+       ORDER BY overall_rating DESC LIMIT 1`
+    ).get(leagueId) as PlayerRow | undefined;
+
+    if (fromFa) {
+      prepared('UPDATE players SET team_id = ?, is_on_mlb_roster = 1, is_on_25man = 1, minor_level = NULL WHERE id = ?').run(team.id, fromFa.id);
+      prepared(
+        `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at) VALUES (?, ?, 'signing', ?, ?, NULL, ?)`
+      ).run(leagueId, seasonNumber, team.id, fromFa.id, Date.now());
+      count++;
+      continue;
+    }
+
+    console.warn(`[springCuts] Team ${team.id} cannot reach 25 — no more players available (have ${count})`);
+    break;
+  }
 }
 
 // Repair position minimums after cuts by promoting from 40-man reserves or free agents.
@@ -289,7 +397,7 @@ function releaseToFa(
   ).run(player.id);
 
   // Log release transaction
-  prepared(
+  const releaseResult = prepared(
     `INSERT INTO transactions
        (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
      VALUES (?, ?, 'release', ?, ?, ?, ?)`
@@ -301,4 +409,16 @@ function releaseToFa(
     null,
     Date.now()
   );
+
+  // §1.1(b): Insert spring cut release news item
+  insertTransactionNewsItem({
+    leagueId,
+    seasonNumber,
+    gameNumber: 0,
+    eventType: 'release',
+    teamId: null,
+    playerId: player.id,
+    sourceTable: 'transactions',
+    sourceId: releaseResult.lastInsertRowid as number,
+  });
 }

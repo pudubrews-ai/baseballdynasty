@@ -127,10 +127,10 @@ function winProbability(homeTeam: TeamRow, awayTeam: TeamRow, gameId: number): n
 
   // Use mean overall of RP+CL for bullpen_avg (per D6)
   const homeBullpen = prepared(
-    "SELECT overall_rating FROM players WHERE team_id = ? AND is_on_mlb_roster = 1 AND position IN ('RP','CL')"
+    "SELECT overall_rating FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL')"
   ).all(homeTeam.id) as Array<{ overall_rating: number }>;
   const awayBullpen = prepared(
-    "SELECT overall_rating FROM players WHERE team_id = ? AND is_on_mlb_roster = 1 AND position IN ('RP','CL')"
+    "SELECT overall_rating FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL')"
   ).all(awayTeam.id) as Array<{ overall_rating: number }>;
 
   const homeBullpenAvg = homeBullpen.length > 0
@@ -261,10 +261,10 @@ export async function simulateGame(
 
   // Get bullpens
   const homeBullpen = prepared(
-    "SELECT * FROM players WHERE team_id = ? AND is_on_mlb_roster = 1 AND position IN ('RP','CL') ORDER BY overall_rating DESC"
+    "SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL') ORDER BY overall_rating DESC"
   ).all(homeTeam.id) as PlayerRow[];
   const awayBullpen = prepared(
-    "SELECT * FROM players WHERE team_id = ? AND is_on_mlb_roster = 1 AND position IN ('RP','CL') ORDER BY overall_rating DESC"
+    "SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL') ORDER BY overall_rating DESC"
   ).all(awayTeam.id) as PlayerRow[];
 
   // Generate batter box lines

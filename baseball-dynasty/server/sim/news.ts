@@ -4,6 +4,16 @@
 // GAME events are inserted synchronously with no LLM (headline_text = score string).
 
 import { getDb, prepared } from '../db.js';
+import {
+  breakerOpen,
+  callNewsHeadlinesBatch,
+  callTransactionFlavorsBatch,
+  NEWS_CALL_CAP,
+  getNewsCallsRemaining,
+  sanitizeNarrative,
+  type NewsBatchInput,
+  type TxFlavorInput,
+} from '../services/llm.js';
 
 export type NewsBadge = 'ROSTER' | 'TRANSACTION' | 'FRONT OFFICE' | 'INJURY' | 'MILESTONE' | 'GAME';
 
@@ -247,6 +257,201 @@ const FILTER_BADGE_MAP: Record<Exclude<NewsFilter, 'all'>, NewsBadge[]> = {
   injuries: ['INJURY'],
   milestones: ['MILESTONE'],
 };
+
+// Build a procedural fallback headline for a news item when LLM is unavailable.
+function proceduralHeadline(eventType: string, badge: string): string {
+  switch (eventType) {
+    case 'call_up': return 'Player called up to the MLB roster.';
+    case 'send_down': return 'Player optioned to the minor leagues.';
+    case 'dfa': return 'Player designated for assignment.';
+    case 'waiver_claim': return 'Player claimed off waivers.';
+    case 'trade': return 'Trade completed between two teams.';
+    case 'free_agent_signing': return 'Free agent signs with new team.';
+    case 'release': return 'Player released.';
+    case 'non_tender': return 'Player non-tendered.';
+    case 'manager_fired': return 'Manager fired; interim takes over.';
+    case 'gm_fired': return 'GM fired; interim installed.';
+    case 'manager_resigned': return 'Manager resigns.';
+    case 'owner_sold_team': return 'Franchise ownership changes hands.';
+    case 'owner_died': return 'Owner passes away; heir takes control.';
+    case 'injury': return 'Player placed on injured list.';
+    case 'milestone': return 'Player reaches a career milestone.';
+    default: return `${badge} event occurred.`;
+  }
+}
+
+// §1.1(g): Fill pending headlines via LLM batch (up to 10 at a time).
+// Called once per game tick and at phase transitions.
+export async function fillPendingHeadlines(leagueId: number): Promise<void> {
+  const pending = prepared(
+    `SELECT id, event_type, badge, team_id, secondary_team_id, player_id, game_number, details_json
+     FROM news_items WHERE league_id = ? AND is_headline_pending = 1 ORDER BY id LIMIT 10`
+  ).all(leagueId) as Array<{
+    id: number;
+    event_type: string;
+    badge: string;
+    team_id: number | null;
+    secondary_team_id: number | null;
+    player_id: number | null;
+    game_number: number;
+    details_json: string | null;
+  }>;
+
+  if (pending.length === 0) return;
+
+  // Prefetch team and player names for structured prompt building (CB-02: use structured columns only)
+  const teamIds = [...new Set(
+    pending.flatMap(r => [r.team_id, r.secondary_team_id]).filter((id): id is number => id !== null)
+  )];
+  const playerIds = [...new Set(pending.map(r => r.player_id).filter((id): id is number => id !== null))];
+
+  const teamNameMap = new Map<number, string>();
+  if (teamIds.length > 0) {
+    const rows = prepared(
+      `SELECT id, city, name FROM teams WHERE id IN (${teamIds.map(() => '?').join(',')})`
+    ).all(...teamIds) as Array<{ id: number; city: string; name: string }>;
+    for (const r of rows) teamNameMap.set(r.id, `${r.city} ${r.name}`);
+  }
+
+  const playerNameMap = new Map<number, string>();
+  if (playerIds.length > 0) {
+    const rows = prepared(
+      `SELECT id, first_name, last_name FROM players WHERE id IN (${playerIds.map(() => '?').join(',')})`
+    ).all(...playerIds) as Array<{ id: number; first_name: string; last_name: string }>;
+    for (const r of rows) playerNameMap.set(r.id, `${r.first_name} ${r.last_name}`);
+  }
+
+  // Determine if we should use LLM or go straight to procedural fallback
+  const useLlm = !breakerOpen() && getNewsCallsRemaining() > 0;
+
+  if (useLlm) {
+    const events: NewsBatchInput[] = pending.map(r => ({
+      eventId: r.id,
+      eventType: r.event_type,
+      badge: r.badge,
+      teamName: r.team_id ? (teamNameMap.get(r.team_id) ?? null) : null,
+      secondaryTeamName: r.secondary_team_id ? (teamNameMap.get(r.secondary_team_id) ?? null) : null,
+      playerName: r.player_id ? (playerNameMap.get(r.player_id) ?? null) : null,
+      gameNumber: r.game_number,
+      extra: null,
+    }));
+
+    const result = await callNewsHeadlinesBatch(events);
+    const db = getDb();
+    const updateStmt = db.prepare(
+      'UPDATE news_items SET headline_text = ?, is_headline_pending = 0 WHERE id = ?'
+    );
+
+    for (const row of pending) {
+      let headline: string;
+      if (result.ok && result.headlines.has(row.id)) {
+        headline = result.headlines.get(row.id)!;
+      } else {
+        headline = sanitizeNarrative(proceduralHeadline(row.event_type, row.badge));
+      }
+      updateStmt.run(headline, row.id);
+    }
+  } else {
+    // Breaker open or cap hit — write procedural fallbacks immediately
+    const db = getDb();
+    const updateStmt = db.prepare(
+      'UPDATE news_items SET headline_text = ?, is_headline_pending = 0 WHERE id = ?'
+    );
+    for (const row of pending) {
+      updateStmt.run(sanitizeNarrative(proceduralHeadline(row.event_type, row.badge)), row.id);
+    }
+  }
+}
+
+// §1.1(h): Fill pending transaction narratives via LLM batch (up to 10 at a time).
+// Types that get flavor: trade, free_agent_signing, release, waiver_claim, non_tender.
+export async function fillPendingTransactionFlavors(leagueId: number): Promise<void> {
+  const pending = prepared(
+    `SELECT t.id, t.transaction_type, t.team_id, t.player_id
+     FROM transactions t
+     WHERE t.league_id = ? AND t.narrative IS NULL
+       AND t.transaction_type IN ('trade','free_agent_signing','release','waiver_claim','non_tender')
+     ORDER BY t.id LIMIT 10`
+  ).all(leagueId) as Array<{
+    id: number;
+    transaction_type: string;
+    team_id: number | null;
+    player_id: number | null;
+  }>;
+
+  if (pending.length === 0) return;
+
+  // Prefetch names
+  const teamIds = [...new Set(pending.map(r => r.team_id).filter((id): id is number => id !== null))];
+  const playerIds = [...new Set(pending.map(r => r.player_id).filter((id): id is number => id !== null))];
+
+  const teamNameMap = new Map<number, string>();
+  if (teamIds.length > 0) {
+    const rows = prepared(
+      `SELECT id, city, name FROM teams WHERE id IN (${teamIds.map(() => '?').join(',')})`
+    ).all(...teamIds) as Array<{ id: number; city: string; name: string }>;
+    for (const r of rows) teamNameMap.set(r.id, `${r.city} ${r.name}`);
+  }
+
+  const playerNameMap = new Map<number, string>();
+  if (playerIds.length > 0) {
+    const rows = prepared(
+      `SELECT id, first_name, last_name FROM players WHERE id IN (${playerIds.map(() => '?').join(',')})`
+    ).all(...playerIds) as Array<{ id: number; first_name: string; last_name: string }>;
+    for (const r of rows) playerNameMap.set(r.id, `${r.first_name} ${r.last_name}`);
+  }
+
+  const useLlm = !breakerOpen();
+
+  if (useLlm) {
+    const txns: TxFlavorInput[] = pending.map(r => ({
+      txId: r.id,
+      transactionType: r.transaction_type,
+      teamName: r.team_id ? (teamNameMap.get(r.team_id) ?? null) : null,
+      playerName: r.player_id ? (playerNameMap.get(r.player_id) ?? null) : null,
+      extra: null,
+    }));
+
+    const result = await callTransactionFlavorsBatch(txns);
+    const db = getDb();
+    const updateStmt = db.prepare('UPDATE transactions SET narrative = ? WHERE id = ?');
+
+    for (const row of pending) {
+      let flavor: string;
+      if (result.ok && result.flavors.has(row.id)) {
+        flavor = result.flavors.get(row.id)!;
+      } else {
+        flavor = sanitizeNarrative(proceduralTransactionNarrative(row.transaction_type, row.team_id, teamNameMap));
+      }
+      updateStmt.run(flavor, row.id);
+    }
+  } else {
+    const db = getDb();
+    const updateStmt = db.prepare('UPDATE transactions SET narrative = ? WHERE id = ?');
+    for (const row of pending) {
+      updateStmt.run(
+        sanitizeNarrative(proceduralTransactionNarrative(row.transaction_type, row.team_id, teamNameMap)),
+        row.id
+      );
+    }
+  }
+}
+
+function proceduralTransactionNarrative(
+  txType: string,
+  teamId: number | null,
+  teamNameMap: Map<number, string>
+): string {
+  const team = teamId ? (teamNameMap.get(teamId) ?? 'A team') : 'A team';
+  switch (txType) {
+    case 'trade': return `${team} completes a trade.`;
+    case 'free_agent_signing': return `${team} signs a free agent.`;
+    case 'release': return `Player released.`;
+    case 'waiver_claim': return `${team} claims a player off waivers.`;
+    case 'non_tender': return `${team} non-tenders a player.`;
+    default: return `Transaction completed.`;
+  }
+}
 
 // Get news feed with optional filter and limit.
 export function getNewsFeed(params: {

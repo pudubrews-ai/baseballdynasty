@@ -217,8 +217,10 @@ describe('Owner fires GM', () => {
     // Win-now owner, moderate GM
     // win-now threshold for GM firing (no gm mod) = round(8 * 0.8) = 6
     // Set 20 games under .500 → should trigger
+    // Set last_firing_check_game = games_played - 3 so manager check is NOT due (< 5 gap)
+    // This prevents the double-fire guard from blocking the GM check
     prepared(
-      "UPDATE teams SET owner_personality = 'win-now', gm_risk_tolerance = 'moderate', wins = 2, losses = 22, games_played = 24, interim_gm = 0, interim_manager = 0, last_firing_check_game = 0, last_gm_firing_check_game = 0 WHERE id = ?"
+      "UPDATE teams SET owner_personality = 'win-now', gm_risk_tolerance = 'moderate', wins = 2, losses = 22, games_played = 24, interim_gm = 0, interim_manager = 0, last_firing_check_game = 22, last_gm_firing_check_game = 0 WHERE id = ?"
     ).run(gmFireTeamId);
 
     const team = prepared('SELECT * FROM teams WHERE id = ?').get(gmFireTeamId) as any;

@@ -29,6 +29,7 @@
 //   Interims cannot be fired mid-season (stability floor)
 
 import { getDb, prepared, type TeamRow } from '../db.js';
+import { insertFrontOfficeNewsItem } from './news.js';
 
 const BASE_GAMES_UNDER_500 = 8;
 
@@ -72,7 +73,7 @@ function makeInterimManagerName(): string {
   return 'Interim Manager';
 }
 
-// Log a front_office_event
+// Log a front_office_event and return the row id
 function logFrontOfficeEvent(
   db: ReturnType<typeof getDb>,
   leagueId: number,
@@ -82,12 +83,13 @@ function logFrontOfficeEvent(
   departingPerson: string,
   incomingPerson: string,
   narrative: string
-): void {
-  db.prepare(
+): number {
+  const result = db.prepare(
     `INSERT INTO front_office_events
        (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(leagueId, seasonNumber, teamId, eventType, departingPerson, incomingPerson, narrative, Date.now());
+  return result.lastInsertRowid as number;
 }
 
 // Log a news transaction for firing events
@@ -111,7 +113,8 @@ function promoteInterimManager(
   db: ReturnType<typeof getDb>,
   team: TeamRow,
   leagueId: number,
-  seasonNumber: number
+  seasonNumber: number,
+  currentGameNumber: number = 0
 ): void {
   const interimName = makeInterimManagerName();
   const newTactics = Math.max(0, team.manager_tactics - 10);
@@ -129,7 +132,7 @@ function promoteInterimManager(
      WHERE id = ?`
   ).run(interimName, newTactics, newMotivation, newCommunication, team.id);
 
-  logFrontOfficeEvent(
+  const foeRowid = logFrontOfficeEvent(
     db, leagueId, seasonNumber, team.id,
     'manager_fired',
     team.manager_name,
@@ -143,6 +146,17 @@ function promoteInterimManager(
     `${team.city} ${team.name} fire manager ${team.manager_name}.`
   );
 
+  // §1.1(c): Insert front office news item
+  insertFrontOfficeNewsItem({
+    leagueId,
+    seasonNumber,
+    gameNumber: currentGameNumber,
+    eventType: 'manager_fired',
+    teamId: team.id,
+    sourceTable: 'front_office_events',
+    sourceId: foeRowid,
+  });
+
   console.log(`[firings] ${team.city} ${team.name}: manager ${team.manager_name} fired, interim promoted`);
 }
 
@@ -151,7 +165,8 @@ function installInterimGm(
   db: ReturnType<typeof getDb>,
   team: TeamRow,
   leagueId: number,
-  seasonNumber: number
+  seasonNumber: number,
+  currentGameNumber: number = 0
 ): void {
   const interimName = makeInterimGmName();
 
@@ -165,7 +180,7 @@ function installInterimGm(
      WHERE id = ?`
   ).run(interimName, team.id);
 
-  logFrontOfficeEvent(
+  const foeRowid = logFrontOfficeEvent(
     db, leagueId, seasonNumber, team.id,
     'gm_fired',
     team.gm_name,
@@ -179,6 +194,17 @@ function installInterimGm(
     `${team.city} ${team.name} fire GM ${team.gm_name}.`
   );
 
+  // §1.1(c): Insert front office news item
+  insertFrontOfficeNewsItem({
+    leagueId,
+    seasonNumber,
+    gameNumber: currentGameNumber,
+    eventType: 'gm_fired',
+    teamId: team.id,
+    sourceTable: 'front_office_events',
+    sourceId: foeRowid,
+  });
+
   console.log(`[firings] ${team.city} ${team.name}: GM ${team.gm_name} fired, interim installed`);
 }
 
@@ -188,85 +214,101 @@ function evaluateOwnerFiresGm(
   db: ReturnType<typeof getDb>,
   team: TeamRow,
   leagueId: number,
-  seasonNumber: number
-): void {
+  seasonNumber: number,
+  currentGameNumber: number = 0
+): boolean {
   // Can't fire an interim GM
-  if (team.interim_gm === 1) return;
+  if (team.interim_gm === 1) return false;
 
   const threshold = firingThreshold(team.owner_personality, null, false);
   const under500 = gamesUnder500(team);
 
   if (under500 >= threshold) {
-    installInterimGm(db, team, leagueId, seasonNumber);
+    installInterimGm(db, team, leagueId, seasonNumber, currentGameNumber);
     // Update last_gm_firing_check_game
     db.prepare(
       'UPDATE teams SET last_gm_firing_check_game = ? WHERE id = ?'
     ).run(team.games_played, team.id);
+    return true;
   }
+  return false;
 }
 
 // Evaluate manager firing (GM fires manager, or meddling/catastrophic owner fires manager)
 // Called every 5 games.
+// Returns true if a firing occurred (for double-fire guard).
 function evaluateManagerFiring(
   db: ReturnType<typeof getDb>,
   team: TeamRow,
   leagueId: number,
-  seasonNumber: number
-): void {
+  seasonNumber: number,
+  currentGameNumber: number = 0
+): boolean {
   // Can't fire an interim manager
-  if (team.interim_manager === 1) return;
+  if (team.interim_manager === 1) return false;
 
   const under500 = gamesUnder500(team);
   const ownerPersonality = team.owner_personality;
 
   if (ownerPersonality === 'meddling') {
     // Meddling owner fires manager directly, bypasses GM
-    // Uses threshold with only owner patience modifier
     const threshold = firingThreshold(ownerPersonality, null, false);
+    // §3.5: Always advance last_firing_check_game when check is due, even if no firing
+    db.prepare(
+      'UPDATE teams SET last_firing_check_game = ? WHERE id = ?'
+    ).run(team.games_played, team.id);
     if (under500 >= threshold) {
-      promoteInterimManager(db, team, leagueId, seasonNumber);
-      db.prepare(
-        'UPDATE teams SET last_firing_check_game = ? WHERE id = ?'
-      ).run(team.games_played, team.id);
+      promoteInterimManager(db, team, leagueId, seasonNumber, currentGameNumber);
+      return true;
     }
-    return;
+    return false;
   }
 
+  // §3.5: Always advance last_firing_check_game when check is due
+  db.prepare(
+    'UPDATE teams SET last_firing_check_game = ? WHERE id = ?'
+  ).run(team.games_played, team.id);
+
   // Non-meddling owner fires manager directly (catastrophic — base threshold × 2.5)
-  // This check comes BEFORE GM fires manager — owner breaks glass supersedes normal GM authority.
   const catastrophicThreshold = Math.round(firingThreshold(ownerPersonality, null, false) * 2.5);
   if (under500 >= catastrophicThreshold) {
     // Owner breaks glass — fires manager directly, bypassing GM
-    promoteInterimManager(db, team, leagueId, seasonNumber);
+    promoteInterimManager(db, team, leagueId, seasonNumber, currentGameNumber);
 
     // GM job_security -= 2 (owner embarrassment)
     db.prepare(
-      'UPDATE teams SET job_security = MAX(0, job_security - 2), last_firing_check_game = ? WHERE id = ?'
-    ).run(team.games_played, team.id);
+      'UPDATE teams SET job_security = MAX(0, job_security - 2) WHERE id = ?'
+    ).run(team.id);
 
-    // Log "owner breaks glass" news event
-    db.prepare(
-      `INSERT INTO transactions
-         (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
-       VALUES (?, ?, 'manager_fired', ?, NULL, ?, ?)`
-    ).run(
-      leagueId, seasonNumber, team.id,
-      `Owner of ${team.city} ${team.name} fires manager directly — front office shakeup.`,
-      Date.now()
+    // Log "owner breaks glass" front_office_events entry and news item
+    const foeRowid = logFrontOfficeEvent(
+      db, leagueId, seasonNumber, team.id,
+      'manager_fired',
+      team.manager_name,
+      'Interim Manager',
+      `Owner of ${team.city} ${team.name} fires manager directly — front office shakeup.`
     );
+    insertFrontOfficeNewsItem({
+      leagueId,
+      seasonNumber,
+      gameNumber: currentGameNumber,
+      eventType: 'manager_fired',
+      teamId: team.id,
+      sourceTable: 'front_office_events',
+      sourceId: foeRowid,
+    });
 
     console.log(`[firings] ${team.city} ${team.name}: owner breaks glass, manager fired, GM job_security -= 2`);
-    return;
+    return true;
   }
 
   // GM fires manager (non-meddling owner, below catastrophic threshold)
   const gmThreshold = firingThreshold(ownerPersonality, team.gm_risk_tolerance, true);
   if (under500 >= gmThreshold) {
-    promoteInterimManager(db, team, leagueId, seasonNumber);
-    db.prepare(
-      'UPDATE teams SET last_firing_check_game = ? WHERE id = ?'
-    ).run(team.games_played, team.id);
+    promoteInterimManager(db, team, leagueId, seasonNumber, currentGameNumber);
+    return true;
   }
+  return false;
 }
 
 // Main export: evaluate firings for one team.
@@ -276,7 +318,8 @@ function evaluateManagerFiring(
 export function evaluateFirings(
   team: TeamRow,
   leagueId: number,
-  seasonNumber: number
+  seasonNumber: number,
+  currentGameNumber: number = 0
 ): void {
   const db = getDb();
 
@@ -287,15 +330,21 @@ export function evaluateFirings(
 
     // Manager check every 5 games
     const managerCheckDue = freshTeam.games_played - freshTeam.last_firing_check_game >= 5;
+    let managerFired = false;
     if (managerCheckDue) {
-      evaluateManagerFiring(db, freshTeam, leagueId, seasonNumber);
+      managerFired = evaluateManagerFiring(db, freshTeam, leagueId, seasonNumber, currentGameNumber);
     }
 
-    // GM check every 10 games
+    // GM check every 10 games — §3.5: skip if manager was fired this tick (double-fire guard)
     const gmCheckDue = freshTeam.games_played - freshTeam.last_gm_firing_check_game >= 10;
-    if (gmCheckDue) {
-      evaluateOwnerFiresGm(db, freshTeam, leagueId, seasonNumber);
+    if (gmCheckDue && !managerFired) {
+      evaluateOwnerFiresGm(db, freshTeam, leagueId, seasonNumber, currentGameNumber);
       // Always update check timestamp even if no firing
+      db.prepare(
+        'UPDATE teams SET last_gm_firing_check_game = ? WHERE id = ?'
+      ).run(freshTeam.games_played, freshTeam.id);
+    } else if (gmCheckDue) {
+      // GM check due but skipped (manager fired this tick) — still advance cadence
       db.prepare(
         'UPDATE teams SET last_gm_firing_check_game = ? WHERE id = ?'
       ).run(freshTeam.games_played, freshTeam.id);

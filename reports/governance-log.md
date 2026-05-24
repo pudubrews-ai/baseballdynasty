@@ -504,3 +504,53 @@ Migration 007 is a single-file teams table-swap with FK-pragma management. Build
 ## Phase 2 — Build and Verify (Iteration 1)
 
 **Step 4:** Spawning Developer for v0.2.0 implementation (reads only feature spec + developer-instructions-1).
+
+**Step 4 COMPLETE:** Developer build complete. 349 tests passing (40 test files), 0 failures, 0 TypeScript errors, 0 ESLint errors. Turbo benchmark ~1,060ms for full regular season (budget: 15,000ms). Phases 1-14 all implemented: migration 007 (teams table-swap), LLM restructure, waiver wire, call-up/send-down, firing logic, market dynamics, prospect development, news feed backend + frontend, all new API endpoints, all data-testids. Completion report: `reports/v0.2.0-developer-build-complete.md`.
+
+**Step 5:** Spawning CISO and Adversary as background agents for post-build implementation review.
+
+**Step 5 COMPLETE:**
+
+`reports/v0.2.0-ciso-post-build.md` — 0 Critical / 0 High / 0 new Medium / 2 Low (NB-1, NB-2). 9 of 11 pre-build findings RESOLVED. CB-2 and CB-9 PARTIALLY RESOLVED (low risk). Key new finding: NB-1 — news-headline LLM pipeline is built and unit-tested but never invoked by running simulation; News tab will be empty in live sim (functional gap, not a security issue).
+
+`reports/v0.2.0-adversary-post-build.md` — Verdict: NOT READY. 2 Critical / 5 High / 6 Medium / 4 Low.
+- PB-01 (Critical): Entire news feed produces zero data — no event producer writes to news_items. callNewsHeadlinesBatch has zero callers. Ticker permanently empty. newsApi.test.ts only inserts rows by hand.
+- PB-02 (Critical): Duplicate new-dynasty-button testid still at App.tsx:164 and :213. Explicitly required fix per D13, unresolved.
+- High: Optioned 40-man players vanish from minors API. Spring cuts repair path dead code (no 25-man guarantee). "Recent" OPS/ERA triggers read season-cumulative stats. Trade matcher uses broken stub instead of ARCHETYPES table.
+
+**Governance Decision — Run all testers despite 2 Criticals:** Neither Critical prevents server startup. Testers run sequentially (Vite strictPort:true, SQLite single-file DB).
+
+**Step 6:** Spawning API Tester (synchronous), then UI Tester A, then UI Tester B.
+
+**Step 6 — API Tester COMPLETE:** `reports/v0.2.0-api-tester-results.md` — 24 Pass / 34 Fail / 17 Skip.
+Key: Server requires tsc migration copy fix before startup. Group 11 error handling all passes (exact 400 body, empty 200 arrays). Persistence (Group 10) passes. Key failures: news system orphaned (zero event producers write news_items); call-ups/send-downs/DFA never trigger across 500+ games; trades fire but not written to transactions table; owner_personality not returned by any API endpoint; spring cuts leave team 15 with 27 players on 25-man (invariant violation).
+
+**Step 6 — UI Tester A COMPLETE:** `reports/v0.2.0-ui-tester-a-results.md` — 26 Pass / 5 Fail / 51 Skip.
+Group 0 all passes (server on :3001, client on :5173, waiverCount in /api/state, DB readable). Failures: transactions uses `narrative` field not `flavor`; no `is_on_40man` column; schema uses `minor_level`/`free_agent_eligible` not `level`/`fa_eligible`; `news-ticker` testid absent (implementation uses `game-ticker`); `news-tab` nav button is `nav-news` not `news-tab`.
+
+**Step 6 — UI Tester B COMPLETE:** `reports/v0.2.0-ui-tester-b-results.md` — 11 Pass / 10 Fail / 9 Skip.
+All 5 filter buttons (news-filter-all/transactions/frontoffice/injuries/milestones) and news-feed present and functional. Failures: news-ticker not global (game-ticker on league page only, shows 20 not 5); news-tab nav testid is nav-news; news-item tests skipped (no events in DB); waivers-list and waiver-player-{id} testids absent from UI entirely; minors-stats-{playerId} testids missing from player rows.
+
+**Step 7:** Spawning Architect for ITERATE/COMPLETE decision.
+
+**Step 7 COMPLETE:** `reports/v0.2.0-architect-eval-1.md` and `reports/v0.2.0-developer-instructions-2.md` written. Decision: **ITERATE**.
+
+**Confirmed severity totals:** 4 Critical / 8 High / 8 Medium.
+
+**4 Confirmed Criticals:**
+1. News pipeline inert — zero production callers write to news_items; both news tab and ticker render nothing
+2. Duplicate new-dynasty-button testid (App.tsx:164 and :213)
+3. Call-up/DFA chain never fires — trigger conditions unreachable (callup.ts:122 needs active25Man < 23 with no injury system; "recent" windows never slide)
+4. Migrations not copied to dist on build (tsc doesn't copy .sql files → boot crash on clean deploy)
+
+**5 False positives cleared:**
+- Trades ARE written to transactions table (tradeDeadline.ts:122-129, 42 rows confirmed) — API Tester query window missed them
+- Schema field mismatches (level/is_on_40man/fa_eligible) are test-spec drift vs Architect rulings, not defects
+- Owner-death personality fix confirmed resolved
+- UI Testers' "game-ticker vs news-ticker" was stale-build artifact (ran v0.1.0 dist)
+
+---
+
+## Phase 2 — Iteration 2
+
+**Step 4 (Iteration 2):** Spawning Developer for all Critical/High/Medium fixes per developer-instructions-2.md.
