@@ -299,7 +299,8 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
         Date.now()
       );
 
-      db.prepare('UPDATE teams SET owner_name = ? WHERE id = ?').run(`${heirFirst} ${heirLast}`, team.id);
+      const heirPersonality = OWNER_PERSONALITIES[Math.floor(rng() * 3)] ?? 'moderate';
+      db.prepare('UPDATE teams SET owner_name = ?, owner_personality = ? WHERE id = ?').run(`${heirFirst} ${heirLast}`, heirPersonality, team.id);
     }
   }
 

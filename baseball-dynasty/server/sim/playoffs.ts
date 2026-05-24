@@ -246,6 +246,11 @@ async function runSeries(
         if (homeWon) wins2++;
         else wins1++;
       }
+    } else {
+      // §guard: game was skipped (no roster/pitcher) — award procedural home win to avoid infinite loop
+      console.warn(`[playoffs] Game ${gameNum} not in game_log (skipped); awarding procedural home win`);
+      if (homeTeam.id === seed1.teamId) wins1++;
+      else wins2++;
     }
   }
 
