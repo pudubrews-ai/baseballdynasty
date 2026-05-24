@@ -10,7 +10,8 @@ const GM_PHILOSOPHIES: Array<'win-now' | 'rebuild' | 'balanced'> = ['win-now', '
 const GM_RISK_TOLERANCES: Array<'conservative' | 'moderate' | 'aggressive'> = ['conservative', 'moderate', 'aggressive'];
 const GM_FOCUSES: Array<'hitting' | 'pitching' | 'defense'> = ['hitting', 'pitching', 'defense'];
 const MANAGER_STYLES: Array<'aggressive' | 'balanced' | 'conservative'> = ['aggressive', 'balanced', 'conservative'];
-const OWNER_PERSONALITIES: Array<'meddling' | 'hands-off' | 'moderate'> = ['meddling', 'hands-off', 'moderate'];
+// v0.2.0: expanded owner_personality includes win-now and patient
+const OWNER_PERSONALITIES: Array<'meddling' | 'hands-off' | 'moderate' | 'win-now' | 'patient'> = ['meddling', 'hands-off', 'moderate', 'win-now', 'patient'];
 
 export async function runOffseason(league: LeagueRow, isTurbo: boolean): Promise<void> {
   const leagueId = league.id;
@@ -269,7 +270,7 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
     if (rng() < 0.02) {
       const newFirst = ['Richard', 'William', 'James', 'George', 'Edward'][Math.floor(rng() * 5)] ?? 'Richard';
       const newLast = ['Thompson', 'Anderson', 'Taylor', 'Moore', 'Jackson'][Math.floor(rng() * 5)] ?? 'Thompson';
-      const newPersonality = OWNER_PERSONALITIES[Math.floor(rng() * 3)] ?? 'moderate';
+      const newPersonality = OWNER_PERSONALITIES[Math.floor(rng() * OWNER_PERSONALITIES.length)] ?? 'moderate';
 
       db.prepare(
         'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
@@ -299,7 +300,7 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
         Date.now()
       );
 
-      const heirPersonality = OWNER_PERSONALITIES[Math.floor(rng() * 3)] ?? 'moderate';
+      const heirPersonality = OWNER_PERSONALITIES[Math.floor(rng() * OWNER_PERSONALITIES.length)] ?? 'moderate';
       db.prepare('UPDATE teams SET owner_name = ?, owner_personality = ? WHERE id = ?').run(`${heirFirst} ${heirLast}`, heirPersonality, team.id);
     }
   }
