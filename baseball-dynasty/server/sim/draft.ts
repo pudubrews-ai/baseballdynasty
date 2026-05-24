@@ -378,26 +378,22 @@ export function assignRosterLevels(leagueId: number): void {
       'SELECT p.* FROM players p WHERE p.team_id = ? AND p.is_drafted = 1 ORDER BY p.overall_rating DESC'
     ).all(team.id) as PlayerRow[];
 
+    // AB-10 FIX §1.1a: Assign minor league levels by ROSTER RANK (not absolute rating).
+    // Previously, rating-threshold gating left AAA empty (26th-40th best players rate below 60).
+    // Rank-based assignment guarantees every team gets a populated AAA tier regardless of ratings.
     for (let i = 0; i < drafted.length; i++) {
       const player = drafted[i]!;
       if (i < 25) {
-        // MLB roster (25-man active)
+        // MLB 25-man active
         prepared('UPDATE players SET is_on_mlb_roster = 1, is_on_25man = 1, minor_level = NULL WHERE id = ?').run(player.id);
       } else if (i < 40) {
-        // 40-man but not 25-man (optioned to AAA)
-        let level: string;
-        if (player.overall_rating >= 60) level = 'AAA';
-        else if (player.overall_rating >= 50) level = 'AA';
-        else level = 'A';
+        // 40-man, optioned to AAA/AA by RANK (~7 AAA at ranks 26-32, ~8 AA at ranks 33-40)
+        const level = i < 32 ? 'AAA' : 'AA';
         prepared('UPDATE players SET is_on_mlb_roster = 1, is_on_25man = 0, minor_level = ? WHERE id = ?').run(level, player.id);
       } else {
-        // Pure minor leaguers (not on 40-man)
-        let level: string;
-        if (player.overall_rating >= 60) level = 'AAA';
-        else if (player.overall_rating >= 50) level = 'AA';
-        else if (player.overall_rating >= 40) level = 'A';
-        else level = 'Rookie';
-
+        // Pure minor leaguers (not on 40-man): AA/A/Rookie by rank-from-40
+        const depth = i - 40;
+        const level = depth < 10 ? 'AA' : depth < 30 ? 'A' : 'Rookie';
         prepared('UPDATE players SET is_on_mlb_roster = 0, is_on_25man = 0, minor_level = ? WHERE id = ?').run(level, player.id);
       }
     }

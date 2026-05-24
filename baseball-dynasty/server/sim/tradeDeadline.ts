@@ -284,12 +284,23 @@ export function forceMinimumTrades(
     ).all(buyerId) as PlayerRow[];
     if (tier3.length > 0) return tier3;
 
-    // Tier 4: lowest-rated 25-man bench player (last resort)
-    const tier4 = prepared(
-      `SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND waiver_state = 'none'
+    // Tier 4 (AB-13 FIX §3.1): Only send 25-man bench players who are clearly surplus at their
+    // position (position count > 1 on the 25-man). Never send the sole regular at a position.
+    // After §1.1 stocks AAA, Tier 1 carries most forced trades; this is a last-resort guard.
+    const surplusPositions = prepared(
+      `SELECT position FROM players WHERE team_id = ? AND is_on_25man = 1 AND waiver_state = 'none'
        AND position NOT IN ('SP', 'CL', 'SS', 'C', 'CF')
+       GROUP BY position HAVING COUNT(*) > 1`
+    ).all(buyerId) as Array<{ position: string }>;
+    if (surplusPositions.length === 0) return []; // no surplus — return nothing rather than gut a starter
+
+    const surplusPosIn = surplusPositions.map(() => '?').join(',');
+    const surplusPosValues = surplusPositions.map(r => r.position);
+    const tier4 = (prepared(
+      `SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND waiver_state = 'none'
+       AND position IN (${surplusPosIn})
        ORDER BY overall_rating ASC LIMIT 1`
-    ).all(buyerId) as PlayerRow[];
+    ).all(buyerId, ...surplusPosValues)) as PlayerRow[];
     return tier4;
   }
 

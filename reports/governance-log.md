@@ -593,3 +593,39 @@ All 5 filter buttons (news-filter-all/transactions/frontoffice/injuries/mileston
 ## Phase 2 — Iteration 3
 
 **Step 4 (Iteration 3):** Spawning Developer for Iteration 3 fixes per developer-instructions-3.md.
+
+**Step 4 (Iteration 3) COMPLETE:** 401 tests passing (0 failures), 0 TypeScript errors, 0 ESLint errors, clean build with 7 migrations. Fixes: rosterMaintenance ordering (AB-01), INJURY/MILESTONE news producers wired (AB-02a), forceMinimumTrades guaranteed ≥3 trades on all seeds (AB-02b), root .gitignore fixed for data files (AB-05), news sub-testids added, interim_manager consistency. 4 new regression tests. Completion report: `reports/v0.2.0-developer-iter3-complete.md`.
+
+**Step 5 (Iteration 3):** Spawning CISO and Adversary in parallel for Iteration 3 post-build review.
+
+**Step 5 (Iteration 3) COMPLETE:**
+
+`reports/v0.2.0-ciso-iter3-post-build.md` — 0 Critical / 0 High / 0 Medium / 0 new findings. CB-9 SELECT * now RESOLVED. NB-2/CB-2 Low further mitigated (llm.ts:330 now delimits keyTransactions). All prior resolved items remain resolved. Ship-eligible from security standpoint (third consecutive clean CISO pass).
+
+`reports/v0.2.0-adversary-iter3-post-build.md` — Verdict: NOT READY. 2 Critical / 0 High / 2 Medium / 2 Low.
+- AB-10 (Critical): AAA pipeline essentially empty (3-7 AAA players across all 20 teams, AA=0, ~95% of minor leaguers stuck at level A). No A→AA→AAA promotion path exists. Call-up/send-down/waiver triggers fire into a vacuum — zero in-season call-ups, DFAs, waiver claims, send-downs across full-season probes on seeds 7 and 11.
+- AB-11 (Critical): INJURY news mathematically impossible — worldgen.ts:329 caps injury_prone at 6 but game.ts:761 trigger requires ≥7. MILESTONE news effectively impossible from cold career-0 start. 2 of 15 mandated news types permanently empty. Green tests pass only with synthetic injury_prone=10/career_hr=99 values that worldgen can never produce.
+- AB-12 (Medium): manager_resigned event type has no news_items producer.
+- AB-13 (Medium): forceMinimumTrades can trade active 25-man regulars (not prospect/depth players).
+- Iter-3 Resolutions confirmed: AB-01 ordering fix correct (recency window now populated at evaluators), AB-02b trade floor seed-independent (3+ trades on seeds 7 and 11), AB-02a INJURY/MILESTONE producers wired at engine.ts:451-489, AB-05 gitignore fixed.
+
+**Step 6 (Iteration 3):** Spawning API Tester, then UI Tester A, then UI Tester B.
+
+**Step 6 (Iteration 3) — API Tester COMPLETE:** `reports/v0.2.0-api-tester-iter3-results.md`. Spring cuts 25-man exact PASS. Group 11 errors mostly pass. Fails: rosterMaintenance fires every tick with "team null has 717 on 25-man" (data integrity bug); DFA never fires, waiver wire empty; 0 call-ups across 162 games; in-season firings stalled (0 events despite teams at 4-12 with meddling owners); interim_manager flag=0 on teams showing "Interim Manager" names; /api/teams/:id/minors returns empty array; uppercase type filters return 400.
+
+**Step 6 (Iteration 3) — UI Testers A+B COMPLETE:** Worker A: 23 Pass / 5 Fail. Worker B: 20 Pass / 1 Fail. Positives: news-ticker on all tabs (5 items), all new sub-testids present (news-badge, news-headline, news-game-number, news-item-detail), filters functional, click-expand working, waivers-list present, minors-stats-{playerId} present. Key: INJURY: 22 events and MILESTONE: 2 events found in DB after 11 seasons — contradicts Adversary's "mathematically impossible" AB-11 claim. Architect must assess. Fails: /api/front-office-events 404; LLM headlines fallback (no API key); /api/teams/:id/minors returns empty array via API while UI shows data correctly (route vs endpoint mismatch).
+
+**Step 7 (Iteration 3):** Spawning Architect for ITERATE/COMPLETE decision.
+
+**Step 7 (Iteration 3) COMPLETE:** `reports/v0.2.0-architect-eval-3.md` and `reports/v0.2.0-developer-instructions-4.md` written. Decision: **ITERATE**. 2 Critical / 1 High / 3 Medium. 4 false positives declared.
+- AB-11 REAL DEFECT: worldgen injury_prone cap=6, game trigger=7 (one-point dead band). DB injuries stale/synthetic. Fix: worldgen cap.
+- AB-10 ROOT CAUSE: draft.ts:386 assigns levels by absolute rating → team's 26th-40th cascade to level A. Fix: rank-based + promotion path.
+- Null-team/is_on_25man PROMOTED TO HIGH: offseason.ts:82,263 null team_id without clearing is_on_25man → 717 phantom 25-man players.
+- False positives: /api/front-office-events (not in spec); /api/teams/:id/minors "empty" (level-keyed object, not array); uppercase type 400s (canonical); stale-DB injuries.
+- Architect framing: Iteration 4 is the final pass — mechanical fixes, mandated fresh-world regression tests.
+
+---
+
+## Phase 2 — Iteration 4 (Final)
+
+**Step 4 (Iteration 4):** Spawning Developer for final fixes per developer-instructions-4.md.

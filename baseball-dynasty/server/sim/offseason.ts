@@ -79,7 +79,9 @@ async function runRetirementStep(leagueId: number, seasonNumber: number): Promis
   ).all(leagueId) as PlayerRow[];
 
   for (const player of retirees) {
-    db.prepare('UPDATE players SET team_id = NULL, is_on_mlb_roster = 0 WHERE id = ?').run(player.id);
+    // AB-NULL FIX §2.1: also clear is_on_25man and minor_level so retired players don't
+    // appear as phantom 25-man members (was creating 717+ ghost rows after 11 seasons).
+    db.prepare('UPDATE players SET team_id = NULL, is_on_mlb_roster = 0, is_on_25man = 0, minor_level = NULL WHERE id = ?').run(player.id);
     db.prepare(
       'INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
     ).run(
@@ -146,6 +148,61 @@ async function runDevelopmentStep(leagueId: number, seed: number): Promise<void>
 
   devTx();
   console.log(`[offseason] Development: ${players.length} players aged and developed`);
+
+  // AB-10 FIX §1.1b: Promote prospects up a level when they outgrow their current one.
+  // This keeps AAA stocked over multi-season play after the initial worldgen cohort graduates.
+  runProspectPromotionStep(leagueId, db);
+}
+
+// AB-10 §1.1b: Offseason prospect level promotion pass.
+// Runs once per offseason (not per tick) to avoid churn.
+// Rules:
+//   A  with overall_rating >= 50 AND age <= 25 → promote to AA
+//   AA with overall_rating >= 58 AND age <= 27 → promote to AAA
+// Cap: team's AAA count must not exceed 40-man space minus 25-man (i.e., 15 max).
+function runProspectPromotionStep(leagueId: number, db: ReturnType<typeof getDb>): void {
+  const teams = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
+  let promoted = 0;
+
+  const promotionTx = db.transaction(() => {
+    for (const team of teams) {
+      // Count current AAA on this team
+      const aaaCount = (prepared(
+        `SELECT COUNT(*) as cnt FROM players WHERE team_id = ? AND minor_level = 'AAA'`
+      ).get(team.id) as { cnt: number }).cnt;
+
+      const aaaCapacity = Math.max(0, 15 - aaaCount); // Max 15 AAA slots (40-man minus 25-man)
+
+      // Promote AA → AAA (highest rated eligible first, within capacity)
+      if (aaaCapacity > 0) {
+        const aaToAaa = prepared(
+          `SELECT * FROM players WHERE team_id = ? AND minor_level = 'AA'
+           AND overall_rating >= 58 AND age <= 27
+           ORDER BY overall_rating DESC LIMIT ?`
+        ).all(team.id, aaaCapacity) as PlayerRow[];
+
+        for (const p of aaToAaa) {
+          prepared(`UPDATE players SET minor_level = 'AAA' WHERE id = ?`).run(p.id);
+          promoted++;
+        }
+      }
+
+      // Promote A → AA (no cap needed on AA, just promote eligible)
+      const aToAa = prepared(
+        `SELECT * FROM players WHERE team_id = ? AND minor_level = 'A'
+         AND overall_rating >= 50 AND age <= 25
+         ORDER BY overall_rating DESC LIMIT 10`
+      ).all(team.id) as PlayerRow[];
+
+      for (const p of aToAa) {
+        prepared(`UPDATE players SET minor_level = 'AA' WHERE id = ?`).run(p.id);
+        promoted++;
+      }
+    }
+  });
+
+  promotionTx();
+  console.log(`[offseason] Prospect promotion: ${promoted} players promoted`);
 }
 
 // Step 3: Non-tender — analytics/small-market GMs non-tender high-arb players
@@ -260,7 +317,8 @@ async function runFreeAgencyStep(leagueId: number, seasonNumber?: number): Promi
   ).all(leagueId) as PlayerRow[];
 
   for (const fa of freeAgents) {
-    prepared('UPDATE players SET team_id = NULL, is_on_mlb_roster = 0, minor_level = NULL WHERE id = ?').run(fa.id);
+    // AB-NULL FIX §2.1: also clear is_on_25man so free agents don't appear as phantom 25-man members.
+    prepared('UPDATE players SET team_id = NULL, is_on_mlb_roster = 0, is_on_25man = 0, minor_level = NULL WHERE id = ?').run(fa.id);
   }
 
   const availableFAs = prepared(

@@ -25,14 +25,26 @@ import { runProspectDev } from './prospectDev.js';
 import { evaluateTradeDeadline, setTradePosture } from './tradeDeadline.js';
 import { evaluateFirings } from './firings.js';
 
+// AB-NULL §4.3: One-time self-heal for carried-over DBs with stale is_on_25man on null-team players.
+// Called once per runRosterMaintenance invocation — cheap (no-op if already clean).
+function cleanupPhantom25man(leagueId: number): void {
+  prepared(
+    `UPDATE players SET is_on_25man = 0 WHERE league_id = ? AND team_id IS NULL AND is_on_25man = 1`
+  ).run(leagueId);
+}
+
 // Roster invariant: each team should have exactly 25 on is_on_25man=1 (hard cap after cuts).
 // During regular season, log warnings for violations. Auto-trim >25, auto-promote <25.
 function checkRosterInvariant(leagueId: number): void {
   const league = prepared('SELECT season_number FROM leagues WHERE id = ?').get(leagueId) as { season_number: number } | undefined;
   if (!league) return;
 
+  // AB-NULL FIX §2.1: scope to real teams (team_id IS NOT NULL) so retired/FA players
+  // with stale is_on_25man=1 never form a null group that reports or loops forever.
   const counts = prepared(
-    `SELECT team_id, COUNT(*) as cnt FROM players WHERE league_id = ? AND is_on_25man = 1 GROUP BY team_id`
+    `SELECT team_id, COUNT(*) as cnt FROM players
+     WHERE league_id = ? AND is_on_25man = 1 AND team_id IS NOT NULL
+     GROUP BY team_id`
   ).all(leagueId) as Array<{ team_id: number; cnt: number }>;
 
   for (const v of counts) {
@@ -87,6 +99,13 @@ export function runRosterMaintenance(
   gameNumber: number
 ): void {
   const db = getDb();
+
+  // AB-NULL §4.3: Self-heal stale is_on_25man=1 rows for null-team players (cheap, no-op if clean).
+  try {
+    cleanupPhantom25man(leagueId);
+  } catch (err) {
+    console.warn('[rosterMaintenance] Phantom 25man cleanup error:', err);
+  }
 
   // Step 1: Service-time batch (league-wide, only when gameNumber % 10 === 0)
   // CB-08: additive-only, gated by last_service_time_update_game.

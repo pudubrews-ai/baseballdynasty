@@ -180,7 +180,7 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
     `INSERT INTO teams (league_id, name, city, state_province, region, market_size, conference, division, color, wins, losses, runs_scored, runs_allowed, games_played, payroll_budget, current_payroll, revenue, gm_name, gm_philosophy, gm_risk_tolerance, gm_focus, gm_archetype, manager_name, manager_style, manager_tactics, manager_motivation, manager_communication, owner_name, owner_personality, owner_age, job_security, abbreviation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 5, ?)`
   );
   const insertPlayer = db.prepare(
-    `INSERT INTO players (league_id, team_id, first_name, last_name, age, position, overall_rating, potential, potential_revealed, contact, power, speed, fielding, arm, pitching_velocity, pitching_control, pitching_stamina, is_on_mlb_roster, is_on_25man, annual_salary, contract_years_remaining, service_time, service_time_days, injury_prone, coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country, is_drafted) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
+    `INSERT INTO players (league_id, team_id, first_name, last_name, age, position, overall_rating, potential, potential_revealed, contact, power, speed, fielding, arm, pitching_velocity, pitching_control, pitching_stamina, is_on_mlb_roster, is_on_25man, annual_salary, contract_years_remaining, service_time, service_time_days, injury_prone, coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country, is_drafted, career_hits, career_hr, career_rbi, career_ip, career_k) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`
   );
 
   const doWorldgen = db.transaction(() => {
@@ -325,8 +325,10 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
       // Contract years: 1-4
       const contractYears = randInt(rng, 1, 4);
 
-      // injury_prone: weighted toward 3-6
-      const injuryProne = randInt(rng, 3, 6);
+      // injury_prone: most players 3-6, a tail of injury-prone players 7-9
+      // AB-11 FIX: widened range to include ≥7 so the game.ts trigger (injury_prone >= 7) is reachable.
+      // randInt(3,9) puts ~43% of players at ≥7; the 0.05 per-game gate keeps actual injuries sparse.
+      const injuryProne = randInt(rng, 3, 9);
 
       // Name generation
       const firstName = pickRandomName(rng, origin, 'first');
@@ -350,6 +352,31 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
 
       // v0.2.0: service_time_days = serviceTime * 30 (AB-05 rescaling)
       const serviceTimeDays = serviceTime * 30;
+
+      // AB-11 FIX §1.2b: Seed age-scaled career stats so veterans sit near milestone thresholds.
+      // Milestones fire on crossing 100/200 HR, 2000 hits, 1000 K — all starting at 0 makes them
+      // unreachable in a fresh play horizon. Scale by (age - 22) × rate, clamped 0..threshold-1
+      // so a player never *starts* past a threshold (they must cross it in play).
+      const yearsPlayed = Math.max(0, age - 22);
+      let careerHits = 0;
+      let careerHr = 0;
+      let careerRbi = 0;
+      let careerIp = 0;
+      let careerK = 0;
+      if (!isPitcher && yearsPlayed > 0) {
+        // Approximate per-year rates from ratings (contact drives hits, power drives HR)
+        const hitsPerYear = Math.round((contact ?? 50) * 4);
+        const hrPerYear = Math.round((power ?? 50) / 12);
+        const rbiPerYear = Math.round(hrPerYear * 3.5);
+        careerHits = Math.min(1999, yearsPlayed * hitsPerYear);
+        careerHr = Math.min(199, yearsPlayed * hrPerYear);
+        careerRbi = yearsPlayed * rbiPerYear;
+      } else if (isPitcher && yearsPlayed > 0) {
+        const ipPerYear = Math.round((pitchingStamina ?? 50) * 2.5);
+        const kPerYear = Math.round((pitchingVelocity ?? 50) * 0.06 * ipPerYear);
+        careerIp = yearsPlayed * ipPerYear;
+        careerK = Math.min(999, yearsPlayed * kPerYear);
+      }
 
       insertPlayer.run(
         leagueId,
@@ -378,6 +405,11 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
         origin,
         '', // birthplace_city
         country,
+        careerHits,
+        careerHr,
+        careerRbi,
+        careerIp,
+        careerK,
       );
     }
 

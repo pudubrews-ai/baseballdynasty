@@ -123,10 +123,15 @@ playersRouter.get('/search', async (req: Request, res: Response, next: NextFunct
 });
 
 // GET /api/players/:id/transactions — full transaction history for a player
+// §4.4 (§0.5): returns 404 when the player id does not exist (was 200 []).
 playersRouter.get('/:id/transactions', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const idResult = playerIdSchema.safeParse(req.params['id']);
     if (!idResult.success) { res.status(400).json({ error: 'invalid_id' }); return; }
+
+    // §4.4: existence check — 404 if player not found at all (league-independent)
+    const playerExists = prepared('SELECT id FROM players WHERE id = ?').get(idResult.data) as { id: number } | undefined;
+    if (!playerExists) { res.status(404).json({ error: 'Player not found' }); return; }
 
     const league = getActiveLeague();
     if (!league) { res.json([]); return; }

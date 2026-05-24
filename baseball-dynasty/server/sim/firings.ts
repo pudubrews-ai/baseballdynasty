@@ -250,6 +250,43 @@ function evaluateManagerFiring(
   const under500 = gamesUnder500(team);
   const ownerPersonality = team.owner_personality;
 
+  // §3.2 FIX: manager_resigned — a non-interim manager with job_security=0 under a meddling owner
+  // resigns rather than being fired. One branch, one event type. Fires before the forced-firing path.
+  if (ownerPersonality === 'meddling' && (team.job_security ?? 10) <= 0) {
+    const resigningName = team.manager_name;
+    const interimName = makeInterimManagerName();
+    const newTactics = Math.max(0, team.manager_tactics - 10);
+    const newMotivation = Math.max(0, team.manager_motivation - 10);
+    const newCommunication = Math.max(0, team.manager_communication - 10);
+
+    db.prepare(
+      `UPDATE teams SET manager_name = ?, manager_tactics = ?, manager_motivation = ?,
+       manager_communication = ?, interim_manager = 1, job_security = 5,
+       last_firing_check_game = ? WHERE id = ?`
+    ).run(interimName, newTactics, newMotivation, newCommunication, team.games_played, team.id);
+
+    const foeRowid = logFrontOfficeEvent(
+      db, leagueId, seasonNumber, team.id,
+      'manager_resigned',
+      resigningName,
+      interimName,
+      `${team.city} ${team.name} manager ${resigningName} resigns amid front-office pressure. ${interimName} steps in.`
+    );
+
+    insertFrontOfficeNewsItem({
+      leagueId,
+      seasonNumber,
+      gameNumber: currentGameNumber,
+      eventType: 'manager_resigned',
+      teamId: team.id,
+      sourceTable: 'front_office_events',
+      sourceId: foeRowid,
+    });
+
+    console.log(`[firings] ${team.city} ${team.name}: manager ${resigningName} resigned (job_security=0, meddling owner)`);
+    return true;
+  }
+
   if (ownerPersonality === 'meddling') {
     // Meddling owner fires manager directly, bypasses GM
     const threshold = firingThreshold(ownerPersonality, null, false);
