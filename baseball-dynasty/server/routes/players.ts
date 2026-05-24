@@ -55,14 +55,14 @@ playersRouter.get('/leaders', async (req: Request, res: Response, next: NextFunc
        ORDER BY ss.rbi DESC LIMIT 10`
     ).all(league.id, season) as LeaderRow[]).map(mapLeader('RBI'));
 
-    // ERA leaders (min 50 IP — raised from 30 per §3.6)
+    // ERA leaders (min 75 IP — raised from 50 per §2.5 Iter 4 to improve realism)
     const era = (prepared(
       `SELECT p.first_name, p.last_name, t.city || ' ' || t.name as team_name,
        (ss.earned_runs * 9.0) / ss.innings_pitched as value
        FROM season_stats ss
        JOIN players p ON p.id = ss.player_id
        LEFT JOIN teams t ON t.id = ss.team_id
-       WHERE ss.league_id = ? AND ss.season_number = ? AND ss.innings_pitched >= 50
+       WHERE ss.league_id = ? AND ss.season_number = ? AND ss.innings_pitched >= 75
        ORDER BY value ASC LIMIT 10`
     ).all(league.id, season) as LeaderRow[]).map(mapLeader('ERA'));
 
@@ -77,14 +77,14 @@ playersRouter.get('/leaders', async (req: Request, res: Response, next: NextFunc
        ORDER BY ss.strikeouts_pitching DESC LIMIT 10`
     ).all(league.id, season) as LeaderRow[]).map(mapLeader('K'));
 
-    // WHIP leaders (min 50 IP — raised from 30 per §3.6)
+    // WHIP leaders (min 75 IP — raised from 50 per §2.5 Iter 4 to improve realism)
     const whip = (prepared(
       `SELECT p.first_name, p.last_name, t.city || ' ' || t.name as team_name,
        (ss.walks_pitching + ss.hits) / ss.innings_pitched as value
        FROM season_stats ss
        JOIN players p ON p.id = ss.player_id
        LEFT JOIN teams t ON t.id = ss.team_id
-       WHERE ss.league_id = ? AND ss.season_number = ? AND ss.innings_pitched >= 50
+       WHERE ss.league_id = ? AND ss.season_number = ? AND ss.innings_pitched >= 75
        ORDER BY value ASC LIMIT 10`
     ).all(league.id, season) as LeaderRow[]).map(mapLeader('WHIP'));
 

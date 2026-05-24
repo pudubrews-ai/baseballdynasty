@@ -130,9 +130,10 @@ export default function League() {
                     <tr
                       key={team.teamId}
                       data-testid={`standings-row-${team.teamId}`}
+                      {...(teamIdx === 0 ? { 'data-division-leader': 'true', className: 'division-leader' } : {})}
                       style={{
                         borderBottom: '1px solid #1e293b',
-                        // §4.4: Division leader styling
+                        // §3.2 Iter4: Division leader styling with data attribute and class
                         background: teamIdx === 0 ? 'rgba(96, 165, 250, 0.08)' : 'transparent',
                         fontWeight: teamIdx === 0 ? 'bold' : 'normal',
                       }}

@@ -456,7 +456,10 @@ function generateBatterLines(
   for (const player of lineup) {
     // §5.1 Rule 7: Each starter gets 3-5 ABs
     const atBats = randInt(rng, 3, 5);
-    const hitProb = Math.max(0.15, Math.min(0.45, player.contact / 200 + 0.1));
+    // §2.5: Realistic hit-probability formula
+    // contact=50 (avg) → 0.275, contact=80 (above avg) → 0.35, contact=99 (elite) → 0.3975
+    // Cap at 0.40 so AVG leaders land in 0.300-0.400 spec range
+    const hitProb = Math.max(0.15, Math.min(0.40, player.contact / 400 + 0.15));
     let hits = 0;
     for (let ab = 0; ab < atBats; ab++) {
       if (rng() < hitProb) hits++;

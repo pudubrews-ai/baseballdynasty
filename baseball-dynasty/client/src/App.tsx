@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { LeagueStateContext, useLeagueStatePolling } from './hooks/useLeagueState.js';
 import League from './views/League.js';
 import Teams from './views/Teams.js';
@@ -43,6 +43,15 @@ function AppContent() {
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const leagueStateValue = useLeagueStatePolling();
   const { state, noLeague, reconnecting } = leagueStateValue;
+
+  // §2.1: Auto-navigate to Draft tab when phase='draft', unless user has explicitly navigated elsewhere
+  const hasUserNavigatedRef = useRef(false);
+
+  useEffect(() => {
+    if (state?.phase === 'draft' && !hasUserNavigatedRef.current) {
+      setActiveTab('draft');
+    }
+  }, [state?.phase]);
 
   const handleNewDynasty = () => {
     if (!noLeague) {
@@ -113,7 +122,11 @@ function AppContent() {
           {tabs.map(tab => (
             <button
               key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
+              data-testid={`nav-${tab.id}`}
+              onClick={() => {
+                hasUserNavigatedRef.current = true;
+                setActiveTab(tab.id);
+              }}
               style={{
                 background: activeTab === tab.id ? '#3b82f6' : 'transparent',
                 color: activeTab === tab.id ? 'white' : '#94a3b8',

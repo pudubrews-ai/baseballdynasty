@@ -42,6 +42,18 @@ teamsRouter.get('/', async (_req: Request, res: Response, next: NextFunction): P
       runs_allowed: t.runs_allowed,
       market_size: t.market_size,
       color: t.color,
+      // §3.1 Iter4: Add front-office fields per Architect ruling (REVERSING Iter 2)
+      owner_name: t.owner_name,
+      gm_name: t.gm_name,
+      gm_personality: {
+        philosophy: t.gm_philosophy,
+        risk_tolerance: t.gm_risk_tolerance,
+        focus: t.gm_focus,
+      },
+      manager_name: t.manager_name,
+      revenue: t.revenue,
+      payroll_budget: t.payroll_budget,
+      current_payroll: t.current_payroll,
     })));
   } catch (err) { next(err); }
 });

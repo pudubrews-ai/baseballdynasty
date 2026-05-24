@@ -60,8 +60,13 @@ export async function initEngine(): Promise<void> {
   }
 }
 
+// §1.1: Export isPaused for cooperative draft cancellation (no throw-based control flow)
+export function isPaused(): boolean {
+  return currentSpeed === 'paused';
+}
+
 // Build the LeagueStateSnapshot from DB
-async function refreshCache(leagueId: number): Promise<LeagueStateSnapshot> {
+export async function refreshCache(leagueId: number): Promise<LeagueStateSnapshot> {
   const league = prepared('SELECT * FROM leagues WHERE id = ?').get(leagueId) as LeagueRow | undefined;
   if (!league) throw new Error('League not found');
 
@@ -309,12 +314,16 @@ async function runDraftTick(league: LeagueRow, isTurbo: boolean): Promise<void> 
   try {
     if (league.phase === 'expansion_draft') {
       await runExpansionDraft(league, isTurbo, async (_pickId, _round, _pick) => {
-        await refreshCache(league.id);
-        if (currentSpeed === 'paused') {
-          throw new Error('DRAFT_PAUSED'); // Will be caught and draft resumes later
+        // §1.1: No throw — cooperative pause via isPaused() in draft loop
+        // Skip per-pick cache refresh in turbo for performance (§2.4)
+        if (currentSpeed !== 'turbo') {
+          await refreshCache(league.id);
         }
       });
       validatePostDraftRosters(league.id);
+
+      // §2.4: After turbo draft, refresh cache once
+      await refreshCache(league.id);
 
       // Generate schedule and transition to regular season
       const newSchedule = generateSchedule(league.id, league.worldgen_seed);
@@ -323,12 +332,22 @@ async function runDraftTick(league: LeagueRow, isTurbo: boolean): Promise<void> 
       console.log('[engine] Expansion draft complete, transitioning to regular season');
     } else if (league.phase === 'annual_draft') {
       const { runAnnualDraft } = await import('./draft.js');
-      await runAnnualDraft(league, isTurbo);
+      await runAnnualDraft(league, isTurbo, async (_pickId, _round, _pick) => {
+        // §1.1: No throw — cooperative pause via isPaused() in draft loop
+        // Skip per-pick cache refresh in turbo for performance (§2.4)
+        if (currentSpeed !== 'turbo') {
+          await refreshCache(league.id);
+        }
+      });
+      // §2.4: After turbo annual draft, refresh cache once
+      await refreshCache(league.id);
       prepared('UPDATE leagues SET phase = ? WHERE id = ?').run('regular_season', league.id);
     }
   } catch (err) {
+    // §1.1: DRAFT_PAUSED no longer thrown; cooperative pause exits draft loop cleanly
+    // (kept for safety in case of unexpected throw)
     if (err instanceof Error && err.message === 'DRAFT_PAUSED') {
-      console.log('[engine] Draft paused');
+      console.log('[engine] Draft paused (legacy path)');
       simRunning = false;
     } else {
       console.error('[engine] Draft tick error:', scrubError(err).message);

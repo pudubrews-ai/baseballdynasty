@@ -72,23 +72,18 @@ export default function Draft() {
 
     const newPicks = picksDelta as DraftPick[];
 
-    // D11: batch-render without animation if delta > 20
-    if (newPicks.length > 20) {
-      isBatchMode.current = true;
-      setAllPicks(prev => {
-        const existingIds = new Set(prev.map(p => p.id));
-        return [...prev, ...newPicks.filter(p => !existingIds.has(p.id))];
-      });
-      isBatchMode.current = false;
-    } else {
-      setAllPicks(prev => {
-        const existingIds = new Set(prev.map(p => p.id));
-        return [...prev, ...newPicks.filter(p => !existingIds.has(p.id))];
-      });
-      if (newPicks.length > 0) {
-        setLatestPick(newPicks[newPicks.length - 1] ?? null);
-      }
-    }
+    // Always merge picks (de-duplicated by id)
+    setAllPicks(prev => {
+      const existingIds = new Set(prev.map(p => p.id));
+      return [...prev, ...newPicks.filter(p => !existingIds.has(p.id))];
+    });
+
+    // §2.2: Always set latestPick to the last item — reveal element renders on any new pick
+    // (Batch-mode previously skipped this, hiding the reveal during bootstrap and turbo)
+    setLatestPick(newPicks[newPicks.length - 1] ?? null);
+
+    // isBatchMode flag retained for future use but no longer gates latestPick
+    isBatchMode.current = newPicks.length > 20;
   }, [picksDelta]);
 
   const totalRounds = 30;
@@ -143,9 +138,12 @@ export default function Draft() {
           {/* §1.1.3: Use subPhase for title */}
           {state.subPhase === 'expansion' ? 'Expansion Draft' : 'Annual Draft'}
         </h2>
-        {onClockTeamId && (
+        {/* §2.3: Always render on-clock element during draft phase (shows Loading... until team is known) */}
+        {state?.phase === 'draft' && (
           <div data-testid="draft-onclock-team" style={{ background: '#f59e0b', color: '#000', padding: '4px 12px', borderRadius: '4px', fontSize: '13px', fontWeight: 'bold' }}>
-            On the Clock: {teamsInDraftOrder.find(t => t.id === onClockTeamId)?.city} {teamsInDraftOrder.find(t => t.id === onClockTeamId)?.name}
+            {onClockTeamId
+              ? `On the Clock: ${teamsInDraftOrder.find(t => t.id === onClockTeamId)?.city} ${teamsInDraftOrder.find(t => t.id === onClockTeamId)?.name}`
+              : 'On the Clock: Loading...'}
           </div>
         )}
         <div style={{ color: '#64748b', fontSize: '13px' }}>

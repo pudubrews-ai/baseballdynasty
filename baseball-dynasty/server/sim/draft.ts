@@ -143,6 +143,60 @@ export function pickProcedural(teamId: number, leagueId: number, round: number):
   ).get(leagueId, minOverall, maxOverall) as PlayerRow | null;
 }
 
+// §2.4: Synchronous version of draft pick for turbo mode (skips LLM, no async overhead)
+// Returns the new pickId or null if no player available
+function runDraftPickSync(
+  db: ReturnType<typeof getDb>,
+  league: LeagueRow,
+  team: TeamRow,
+  round: number,
+  pickNumber: number,
+  isExpansion: boolean
+): number | null {
+  const leagueId = league.id;
+  const topPlayers = selectTopN(leagueId, round, 10);
+
+  if (topPlayers.length === 0) {
+    // Pool exhausted — generate replacement player synchronously
+    const leagueRow = db.prepare('SELECT worldgen_seed FROM leagues WHERE id = ?').get(leagueId) as { worldgen_seed: number } | undefined;
+    const rng = seedFor(`draft_fill_${team.id}_${round}_${pickNumber}`, leagueRow?.worldgen_seed ?? 0);
+    const overall = randInt(rng, 30, 44);
+    console.warn('[draft] Draft pool exhausted, generating replacement-level player');
+
+    const insertResult = db.prepare(
+      `INSERT INTO players (league_id, team_id, first_name, last_name, age, position, overall_rating, potential, contact, power, speed, fielding, arm, pitching_velocity, pitching_control, pitching_stamina, is_on_mlb_roster, annual_salary, contract_years_remaining, service_time, injury_prone, coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country, is_drafted) VALUES (?, ?, 'Replacement', 'Player', 25, 'LF', ?, 'D', ?, ?, ?, ?, ?, ?, ?, ?, 0, 500000, 1, 0, 5, 5, 5, 5, 'us', '', 'USA', 1)`
+    ).run(leagueId, team.id, overall, overall, overall, overall, overall, overall, overall, overall, overall);
+
+    const playerId = insertResult.lastInsertRowid as number;
+    const pickResult = db.prepare(
+      'INSERT INTO draft_picks (league_id, season_number, round, pick_number, team_id, player_id, reasoning, is_expansion_draft, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    ).run(leagueId, league.season_number, round, pickNumber, team.id, playerId, 'Pool exhausted — generated replacement player', isExpansion ? 1 : 0, Date.now());
+
+    return pickResult.lastInsertRowid as number;
+  }
+
+  const selectedPlayer = pickProcedural(team.id, leagueId, round);
+  if (!selectedPlayer) return null;
+
+  db.prepare('UPDATE players SET is_drafted = 1, team_id = ? WHERE id = ?').run(team.id, selectedPlayer.id);
+
+  const pickResult = db.prepare(
+    'INSERT INTO draft_picks (league_id, season_number, round, pick_number, team_id, player_id, reasoning, is_expansion_draft, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(
+    leagueId,
+    league.season_number,
+    round,
+    pickNumber,
+    team.id,
+    selectedPlayer.id,
+    null,
+    isExpansion ? 1 : 0,
+    Date.now()
+  );
+
+  return pickResult.lastInsertRowid as number;
+}
+
 export async function runDraftPick(
   league: LeagueRow,
   team: TeamRow,
@@ -328,7 +382,7 @@ export function getAnnualDraftOrder(leagueId: number): number[] {
 export async function runExpansionDraft(
   league: LeagueRow,
   isTurbo: boolean,
-  onPickComplete?: (pickId: number, round: number, pick: number) => void
+  onPickComplete?: (pickId: number, round: number, pick: number) => Promise<void>
 ): Promise<void> {
   const leagueId = league.id;
   const teamOrder = generateExpansionDraftOrder(leagueId, league.worldgen_seed);
@@ -340,7 +394,39 @@ export async function runExpansionDraft(
     'SELECT COALESCE(MAX(pick_number), 0) as max_pick FROM draft_picks WHERE league_id = ? AND season_number = ? AND is_expansion_draft = 1'
   ).get(leagueId, league.season_number) as { max_pick: number };
 
-  for (let pickNumber = lastCompleted.max_pick + 1; pickNumber <= totalPicks; pickNumber++) {
+  const startPick = lastCompleted.max_pick + 1;
+
+  if (isTurbo && startPick <= totalPicks) {
+    // §2.4: Turbo path — wrap all picks in one transaction for maximum DB throughput
+    const db = getDb();
+    const teams = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
+    const teamMap = new Map<number, TeamRow>(teams.map(t => [t.id, t]));
+
+    const turboTx = db.transaction(() => {
+      let lastPickId: number | null = null;
+      for (let pickNumber = startPick; pickNumber <= totalPicks; pickNumber++) {
+        const round = Math.floor((pickNumber - 1) / teamOrder.length) + 1;
+        const pickIdxInRound = (pickNumber - 1) % teamOrder.length;
+        const orderForRound = round % 2 === 1 ? teamOrder : [...teamOrder].reverse();
+        const teamId = orderForRound[pickIdxInRound]!;
+        const team = teamMap.get(teamId);
+        if (!team) continue;
+        const pickId = runDraftPickSync(db, league, team, round, pickNumber, true);
+        if (pickId) {
+          lastPickId = pickId;
+          db.prepare('UPDATE leagues SET last_pick_id = ? WHERE id = ?').run(pickId, leagueId);
+        }
+      }
+      return lastPickId;
+    });
+    turboTx();
+
+    // After turbo draft: assign roster levels
+    assignRosterLevels(leagueId);
+    return;
+  }
+
+  for (let pickNumber = startPick; pickNumber <= totalPicks; pickNumber++) {
     const round = Math.floor((pickNumber - 1) / teamOrder.length) + 1;
     const pickIdxInRound = (pickNumber - 1) % teamOrder.length;
     // Snake order: odd rounds forward, even rounds reversed
@@ -353,7 +439,14 @@ export async function runExpansionDraft(
     const pickId = await runDraftPick(currentLeague, team, round, pickNumber, true, isTurbo);
 
     if (pickId && onPickComplete) {
-      onPickComplete(pickId, round, pickNumber);
+      await onPickComplete(pickId, round, pickNumber); // §1.1: Must await to catch cooperative pause
+    }
+
+    // §1.1: Cooperative pause — check after callback completes and exit cleanly if paused
+    const { isPaused } = await import('./engine.js');
+    if (isPaused()) {
+      console.log('[draft] Paused at pick', pickNumber);
+      return; // Exit cleanly; engine's finally handles state
     }
 
     // §2.3: Honor currentSpeed for per-pick delay
@@ -371,7 +464,7 @@ export async function runExpansionDraft(
 export async function runAnnualDraft(
   league: LeagueRow,
   isTurbo: boolean,
-  onPickComplete?: (pickId: number, round: number, pick: number) => void
+  onPickComplete?: (pickId: number, round: number, pick: number) => Promise<void>
 ): Promise<void> {
   const leagueId = league.id;
   const teamOrder = generateAnnualDraftOrder(leagueId);
@@ -392,7 +485,37 @@ export async function runAnnualDraft(
     'SELECT COALESCE(MAX(pick_number), 0) as max_pick FROM draft_picks WHERE league_id = ? AND season_number = ? AND is_expansion_draft = 0'
   ).get(leagueId, league.season_number) as { max_pick: number };
 
-  for (let pickNumber = lastCompleted.max_pick + 1; pickNumber <= totalPicks; pickNumber++) {
+  const startPick = lastCompleted.max_pick + 1;
+
+  if (isTurbo && startPick <= totalPicks) {
+    // §2.4: Turbo path — wrap all picks in one transaction for maximum DB throughput
+    const db = getDb();
+    const teams = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
+    const teamMap = new Map<number, TeamRow>(teams.map(t => [t.id, t]));
+
+    const turboTx = db.transaction(() => {
+      let lastPickId: number | null = null;
+      for (let pickNumber = startPick; pickNumber <= totalPicks; pickNumber++) {
+        const round = Math.floor((pickNumber - 1) / teamOrder.length) + 1;
+        const pickIdxInRound = (pickNumber - 1) % teamOrder.length;
+        const teamId = teamOrder[pickIdxInRound]!;
+        const team = teamMap.get(teamId);
+        if (!team) continue;
+        const pickId = runDraftPickSync(db, league, team, round, pickNumber, false);
+        if (pickId) {
+          lastPickId = pickId;
+          db.prepare('UPDATE leagues SET last_pick_id = ? WHERE id = ?').run(pickId, leagueId);
+        }
+      }
+      return lastPickId;
+    });
+    turboTx();
+
+    assignRosterLevels(leagueId);
+    return;
+  }
+
+  for (let pickNumber = startPick; pickNumber <= totalPicks; pickNumber++) {
     const round = Math.floor((pickNumber - 1) / teamOrder.length) + 1;
     const pickIdxInRound = (pickNumber - 1) % teamOrder.length;
     // Straight order per C5 (not snake)
@@ -403,7 +526,14 @@ export async function runAnnualDraft(
     const pickId = await runDraftPick(currentLeague, team, round, pickNumber, false, isTurbo);
 
     if (pickId && onPickComplete) {
-      onPickComplete(pickId, round, pickNumber);
+      await onPickComplete(pickId, round, pickNumber); // §1.1: Must await to catch cooperative pause
+    }
+
+    // §1.1: Cooperative pause — check after callback completes and exit cleanly if paused
+    const { isPaused } = await import('./engine.js');
+    if (isPaused()) {
+      console.log('[draft] Paused at pick', pickNumber);
+      return; // Exit cleanly; engine's finally handles state
     }
 
     // §2.3: Honor currentSpeed for per-pick delay
