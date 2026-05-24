@@ -135,14 +135,22 @@ export async function runPlayoffs(leagueId: number): Promise<void> {
 
   console.log(`[playoffs] Starting playoffs for season ${league.season_number}`);
 
+  // §2.2: Ensure phase is set to playoffs (defensive)
+  prepared('UPDATE leagues SET phase = ? WHERE id = ?').run('playoffs', leagueId);
+
   // Division Series (best-of-5): 1v4 and 2v3 per conference
   const americanSeeds = seeds.filter(s => s.conference === 'American');
   const nationalSeeds = seeds.filter(s => s.conference === 'National');
 
   const amerDS1winner = await runSeries(leagueId, americanSeeds[0]!, americanSeeds[3]!, 5, 'DS', 'American', league.season_number);
+  // §2.2: Yield between series so /api/state can observe playoffs phase
+  await new Promise(r => setTimeout(r, 50));
   const amerDS2winner = await runSeries(leagueId, americanSeeds[1]!, americanSeeds[2]!, 5, 'DS', 'American', league.season_number);
+  await new Promise(r => setTimeout(r, 50));
   const natDS1winner = await runSeries(leagueId, nationalSeeds[0]!, nationalSeeds[3]!, 5, 'DS', 'National', league.season_number);
+  await new Promise(r => setTimeout(r, 50));
   const natDS2winner = await runSeries(leagueId, nationalSeeds[1]!, nationalSeeds[2]!, 5, 'DS', 'National', league.season_number);
+  await new Promise(r => setTimeout(r, 50));
 
   if (!amerDS1winner || !amerDS2winner || !natDS1winner || !natDS2winner) {
     console.error('[playoffs] DS failed to produce winners');
@@ -151,7 +159,9 @@ export async function runPlayoffs(leagueId: number): Promise<void> {
 
   // Championship Series (best-of-7)
   const amerCSWinner = await runSeries(leagueId, amerDS1winner, amerDS2winner, 7, 'CS', 'American', league.season_number);
+  await new Promise(r => setTimeout(r, 50));
   const natCSWinner = await runSeries(leagueId, natDS1winner, natDS2winner, 7, 'CS', 'National', league.season_number);
+  await new Promise(r => setTimeout(r, 50));
 
   if (!amerCSWinner || !natCSWinner) {
     console.error('[playoffs] CS failed to produce winners');

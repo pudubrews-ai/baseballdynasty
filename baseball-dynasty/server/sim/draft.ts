@@ -5,6 +5,7 @@
 import { getDb, prepared, type PlayerRow, type LeagueRow, type TeamRow } from '../db.js';
 import { seedFor, randInt, shuffle } from './prng.js';
 import { callDraftPick } from '../services/llm.js';
+import { getDraftPickDelay } from './engine.js';
 
 export interface DraftPlayer {
   id: number;
@@ -318,6 +319,11 @@ export function getExpansionDraftOrder(leagueId: number): number[] {
   return generateExpansionDraftOrder(leagueId, league.worldgen_seed);
 }
 
+// §3.2: Export annual draft order for the API route — branches on phase
+export function getAnnualDraftOrder(leagueId: number): number[] {
+  return generateAnnualDraftOrder(leagueId);
+}
+
 // Run the full expansion draft (resume-aware — §2.7)
 export async function runExpansionDraft(
   league: LeagueRow,
@@ -348,6 +354,12 @@ export async function runExpansionDraft(
 
     if (pickId && onPickComplete) {
       onPickComplete(pickId, round, pickNumber);
+    }
+
+    // §2.3: Honor currentSpeed for per-pick delay
+    const delay = getDraftPickDelay();
+    if (delay > 0) {
+      await new Promise(r => setTimeout(r, delay));
     }
   }
 
@@ -392,6 +404,12 @@ export async function runAnnualDraft(
 
     if (pickId && onPickComplete) {
       onPickComplete(pickId, round, pickNumber);
+    }
+
+    // §2.3: Honor currentSpeed for per-pick delay
+    const delay = getDraftPickDelay();
+    if (delay > 0) {
+      await new Promise(r => setTimeout(r, delay));
     }
   }
 

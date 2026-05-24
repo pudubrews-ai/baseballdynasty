@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useLeagueState } from '../hooks/useLeagueState.js';
 import { getStandings, getRecentGames, setSimSpeed } from '../api.js';
 
@@ -47,6 +47,15 @@ export default function League() {
     getStandings().then(data => setStandings(data as StandingsData)).catch(console.error);
     getRecentGames().then(data => setRecentGames(data as GameResult[])).catch(console.error);
   }, [state?.currentGameNumber]);
+
+  // §3.7: Add dedicated standings polling during regular_season at 1500ms
+  useEffect(() => {
+    if (state?.phase !== 'regular_season') return;
+    const intervalId = setInterval(() => {
+      getStandings().then(data => setStandings(data as StandingsData)).catch(console.error);
+    }, 1500);
+    return () => clearInterval(intervalId);
+  }, [state?.phase]);
 
   const handleSpeedChange = async (speed: string) => {
     try {
@@ -110,17 +119,23 @@ export default function League() {
           <tbody>
             {standings?.conferences.map(conf => (
               conf.divisions.map(div => (
-                <>
-                  <tr key={div.name} style={{ background: '#0f172a' }}>
+                // §2.4: React.Fragment with key to fix missing key warning
+                <React.Fragment key={`${conf.name}-${div.name}`}>
+                  <tr style={{ background: '#0f172a' }}>
                     <td colSpan={8} style={{ padding: '6px 8px', color: '#60a5fa', fontWeight: 'bold', fontSize: '12px' }}>
                       {div.name}
                     </td>
                   </tr>
-                  {div.teams.map(team => (
+                  {div.teams.map((team, teamIdx) => (
                     <tr
                       key={team.teamId}
                       data-testid={`standings-row-${team.teamId}`}
-                      style={{ borderBottom: '1px solid #1e293b' }}
+                      style={{
+                        borderBottom: '1px solid #1e293b',
+                        // §4.4: Division leader styling
+                        background: teamIdx === 0 ? 'rgba(96, 165, 250, 0.08)' : 'transparent',
+                        fontWeight: teamIdx === 0 ? 'bold' : 'normal',
+                      }}
                     >
                       <td style={{ padding: '8px' }}>{team.teamName}</td>
                       <td style={{ padding: '8px', textAlign: 'center' }}>{team.wins}</td>
@@ -134,7 +149,7 @@ export default function League() {
                       </td>
                     </tr>
                   ))}
-                </>
+                </React.Fragment>
               ))
             ))}
           </tbody>

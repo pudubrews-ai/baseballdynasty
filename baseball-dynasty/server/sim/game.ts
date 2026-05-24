@@ -161,7 +161,8 @@ export function validateBoxScore(
   homeTeamId: number,
   awayTeamId: number,
   homeScore: number,
-  awayScore: number
+  awayScore: number,
+  isWalkOff: boolean = false
 ): string[] {
   const errors: string[] = [];
 
@@ -189,6 +190,23 @@ export function validateBoxScore(
   }
   if (awayStarterLine && (awayStarterLine.inningsPitched < 4.0 || awayStarterLine.inningsPitched > 9.0)) {
     errors.push(`Away starter IP ${awayStarterLine.inningsPitched} out of range`);
+  }
+
+  // §2.9 Rule 4: total IP = 9.0 (non-walk-off) or away=8.0/home=9.0 (walk-off home win)
+  const homeIPTotal = result.pitcherLines
+    .filter(p => p.teamId === homeTeamId)
+    .reduce((s, p) => s + p.inningsPitched, 0);
+  const awayIPTotal = result.pitcherLines
+    .filter(p => p.teamId === awayTeamId)
+    .reduce((s, p) => s + p.inningsPitched, 0);
+  // Walk-off: home team pitches full 9.0, away team pitches 8.0
+  const expectedHomeIP = 9.0;
+  const expectedAwayIP = isWalkOff ? 8.0 : 9.0;
+  if (Math.abs(homeIPTotal - expectedHomeIP) > 0.01) {
+    errors.push(`Home total IP ${homeIPTotal.toFixed(2)} != expected ${expectedHomeIP}`);
+  }
+  if (Math.abs(awayIPTotal - expectedAwayIP) > 0.01) {
+    errors.push(`Away total IP ${awayIPTotal.toFixed(2)} != expected ${expectedAwayIP}`);
   }
 
   return errors;
@@ -263,12 +281,13 @@ export async function simulateGame(
   clampRBI(homeBatterLines, homeScore, rng);
   clampRBI(awayBatterLines, awayScore, rng);
 
-  // Generate pitcher lines
+  // §4.1: Walk-off semantics — home team pitches full 9, away team gets truncated 8.0 IP
+  // Real baseball: home wins walk-off in bottom of last inning → away's top-of-inning was already done
   const homePitcherLines = generatePitcherLines(
-    rng, homeStarter, homeBullpen, homeTeam.id, awayScore, isWalkOff
+    rng, homeStarter, homeBullpen, homeTeam.id, awayScore, false  // home always pitches 9.0
   );
   const awayPitcherLines = generatePitcherLines(
-    rng, awayStarter, awayBullpen, awayTeam.id, homeScore, false
+    rng, awayStarter, awayBullpen, awayTeam.id, homeScore, isWalkOff  // away gets 8.0 on walk-off
   );
 
   // §5.1 Rule 5: Assign W/L
@@ -330,7 +349,7 @@ export async function simulateGame(
     let validationErrors = validateBoxScore(
       { homeHits, awayHits, homeWalks, awayWalks,
         batterLines: allBatterLinesForValidation, pitcherLines: allPitcherLinesForValidation },
-      homeTeam.id, awayTeam.id, homeScore, awayScore
+      homeTeam.id, awayTeam.id, homeScore, awayScore, isWalkOff
     );
 
     if (validationErrors.length > 0) {
@@ -357,11 +376,13 @@ export async function simulateGame(
         validationErrors = validateBoxScore(
           { homeHits, awayHits, homeWalks, awayWalks,
             batterLines: allBatterLinesForValidation, pitcherLines: allPitcherLinesForValidation },
-          homeTeam.id, awayTeam.id, homeScore, awayScore
+          homeTeam.id, awayTeam.id, homeScore, awayScore, isWalkOff
         );
       }
       if (validationErrors.length > 0) {
-        console.error(`[game ${gameId}] box-score still invalid after retries: ${validationErrors.join('; ')}`);
+        // §2.9 fail-closed: do NOT write the invalid game; log and skip
+        console.error(`[game ${gameId}] box-score validation failed after retries; SKIPPING game write: ${validationErrors.join('; ')}`);
+        return;
       }
     }
   }
@@ -560,8 +581,13 @@ function generatePitcherLines(
 
     if (remainingIP > 0 && bullpenToUse.length > 0) {
       const ipPerReliever = remainingIP / bullpenToUse.length;
-      for (const reliever of bullpenToUse) {
-        const relIP = Math.min(remainingIP, Math.round(ipPerReliever * 3) / 3);
+      for (let ri = 0; ri < bullpenToUse.length; ri++) {
+        const reliever = bullpenToUse[ri]!;
+        const isLast = ri === bullpenToUse.length - 1;
+        // §2.9 Rule 4: last reliever gets exactly the remaining IP to ensure total = totalIP
+        const relIP = isLast
+          ? Math.round(remainingIP * 3) / 3  // ensure exact thirds
+          : Math.min(remainingIP, Math.round(ipPerReliever * 3) / 3);
         const relER = Math.min(remainingER, Math.round(rng() * 2));
         lines.push({
           playerId: reliever.id,
@@ -578,8 +604,22 @@ function generatePitcherLines(
         });
         remainingIP -= relIP;
         remainingER -= relER;
-        if (remainingIP <= 0) break;
+        if (remainingIP <= 0.001) break;
       }
+    } else if (remainingIP > 0 && bullpenToUse.length === 0) {
+      // No bullpen available — add a placeholder to satisfy total IP
+      // This handles edge case where team has no relievers
+      lines[0]!.inningsPitched = Math.round(totalIP * 3) / 3;
+    }
+  }
+
+  // §2.9 Rule 4: Final correction — ensure total IP is exactly right (handle rounding edge cases)
+  if (lines.length > 0) {
+    const currentTotal = lines.reduce((s, l) => s + l.inningsPitched, 0);
+    const diff = Math.round((totalIP - currentTotal) * 3) / 3;
+    if (Math.abs(diff) > 0.001 && lines.length > 0) {
+      const lastLine = lines[lines.length - 1]!;
+      lastLine.inningsPitched = Math.round((lastLine.inningsPitched + diff) * 3) / 3;
     }
   }
 

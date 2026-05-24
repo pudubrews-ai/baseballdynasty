@@ -2,58 +2,55 @@ import { useState, useEffect } from 'react';
 import { getPlayerLeaders, getPlayer, searchPlayers } from '../api.js';
 import { useLeagueState } from '../hooks/useLeagueState.js';
 
+// §2.6: Updated StatLeader interface to match new API shape {hitting, pitching}
 interface StatLeader {
-  id: number;
-  first_name: string;
-  last_name: string;
+  player_name: string;
   team_name: string;
-  value: number;
+  stat_value: number;
+  category: string;
 }
 
 interface PlayerCard {
   id: number;
-  firstName: string;
-  lastName: string;
+  first_name: string;
+  last_name: string;
   age: number;
   position: string;
-  overallRating: number;
+  overall_rating: number;
   potential: string;
-  potentialRevealed: boolean;
-  teamName: string | null;
+  potential_revealed: boolean;
+  team_name: string | null;
   contact: number;
   power: number;
   speed: number;
   fielding: number;
   arm: number;
-  pitchingVelocity: number;
-  pitchingControl: number;
-  pitchingStamina: number;
-  annualSalary: number;
-  contractYearsRemaining: number;
-  careerHits: number;
-  careerHR: number;
-  careerRBI: number;
-  careerIP: number;
-  careerK: number;
-  careerWins: number;
+  pitching_velocity: number;
+  pitching_control: number;
+  pitching_stamina: number;
+  annual_salary: number;
+  contract_years_remaining: number;
+  career_hits: number;
+  career_hr: number;
+  career_rbi: number;
+  career_ip: number;
+  career_k: number;
+  career_wins: number;
 }
 
+// §2.6: Updated Leaders interface to match {hitting: [...], pitching: [...]}
 interface Leaders {
-  battingAvg?: StatLeader[];
-  homeRuns?: StatLeader[];
-  rbi?: StatLeader[];
-  era?: StatLeader[];
-  strikeouts?: StatLeader[];
-  whip?: StatLeader[];
+  hitting: StatLeader[];
+  pitching: StatLeader[];
 }
 
 export default function Players() {
   const { state } = useLeagueState();
-  const [leaders, setLeaders] = useState<Leaders>({});
+  const [leaders, setLeaders] = useState<Leaders>({ hitting: [], pitching: [] });
   const [selectedPlayer, setSelectedPlayer] = useState<PlayerCard | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<unknown[]>([]);
-  const [activeCategory, setActiveCategory] = useState<keyof Leaders>('battingAvg');
+  const [activeCategory, setActiveCategory] = useState<string>('AVG');
 
   useEffect(() => {
     getPlayerLeaders().then(data => setLeaders(data as Leaders)).catch(console.error);
@@ -77,17 +74,21 @@ export default function Players() {
 
   const formatSalary = (n: number) => `$${(n / 1_000_000).toFixed(1)}M`;
 
-  const CATEGORIES: Array<{ key: keyof Leaders; label: string; format: (v: number) => string }> = [
-    { key: 'battingAvg', label: 'AVG', format: v => (v ?? 0).toFixed(3) },
-    { key: 'homeRuns', label: 'HR', format: v => String(v) },
-    { key: 'rbi', label: 'RBI', format: v => String(v) },
-    { key: 'era', label: 'ERA', format: v => (v ?? 0).toFixed(2) },
-    { key: 'strikeouts', label: 'SO', format: v => String(v) },
-    { key: 'whip', label: 'WHIP', format: v => (v ?? 0).toFixed(3) },
+  // §2.6: CATEGORIES array with group and key fields
+  const CATEGORIES: Array<{ key: string; label: string; format: (v: number) => string; group: 'hitting' | 'pitching' }> = [
+    { key: 'AVG',  label: 'AVG',  format: v => (v ?? 0).toFixed(3), group: 'hitting' },
+    { key: 'HR',   label: 'HR',   format: v => String(v),           group: 'hitting' },
+    { key: 'RBI',  label: 'RBI',  format: v => String(v),           group: 'hitting' },
+    { key: 'ERA',  label: 'ERA',  format: v => (v ?? 0).toFixed(2), group: 'pitching' },
+    { key: 'K',    label: 'SO',   format: v => String(v),           group: 'pitching' },
+    { key: 'WHIP', label: 'WHIP', format: v => (v ?? 0).toFixed(3), group: 'pitching' },
   ];
 
-  const activeCat = CATEGORIES.find(c => c.key === activeCategory);
-  const activeLeaders = leaders[activeCategory] ?? [];
+  // §2.6: Filter leaders by category key from hitting/pitching arrays
+  const activeCat = CATEGORIES.find(c => c.key === activeCategory) ?? CATEGORIES[0]!;
+  const activeLeaders: StatLeader[] = activeCat.group === 'hitting'
+    ? leaders.hitting.filter(l => l.category === activeCat.key)
+    : leaders.pitching.filter(l => l.category === activeCat.key);
 
   return (
     <div>
@@ -107,14 +108,14 @@ export default function Players() {
         />
         {searchResults.length > 0 && (
           <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: '6px', marginTop: '4px', maxWidth: '300px' }}>
-            {(searchResults as Array<{ id: number; firstName: string; lastName: string; position: string; overallRating: number; teamName: string | null }>).map(p => (
+            {(searchResults as Array<{ id: number; first_name: string; last_name: string; position: string; overall_rating: number; team_name: string | null }>).map(p => (
               <button
                 key={p.id}
                 onClick={() => { handlePlayerClick(p.id); setSearchResults([]); }}
                 style={{ display: 'block', width: '100%', background: 'transparent', border: 'none', color: 'white', padding: '6px 12px', textAlign: 'left', cursor: 'pointer', fontSize: '13px' }}
               >
-                {p.firstName} {p.lastName} · {p.position} · {p.overallRating} OVR
-                {p.teamName && <span style={{ color: '#64748b' }}> ({p.teamName})</span>}
+                {p.first_name} {p.last_name} · {p.position} · {p.overall_rating} OVR
+                {p.team_name && <span style={{ color: '#64748b' }}> ({p.team_name})</span>}
               </button>
             ))}
           </div>
@@ -150,17 +151,17 @@ export default function Players() {
               </tr>
             </thead>
             <tbody>
+              {/* §2.6: Render using new data shape */}
               {activeLeaders.map((leader, idx) => (
                 <tr
-                  key={leader.id}
-                  style={{ borderBottom: '1px solid #1e293b', cursor: 'pointer' }}
-                  onClick={() => handlePlayerClick(leader.id)}
+                  key={`${leader.player_name}-${idx}`}
+                  style={{ borderBottom: '1px solid #1e293b' }}
                 >
                   <td style={{ padding: '6px', color: '#64748b' }}>{idx + 1}</td>
-                  <td style={{ padding: '6px' }}>{leader.first_name} {leader.last_name}</td>
+                  <td style={{ padding: '6px' }}>{leader.player_name}</td>
                   <td style={{ padding: '6px', color: '#94a3b8', fontSize: '12px' }}>{leader.team_name}</td>
                   <td style={{ padding: '6px', textAlign: 'right', fontWeight: 'bold' }}>
-                    {activeCat?.format(leader.value)}
+                    {activeCat.format(leader.stat_value)}
                   </td>
                 </tr>
               ))}
@@ -178,22 +179,22 @@ export default function Players() {
             style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '16px' }}
           >
             <h3 style={{ marginTop: 0, marginBottom: '4px' }}>
-              {selectedPlayer.firstName} {selectedPlayer.lastName}
+              {selectedPlayer.first_name} {selectedPlayer.last_name}
             </h3>
             <div style={{ color: '#94a3b8', fontSize: '13px', marginBottom: '12px' }}>
               {selectedPlayer.position} · Age {selectedPlayer.age}
-              {selectedPlayer.teamName && <span> · {selectedPlayer.teamName}</span>}
+              {selectedPlayer.team_name && <span> · {selectedPlayer.team_name}</span>}
             </div>
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '13px', marginBottom: '12px' }}>
               <div style={{ background: '#0f172a', borderRadius: '6px', padding: '8px' }}>
                 <div style={{ color: '#94a3b8', fontSize: '11px' }}>OVR</div>
-                <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#60a5fa' }}>{selectedPlayer.overallRating}</div>
+                <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#60a5fa' }}>{selectedPlayer.overall_rating}</div>
               </div>
               <div style={{ background: '#0f172a', borderRadius: '6px', padding: '8px' }}>
                 <div style={{ color: '#94a3b8', fontSize: '11px' }}>Potential</div>
                 <div style={{ fontSize: '20px', fontWeight: 'bold', color: '#f59e0b' }}>
-                  {selectedPlayer.potentialRevealed ? selectedPlayer.potential : '?'}
+                  {selectedPlayer.potential_revealed ? selectedPlayer.potential : '?'}
                 </div>
               </div>
             </div>
@@ -202,9 +203,9 @@ export default function Players() {
             {['SP', 'RP', 'CL'].includes(selectedPlayer.position) ? (
               <div style={{ fontSize: '12px' }}>
                 {[
-                  ['Velocity', selectedPlayer.pitchingVelocity],
-                  ['Control', selectedPlayer.pitchingControl],
-                  ['Stamina', selectedPlayer.pitchingStamina],
+                  ['Velocity', selectedPlayer.pitching_velocity],
+                  ['Control', selectedPlayer.pitching_control],
+                  ['Stamina', selectedPlayer.pitching_stamina],
                 ].map(([label, val]) => (
                   <div key={String(label)} style={{ marginBottom: '4px' }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2px' }}>
@@ -241,15 +242,15 @@ export default function Players() {
             <div style={{ marginTop: '12px', fontSize: '12px', borderTop: '1px solid #334155', paddingTop: '8px' }}>
               <div style={{ color: '#94a3b8', marginBottom: '4px' }}>Career</div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '4px' }}>
-                <div>H: {selectedPlayer.careerHits}</div>
-                <div>HR: {selectedPlayer.careerHR}</div>
-                <div>RBI: {selectedPlayer.careerRBI}</div>
+                <div>H: {selectedPlayer.career_hits}</div>
+                <div>HR: {selectedPlayer.career_hr}</div>
+                <div>RBI: {selectedPlayer.career_rbi}</div>
               </div>
             </div>
 
             {/* Contract */}
             <div style={{ marginTop: '8px', fontSize: '12px', color: '#94a3b8' }}>
-              {formatSalary(selectedPlayer.annualSalary)} / yr · {selectedPlayer.contractYearsRemaining} yr remaining
+              {formatSalary(selectedPlayer.annual_salary)} / yr · {selectedPlayer.contract_years_remaining} yr remaining
             </div>
           </div>
         )}

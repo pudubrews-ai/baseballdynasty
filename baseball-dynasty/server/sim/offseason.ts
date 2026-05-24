@@ -315,17 +315,22 @@ async function finalizeOffseason(leagueId: number, previousSeason: number): Prom
   const newSchedule = generateSchedule(leagueId, league.worldgen_seed ^ newSeason);
   saveSchedule(leagueId, newSchedule);
 
-  db.prepare(
-    'UPDATE leagues SET season_number = ?, phase = ?, offseason_step = NULL, current_game_number = 0, current_game_date = 0, last_game_id = 0 WHERE id = ?'
-  ).run(newSeason, 'regular_season', leagueId);
+  // §2.8: Wrap all offseason finalization writes in a transaction (atomic)
+  const tx = db.transaction(() => {
+    db.prepare(
+      'UPDATE leagues SET season_number = ?, phase = ?, offseason_step = NULL, current_game_number = 0, current_game_date = 0, last_game_id = 0 WHERE id = ?'
+    ).run(newSeason, 'regular_season', leagueId);
 
-  // Reset W/L/runs/games_played for the new season — must happen AFTER annual_draft (§2.6)
-  db.prepare('UPDATE teams SET wins = 0, losses = 0, runs_scored = 0, runs_allowed = 0, games_played = 0 WHERE league_id = ?').run(leagueId);
+    // Reset W/L/runs/games_played for the new season — must happen AFTER annual_draft (§2.6)
+    db.prepare('UPDATE teams SET wins = 0, losses = 0, runs_scored = 0, runs_allowed = 0, games_played = 0 WHERE league_id = ?').run(leagueId);
 
-  // D21: Remaining undrafted players from original pool become free agents
-  db.prepare(
-    'UPDATE players SET team_id = NULL WHERE league_id = ? AND is_drafted = 0 AND team_id IS NULL'
-  ).run(leagueId);
+    // D21: Remaining undrafted players from original pool become free agents
+    db.prepare(
+      'UPDATE players SET team_id = NULL WHERE league_id = ? AND is_drafted = 0 AND team_id IS NULL'
+    ).run(leagueId);
+  });
+
+  tx();
 
   console.log(`[offseason] Season ${previousSeason} complete. Season ${newSeason} begins.`);
 }

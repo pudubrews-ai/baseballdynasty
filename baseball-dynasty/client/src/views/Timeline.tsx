@@ -1,24 +1,26 @@
 import { useState, useEffect } from 'react';
 import { getTimeline, getTransactions } from '../api.js';
 
+// §2.7: snake_case to match API response
 interface TimelineSeason {
-  seasonNumber: number;
-  championTeamId: number | null;
-  championTeamName: string | null;
-  mvpPlayerId: number | null;
-  mvpPlayerName: string | null;
+  season_number: number;
+  champion_team_id: number | null;
+  champion_team_name: string | null;
+  mvp_player_id: number | null;
+  mvp_player_name: string | null;
   narrative: string | null;
   year: number;
+  notable_events?: unknown[];
 }
 
 interface Transaction {
   id: number;
-  seasonNumber: number;
-  transactionType: string;
-  playerName: string | null;
-  teamName: string | null;
+  season_number: number;
+  transaction_type: string;
+  player_name: string | null;
+  team_name: string | null;
   narrative: string | null;
-  createdAt: number;
+  created_at: number;
 }
 
 export default function Timeline() {
@@ -54,24 +56,24 @@ export default function Timeline() {
           ) : (
             seasons.map(season => (
               <div
-                key={season.seasonNumber}
-                data-testid={`timeline-season-${season.seasonNumber}`}
+                key={season.season_number}
+                data-testid={`timeline-season-${season.season_number}`}
                 style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '16px', marginBottom: '12px' }}
               >
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
                   <div>
-                    <span style={{ color: '#f59e0b', fontWeight: 'bold', fontSize: '16px' }}>Season {season.seasonNumber}</span>
+                    <span style={{ color: '#f59e0b', fontWeight: 'bold', fontSize: '16px' }}>Season {season.season_number}</span>
                     <span style={{ color: '#64748b', marginLeft: '8px', fontSize: '13px' }}>{season.year}</span>
                   </div>
-                  {season.championTeamName && (
+                  {season.champion_team_name && (
                     <div style={{ background: '#1e3a5f', border: '1px solid #3b82f6', borderRadius: '6px', padding: '4px 12px', fontSize: '13px', color: '#60a5fa' }}>
-                      Champion: {season.championTeamName}
+                      Champion: {season.champion_team_name}
                     </div>
                   )}
                 </div>
-                {season.mvpPlayerName && (
+                {season.mvp_player_name && (
                   <div style={{ fontSize: '13px', color: '#94a3b8', marginBottom: '6px' }}>
-                    MVP: {season.mvpPlayerName}
+                    MVP: {season.mvp_player_name}
                   </div>
                 )}
                 {/* §4.4: Text node only, never dangerouslySetInnerHTML */}
@@ -93,11 +95,11 @@ export default function Timeline() {
           ) : (
             transactions.map(txn => (
               <div key={txn.id} style={{ borderBottom: '1px solid #1e293b', padding: '8px 0', fontSize: '13px' }}>
-                <span style={{ color: '#f59e0b', fontSize: '11px', marginRight: '8px', textTransform: 'uppercase' }}>{txn.transactionType}</span>
+                <span style={{ color: '#f59e0b', fontSize: '11px', marginRight: '8px', textTransform: 'uppercase' }}>{txn.transaction_type}</span>
                 {/* §4.4: Text node only */}
                 {txn.narrative && <span style={{ color: '#e2e8f0' }}>{txn.narrative}</span>}
-                {!txn.narrative && txn.playerName && (
-                  <span style={{ color: '#94a3b8' }}>{txn.playerName}{txn.teamName ? ` - ${txn.teamName}` : ''}</span>
+                {!txn.narrative && txn.player_name && (
+                  <span style={{ color: '#94a3b8' }}>{txn.player_name}{txn.team_name ? ` - ${txn.team_name}` : ''}</span>
                 )}
               </div>
             ))

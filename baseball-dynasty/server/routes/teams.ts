@@ -56,6 +56,11 @@ teamsRouter.get('/:id', async (req: Request, res: Response, next: NextFunction):
 
     const minors = buildMinorsObject(team.id); // §3.3
 
+    // §2.1: Add roster array to team detail response
+    const roster = prepared(
+      'SELECT id, first_name, last_name, age, position, overall_rating, potential, annual_salary, contract_years_remaining FROM players WHERE team_id = ? AND is_on_mlb_roster = 1 ORDER BY overall_rating DESC'
+    ).all(team.id);
+
     res.json({
       id: team.id,
       name: team.name,
@@ -82,6 +87,7 @@ teamsRouter.get('/:id', async (req: Request, res: Response, next: NextFunction):
       current_payroll: team.current_payroll,
       revenue: team.revenue,
       minors,                              // §3.3
+      roster,                              // §2.1
     });
   } catch (err) { next(err); }
 });
