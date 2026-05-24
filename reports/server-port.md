@@ -1,8 +1,8 @@
-# Server Port Info — v0.2.0 Iteration 3
+# Server Port Info — v0.2.0 Iteration 4
 
 - **Port:** 3001
-- **Server PID:** 24031
-- **Vite PID:** 24109
+- **Server PID:** 26520
+- **Vite PID:** 26529
 - **Start time:** 2026-05-24
 - **Entry point:** dist/server/server/index.js
 - **Status:** Running — "Baseball Dynasty server running on http://127.0.0.1:3001"

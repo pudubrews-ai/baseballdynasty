@@ -41,7 +41,9 @@ export function evaluateSendDowns(
          LIMIT 1`
       ).get(team.id, player.position) as PlayerRow | undefined;
 
-      if (!aaaReplacement || aaaReplacement.overall_rating <= player.overall_rating) continue;
+      // AB-10 Part B: within-5 band — a struggling regular can be optioned for an equal/lesser
+      // AAA replacement. Development closes the gap; strictly-greater was never reachable.
+      if (!aaaReplacement || aaaReplacement.overall_rating < player.overall_rating - 5) continue;
 
       // Send down or DFA
       executeSendDown(player, team, leagueId, seasonNumber, db, currentGameNumber);

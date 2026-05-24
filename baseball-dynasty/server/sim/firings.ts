@@ -298,6 +298,14 @@ function evaluateManagerFiring(
       promoteInterimManager(db, team, leagueId, seasonNumber, currentGameNumber);
       return true;
     }
+    // §3.2: When team is struggling (under500 > 0) but below the fire threshold,
+    // a meddling owner pressures the manager — decrement job_security by 1 per check (floor 0).
+    // This lets the resignation branch (above) pre-empt the forced firing path.
+    if (under500 > 0) {
+      db.prepare(
+        'UPDATE teams SET job_security = MAX(0, job_security - 1) WHERE id = ?'
+      ).run(team.id);
+    }
     return false;
   }
 

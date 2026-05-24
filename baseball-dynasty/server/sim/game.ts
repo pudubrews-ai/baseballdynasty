@@ -425,6 +425,19 @@ export async function simulateGame(
 
     const actualGameId = gameResult.lastInsertRowid as number;
 
+    // AB-10 Part A: Vacate 25-man slot for injured players immediately on game write.
+    // This fires whether called from runGameTick (engine) or directly from tests.
+    // Guard with is_on_25man=1 so we never double-injure or touch minor leaguers.
+    for (const ev of notableEvents) {
+      if (ev.type === 'injury' && ev.playerId) {
+        db.prepare(
+          `UPDATE players
+           SET is_injured = 1, is_on_25man = 0, injury_return_game = ?
+           WHERE id = ? AND is_on_25man = 1`
+        ).run(gameNumber + (ev.recoveryGames ?? 7), ev.playerId);
+      }
+    }
+
     // Update season stats for batters
     for (const batter of allBatterLines) {
       upsertBatterStats(db, leagueId, seasonNumber, batter);
@@ -764,6 +777,7 @@ function generateNotableEvents(
         playerId: batter.playerId,
         playerName: batter.playerName,
         description: `${batter.playerName} left the game with an injury`,
+        recoveryGames: 3 + Math.floor(rng() * 13), // AB-10 Part A: 3-15 game IL stint
       });
     }
   }

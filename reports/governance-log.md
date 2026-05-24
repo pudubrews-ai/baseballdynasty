@@ -629,3 +629,37 @@ All 5 filter buttons (news-filter-all/transactions/frontoffice/injuries/mileston
 ## Phase 2 — Iteration 4 (Final)
 
 **Step 4 (Iteration 4):** Spawning Developer for final fixes per developer-instructions-4.md.
+
+**Step 4 (Iteration 4) COMPLETE:** 415 tests passing (0 failures), 0 TypeScript errors, 0 ESLint errors, clean build. Commit 532942c. Fixes: AB-10 (rank-based assignRosterLevels + offseason promotion), AB-11 (injury_prone widened to 3-9 + age-scaled career stats), null-team phantom 25-man cleared at retirement/FA + rosterMaintenance scoped, §3.1 trade Tier 4 surplus guard, §3.2 manager_resigned trigger, §3.3 GET /api/front-office-events route added, §4.4 player transactions 404 fixed. Completion report: `reports/v0.2.0-developer-iter4-complete.md`.
+
+**Step 5 (Iteration 4):** Spawning CISO and Adversary in parallel for Iteration 4 post-build review.
+
+**Step 5 (Iteration 4) COMPLETE:**
+
+`reports/v0.2.0-ciso-iter4-post-build.md` — 0 Critical / 0 High / 0 Medium. 1 Low informational: tradeDeadline.ts doesn't clear is_on_25man at write-time (self-healed same tick by invariant). Ship-eligible — 4th consecutive clean CISO pass. Note: /api/front-office-events route is in frontOffice.ts (not teams.ts as dev report said), correctly built with Zod, league_id scoping, explicit columns, scrubError.
+
+`reports/v0.2.0-adversary-iter4-post-build.md` — Verdict: NOT READY. 1 Critical / 0 High / 2 Medium / 2 Low.
+- AB-11 RESOLVED: injury_prone now 3-9 (worldgen.ts:331). INJURY fires organically (157-201/season, seeds 7/11/42). MILESTONE 63-90/season. Both confirmed by fresh-world probes.
+- AB-NULL RESOLVED: phantom 25-man zero in 2-season probe. Both offseason write sites fixed.
+- AB-10 STILL CRITICAL: rank-based assignRosterLevels (draft.ts:391) puts AAA = ranks 26-32, strictly below 25-man. sendDown.ts:44 requires AAA overall > MLB player overall — unsatisfiable by construction (developer's own Deviation #1 admits this). In-game injuries (157-201/season) fire as events but never open a 25-man slot (no is_injured mechanism). Zero call-ups, DFAs, waiver claims across 5-season fresh-world probe. Tests pass by manufacturing AAA upgrade prerequisites the real sim never produces (AB-16 false green).
+- AB-17 (Medium): manager_resigned producer wired but trigger unreachable in-season.
+
+**Root cause of AB-10:** injuries fire as INJURY news events but no `is_injured` flag reduces the active 25-man count. The "MLB roster drops below 23" unconditional call-up trigger can never fire. Rank-based assignment guarantees AAA players are always worse than MLB players, so rating-based triggers are unreachable too. Fix: add `is_injured` column to players table, set it when game.ts generates injury events, evaluate `WHERE is_on_25man=1 AND is_injured=0` in evaluateCallUps.
+
+**Step 6 (Iteration 4):** Spawning API Tester, then UI Testers A+B.
+
+**Step 6 (Iteration 4) COMPLETE:** `reports/v0.2.0-{api,ui-tester-a,ui-tester-b}-iter4-results.md` written.
+Confirmed fixed: /api/front-office-events now 200 (45 entries); INJURY news 31 events, MILESTONE 3 events in UI; news-badge/news-headline/news-game-number/news-item-detail all present; click-expand working. Spring cuts exact-25 PASS.
+Still failing: 0 call-ups/DFAs across 281 simmed games; API rejects uppercase ?type=INJURY/?type=MILESTONE with 400 (canonical is lowercase — prior false positive ruling applies); minors-tab vs team-minors-tab (prior false positive ruling applies); 1 trade in 281 games vs 3+ target (unclear if season hasn't reached deadline yet).
+
+**Step 7 (Iteration 4):** Spawning Architect for ITERATE/COMPLETE decision.
+
+**Step 7 (Iteration 4) COMPLETE:** Decision: **ITERATE**. 1 Critical / 0 High / 2 Medium / 4 Low. 3 false positives declared.
+
+Sole remaining Critical — AB-10: engine.ts:473-484 injury branch never writes is_on_25man=0 or is_injured=1; sendDown.ts:44 strictly-greater threshold impossible. Ruling Option C: use existing is_injured column + add injury_return_game (migration 008); engine sets flags + clears slot; callup.ts counts non-injured 25-man; sendDown relaxed to within-5. Mandatory organic integration test.
+
+---
+
+## Phase 2 — Iteration 5
+
+**Step 4 (Iteration 5):** Spawning Developer for AB-10 fix per developer-instructions-5.md.

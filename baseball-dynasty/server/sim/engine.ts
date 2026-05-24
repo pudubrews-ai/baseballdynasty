@@ -454,6 +454,7 @@ async function runGameTick(league: LeagueRow): Promise<void> {
             type: string;
             playerId?: number;
             description?: string;
+            recoveryGames?: number; // AB-10 Part A: IL stint length
           }>;
           for (const ev of events) {
             if (!ev.playerId) continue;
@@ -471,6 +472,13 @@ async function runGameTick(league: LeagueRow): Promise<void> {
                 sourceId: gameRow.id,
               });
             } else if (ev.type === 'injury') {
+              // AB-10 Part A: vacate the 25-man slot so call-up Trigger 1 fires.
+              // Guard with is_on_25man=1 so we never double-injure or touch minor leaguers.
+              prepared(
+                `UPDATE players
+                 SET is_injured = 1, is_on_25man = 0, injury_return_game = ?
+                 WHERE id = ? AND is_on_25man = 1`
+              ).run(nextGame.gameNumber + (ev.recoveryGames ?? 7), ev.playerId);
               insertNewsItem({
                 leagueId: league.id,
                 seasonNumber: league.season_number,

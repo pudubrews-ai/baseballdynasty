@@ -151,6 +151,7 @@ export interface NotableEvent {
   playerId?: number;
   playerName?: string;
   description: string;
+  recoveryGames?: number; // AB-10 Part A: IL stint length in games
 }
 
 export interface PitcherLine {

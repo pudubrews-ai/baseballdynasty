@@ -185,6 +185,21 @@ export function runRosterMaintenance(
     }
   }
 
+  // AB-10 Part A: Recover players whose IL stint has elapsed.
+  // Recovered players get is_injured=0 but remain is_on_25man=0; they sit on the 40-man
+  // as minors-eligible reserves. The invariant/call-up/send-down passes reintegrate them.
+  try {
+    prepared(
+      `UPDATE players
+       SET is_injured = 0, injury_return_game = NULL,
+           minor_level = CASE WHEN is_on_mlb_roster = 1 THEN 'AAA' ELSE minor_level END
+       WHERE league_id = ? AND is_injured = 1 AND injury_return_game IS NOT NULL
+         AND injury_return_game <= ?`
+    ).run(leagueId, gameNumber);
+  } catch (err) {
+    console.warn('[rosterMaintenance] Injury recovery error:', err);
+  }
+
   // Step 4: Roster invariant check
   try {
     checkRosterInvariant(leagueId);

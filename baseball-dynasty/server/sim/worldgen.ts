@@ -180,7 +180,7 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
     `INSERT INTO teams (league_id, name, city, state_province, region, market_size, conference, division, color, wins, losses, runs_scored, runs_allowed, games_played, payroll_budget, current_payroll, revenue, gm_name, gm_philosophy, gm_risk_tolerance, gm_focus, gm_archetype, manager_name, manager_style, manager_tactics, manager_motivation, manager_communication, owner_name, owner_personality, owner_age, job_security, abbreviation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 5, ?)`
   );
   const insertPlayer = db.prepare(
-    `INSERT INTO players (league_id, team_id, first_name, last_name, age, position, overall_rating, potential, potential_revealed, contact, power, speed, fielding, arm, pitching_velocity, pitching_control, pitching_stamina, is_on_mlb_roster, is_on_25man, annual_salary, contract_years_remaining, service_time, service_time_days, injury_prone, coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country, is_drafted, career_hits, career_hr, career_rbi, career_ip, career_k) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`
+    `INSERT INTO players (league_id, team_id, first_name, last_name, age, position, overall_rating, potential, potential_revealed, contact, power, speed, fielding, arm, pitching_velocity, pitching_control, pitching_stamina, is_on_mlb_roster, is_on_25man, annual_salary, contract_years_remaining, service_time, service_time_days, injury_prone, coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country, is_drafted, career_hits, career_hr, career_rbi, career_ip, career_k, options_remaining) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`
   );
 
   const doWorldgen = db.transaction(() => {
@@ -353,6 +353,11 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
       // v0.2.0: service_time_days = serviceTime * 30 (AB-05 rescaling)
       const serviceTimeDays = serviceTime * 30;
 
+      // AB-10 Part B: options_remaining based on service time — veterans exhaust their options.
+      // MLB rules: players get 3 options; each send-down uses one. After 3 years of service,
+      // most players have used all options. service_time >= 3 → 0 options, >= 2 → max 1, else 3.
+      const optionsRemaining = serviceTime >= 3 ? 0 : serviceTime >= 2 ? 1 : 3;
+
       // AB-11 FIX §1.2b: Seed age-scaled career stats so veterans sit near milestone thresholds.
       // Milestones fire on crossing 100/200 HR, 2000 hits, 1000 K — all starting at 0 makes them
       // unreachable in a fresh play horizon. Scale by (age - 22) × rate, clamped 0..threshold-1
@@ -410,6 +415,7 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
         careerRbi,
         careerIp,
         careerK,
+        optionsRemaining,
       );
     }
 
