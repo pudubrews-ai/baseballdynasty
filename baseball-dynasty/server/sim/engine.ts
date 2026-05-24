@@ -96,6 +96,7 @@ export async function refreshCache(leagueId: number): Promise<LeagueStateSnapsho
     phase: mapPhase(league.phase),
     subPhase: mapSubPhase(league.phase),
     seasonNumber: league.season_number,
+    season: league.season_number, // §2.2 Iter-5: alias per spec G0-4
     currentGameDate: league.current_game_date,
     currentGameNumber: league.current_game_number,
     simSpeed: (league.sim_speed as SimSpeed) ?? 'paused',

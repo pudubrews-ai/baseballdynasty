@@ -22,14 +22,14 @@ playersRouter.get('/leaders', async (req: Request, res: Response, next: NextFunc
       category,
     });
 
-    // Batting avg leaders (min 150 AB — raised from 100 per §3.6)
+    // Batting avg leaders (min 100 AB — lowered from 150 per §2.3 Iter-5)
     const battingAvg = (prepared(
       `SELECT p.first_name, p.last_name, t.city || ' ' || t.name as team_name,
        CAST(ss.hits AS REAL) / NULLIF(ss.at_bats, 0) as value
        FROM season_stats ss
        JOIN players p ON p.id = ss.player_id
        LEFT JOIN teams t ON t.id = ss.team_id
-       WHERE ss.league_id = ? AND ss.season_number = ? AND ss.at_bats >= 150
+       WHERE ss.league_id = ? AND ss.season_number = ? AND ss.at_bats >= 100
        ORDER BY value DESC LIMIT 10`
     ).all(league.id, season) as LeaderRow[]).map(mapLeader('AVG'));
 

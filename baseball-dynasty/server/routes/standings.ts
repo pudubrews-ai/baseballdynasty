@@ -4,9 +4,20 @@ export async function getStandings(): Promise<object> {
   const league = getActiveLeague();
   if (!league) return { conferences: [] };
 
-  const teams = prepared(
-    'SELECT * FROM teams WHERE league_id = ? ORDER BY wins DESC, (wins - losses) DESC'
+  const teamsRaw = prepared(
+    'SELECT * FROM teams WHERE league_id = ?'
   ).all(league.id) as TeamRow[];
+
+  // §3.2 Iter-5: Sort by PCT desc (with run-diff and wins as tiebreakers)
+  const teams = teamsRaw.sort((a, b) => {
+    const pctA = (a.wins + a.losses) > 0 ? a.wins / (a.wins + a.losses) : 0;
+    const pctB = (b.wins + b.losses) > 0 ? b.wins / (b.wins + b.losses) : 0;
+    if (pctB !== pctA) return pctB - pctA;
+    const rdA = a.runs_scored - a.runs_allowed;
+    const rdB = b.runs_scored - b.runs_allowed;
+    if (rdB !== rdA) return rdB - rdA;
+    return b.wins - a.wins;
+  });
 
   const conferences = ['American', 'National'];
   const result = {

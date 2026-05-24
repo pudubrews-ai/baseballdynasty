@@ -247,6 +247,16 @@ export async function simulateGame(
   const homeStarter = selectStartingPitcher(homeTeam);
   const awayStarter = selectStartingPitcher(awayTeam);
 
+  // §1.1 Iter-5: If either team has no starting pitcher on the MLB roster,
+  // skip this game with a warning. This shouldn't happen if
+  // validatePostDraftRosters ran after each draft, but guard defensively.
+  if (!homeStarter || !awayStarter) {
+    console.error(`[game ${gameId}] Missing starting pitcher (home=${!!homeStarter}, away=${!!awayStarter}); advancing schedule without playing game ${gameNumber}`);
+    const db = getDb();
+    db.prepare('UPDATE leagues SET current_game_number = ? WHERE id = ?').run(gameNumber, leagueId);
+    return;
+  }
+
   // Get bullpens
   const homeBullpen = prepared(
     "SELECT * FROM players WHERE team_id = ? AND is_on_mlb_roster = 1 AND position IN ('RP','CL') ORDER BY overall_rating DESC"
@@ -380,8 +390,12 @@ export async function simulateGame(
         );
       }
       if (validationErrors.length > 0) {
-        // §2.9 fail-closed: do NOT write the invalid game; log and skip
-        console.error(`[game ${gameId}] box-score validation failed after retries; SKIPPING game write: ${validationErrors.join('; ')}`);
+        // §1.1 Iter-5: Fail-closed but ADVANCE current_game_number so the engine
+        // does not stall on the same game forever. The game is recorded as a no-op
+        // (no W/L change, no stats) but the schedule pointer moves forward.
+        console.error(`[game ${gameId}] box-score validation failed after retries; SKIPPING game ${gameNumber}: ${validationErrors.join('; ')}`);
+        const db = getDb();
+        db.prepare('UPDATE leagues SET current_game_number = ? WHERE id = ?').run(gameNumber, leagueId);
         return;
       }
     }
@@ -456,10 +470,10 @@ function generateBatterLines(
   for (const player of lineup) {
     // §5.1 Rule 7: Each starter gets 3-5 ABs
     const atBats = randInt(rng, 3, 5);
-    // §2.5: Realistic hit-probability formula
-    // contact=50 (avg) → 0.275, contact=80 (above avg) → 0.35, contact=99 (elite) → 0.3975
-    // Cap at 0.40 so AVG leaders land in 0.300-0.400 spec range
-    const hitProb = Math.max(0.15, Math.min(0.40, player.contact / 400 + 0.15));
+    // §2.5 Iter-5: Tightened to keep top AVG leaders under 0.400 spec ceiling.
+    // contact=50 → 0.255, contact=80 → 0.31, contact=99 → 0.348 (cap 0.36)
+    // Top 10 of 100-AB qualifiers should land in 0.300-0.395 range.
+    const hitProb = Math.max(0.15, Math.min(0.36, player.contact / 500 + 0.13));
     let hits = 0;
     for (let ab = 0; ab < atBats; ab++) {
       if (rng() < hitProb) hits++;

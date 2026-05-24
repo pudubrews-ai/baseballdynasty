@@ -31,7 +31,9 @@ app.use(express.json({ limit: '8kb' }));
 // Validate body middleware factory
 function validateBody<T>(schema: z.ZodSchema<T>) {
   return (req: Request, res: Response, next: NextFunction): void => {
-    const result = schema.safeParse(req.body);
+    // §2.1 Iter-5: Treat missing body as empty object so optional-only schemas pass
+    const body = req.body === undefined ? {} : req.body;
+    const result = schema.safeParse(body);
     if (!result.success) {
       res.status(400).json({ error: 'invalid_body', details: result.error.flatten() });
       return;
@@ -79,6 +81,7 @@ app.get('/api/state', async (req: Request, res: Response, next: NextFunction): P
         leagueId: null,
         phase: 'no_league',
         seasonNumber: 0,
+        season: 0, // §2.2 Iter-5: alias per spec G0-4
         simSpeed: 'paused',
         noLeague: true,
         currentGameDate: 0,

@@ -21,6 +21,9 @@ export async function runOffseason(league: LeagueRow, isTurbo: boolean): Promise
   const steps = ['retirement', 'development', 'free_agency', 'front_office', 'annual_draft', 'done'];
   const startIdx = steps.indexOf(currentStep);
 
+  // §1.2 Iter-5: Import pause-check for cooperative offseason cancellation
+  const { isPaused } = await import('./engine.js');
+
   for (let i = startIdx; i < steps.length; i++) {
     const step = steps[i]!;
     console.log(`[offseason] Running step: ${step}`);
@@ -40,13 +43,22 @@ export async function runOffseason(league: LeagueRow, isTurbo: boolean): Promise
         break;
       case 'annual_draft':
         await runAnnualDraftStep(league, isTurbo);
+        // §1.2 Iter-5: If runAnnualDraft was paused mid-draft (non-turbo only), runAnnualDraftStep
+        // returns without completing all 600 picks. Do NOT advance offseason_step in that case;
+        // the next tick (after resume) will re-enter with offseason_step='annual_draft'
+        // and runAnnualDraft's resume logic picks up from max(pick_number)+1.
+        // In turbo mode the draft runs in one atomic transaction so no pause is possible.
+        if (!isTurbo && isPaused()) {
+          console.log('[offseason] Paused at step annual_draft — preserving checkpoint');
+          return;
+        }
         break;
       case 'done':
         await finalizeOffseason(leagueId, league.season_number);
         break;
     }
 
-    // Checkpoint: update offseason_step
+    // Checkpoint: update offseason_step to the NEXT step
     if (step !== 'done') {
       prepared('UPDATE leagues SET offseason_step = ? WHERE id = ?').run(steps[i + 1] ?? 'done', leagueId);
     }
@@ -298,6 +310,11 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
 // Step 5: Annual draft
 async function runAnnualDraftStep(league: LeagueRow, isTurbo: boolean): Promise<void> {
   await runAnnualDraft(league, isTurbo);
+  // §1.1 Iter-5: After annual draft, ensure all teams meet position minimums
+  // (C, SS, CF, SP>=2, CL>=1). This prevents Season N+1's game sim from stalling
+  // on teams with zero starting pitchers after retirement+FA depletion.
+  const { validatePostDraftRosters } = await import('./worldgen.js');
+  validatePostDraftRosters(league.id);
   console.log(`[offseason] Annual draft complete`);
 }
 
@@ -331,6 +348,11 @@ async function finalizeOffseason(leagueId: number, previousSeason: number): Prom
   });
 
   tx();
+
+  // §1.1 Iter-5: Final roster validation before season N+1 starts
+  // Belt-and-suspenders alongside the validator call after the annual draft step
+  const { validatePostDraftRosters } = await import('./worldgen.js');
+  validatePostDraftRosters(leagueId);
 
   console.log(`[offseason] Season ${previousSeason} complete. Season ${newSeason} begins.`);
 }

@@ -31,6 +31,7 @@ export interface LeagueStateSnapshot {
   phase: LeaguePhase;
   subPhase: 'expansion' | 'annual' | null;
   seasonNumber: number;
+  season: number; // §2.2 Iter-5: alias for seasonNumber per spec G0-4
   currentGameDate: number; // epoch ms
   currentGameNumber: number;
   simSpeed: SimSpeed;
