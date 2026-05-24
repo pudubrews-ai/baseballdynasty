@@ -16,8 +16,11 @@
 // AB-18: Crash-gap acceptance — if crash between game commit and maintenance commit,
 // next tick re-evaluates conditions (all maintenance is cadence/range-based, idempotent).
 
-import { getDb, prepared, getActiveLeague } from '../db.js';
+import { getDb, prepared, type TeamRow } from '../db.js';
 import { processWaivers } from './waivers.js';
+import { evaluateCallUps } from './callup.js';
+import { evaluateSendDowns } from './sendDown.js';
+import { accrueServiceTime } from './serviceTime.js';
 
 // Roster invariant: each team should have <= 25 on is_on_25man=1 (hard cap after cuts).
 // During regular season, we log a warning if any team exceeds 25.
@@ -47,22 +50,53 @@ export function runRosterMaintenance(
 ): void {
   const db = getDb();
 
-  // Step 1: Waiver sweep (every tick, league-wide, cheap indexed query)
-  // Note: per AB-18, each step runs in its own transaction or is folded into one.
-  // We run the waiver sweep and per-team maintenance in the same call but each
-  // module manages its own transactions internally.
+  // Step 1: Service-time batch (league-wide, only when gameNumber % 10 === 0)
+  // CB-08: additive-only, gated by last_service_time_update_game.
+  if (gameNumber % 10 === 0) {
+    try {
+      accrueServiceTime(leagueId, gameNumber);
+    } catch (err) {
+      console.warn('[rosterMaintenance] Service time error:', err);
+    }
+  }
+
+  // Step 2: Waiver sweep (every tick, league-wide, cheap indexed query)
   try {
     processWaivers(leagueId);
   } catch (err) {
     console.warn('[rosterMaintenance] Waiver sweep error:', err);
   }
 
-  // Step 2: Roster invariant check
+  // Step 3: Per-team maintenance (only for teams that just played)
+  const league = prepared(
+    'SELECT season_number FROM leagues WHERE id = ?'
+  ).get(leagueId) as { season_number: number } | undefined;
+
+  if (league) {
+    for (const teamId of [homeTeamId, awayTeamId]) {
+      try {
+        const team = prepared('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow | undefined;
+        if (!team) continue;
+
+        // AB-01: 5-game per-team cadence for call-ups/send-downs
+        const callUpDue = team.games_played - team.last_call_up_check_game >= 5;
+        if (callUpDue) {
+          evaluateSendDowns(team, leagueId, league.season_number);
+          evaluateCallUps(team, leagueId, league.season_number, gameNumber);
+          // Note: last_call_up_check_game is updated inside evaluateCallUps
+        }
+      } catch (err) {
+        console.warn(`[rosterMaintenance] Per-team maintenance error for team ${teamId}:`, err);
+      }
+    }
+  }
+
+  // Step 4: Roster invariant check
   try {
     checkRosterInvariant(leagueId);
   } catch (err) {
     console.warn('[rosterMaintenance] Invariant check error:', err);
   }
 
-  // Steps 3-4 (call-ups, send-downs, firings, prospect dev) will be added in Phases 6-7.
+  // Steps (firings, prospect dev) added in Phases 7-9.
 }
