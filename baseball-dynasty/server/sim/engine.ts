@@ -11,6 +11,7 @@ import { generateSchedule, saveSchedule, getNextGame, isSeasonComplete, shouldFi
 import { simulateGame } from './game.js';
 import { runPlayoffs } from './playoffs.js';
 import { runOffseason } from './offseason.js';
+import { springCutsNeeded, runSpringCuts } from './springCuts.js';
 import { getLlmStatus } from '../services/llm.js';
 import { scrubError } from '../util/scrub.js';
 import type { LeagueStateSnapshot, SimSpeed } from '../../shared/types.js';
@@ -304,6 +305,11 @@ async function runOneTick(league: LeagueRow): Promise<void> {
       await runDraftTick(league, isTurbo);
       break;
     case 'regular_season':
+      // AB-08: spring cuts run as first regular-season event; no game simmed on this tick
+      if (springCutsNeeded(league)) {
+        runSpringCuts(league);
+        break;
+      }
       await runGameTick(league);
       break;
     case 'playoffs':
