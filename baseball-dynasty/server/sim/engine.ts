@@ -12,6 +12,7 @@ import { simulateGame } from './game.js';
 import { runPlayoffs } from './playoffs.js';
 import { runOffseason } from './offseason.js';
 import { springCutsNeeded, runSpringCuts } from './springCuts.js';
+import { runRosterMaintenance } from './rosterMaintenance.js';
 import { getLlmStatus } from '../services/llm.js';
 import { scrubError } from '../util/scrub.js';
 import type { LeagueStateSnapshot, SimSpeed } from '../../shared/types.js';
@@ -415,6 +416,11 @@ async function runGameTick(league: LeagueRow): Promise<void> {
     league.season_number,
     league.id
   );
+
+  // AB-18/AB-03: roster maintenance runs AFTER simulateGame, unconditionally
+  // (including skipped-game ticks — the hook is here, not in simulateGame).
+  // Crash-gap acceptance: if crash here, next tick re-evaluates idempotent conditions.
+  runRosterMaintenance(league.id, nextGame.homeTeamId, nextGame.awayTeamId, nextGame.gameNumber);
 
   // Check if season complete after this game
   if (isSeasonComplete(league.id)) {

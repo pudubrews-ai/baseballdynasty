@@ -187,11 +187,13 @@ import { teamsRouter } from './routes/teams.js';
 import { playersRouter } from './routes/players.js';
 import { gamesRouter } from './routes/games.js';
 import { timelineRouter } from './routes/timeline.js';
+import { waiversRouter } from './routes/waivers.js';
 
 app.use('/api/teams', teamsRouter);
 app.use('/api/players', playersRouter);
 app.use('/api/games', gamesRouter);
 app.use('/api/timeline', timelineRouter);
+app.use('/api/waivers', waiversRouter);
 
 // §2.9 / §3.2: Draft order endpoint — branches on phase (expansion vs annual)
 app.get('/api/draft/order', async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
