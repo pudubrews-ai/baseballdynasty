@@ -3,8 +3,8 @@
 .env.local
 .env.*.local
 
-# Database
-data/
+# Database (anchored to repo root — does NOT match baseball-dynasty/server/data/)
+/data/
 *.db
 *.db-shm
 *.db-wal

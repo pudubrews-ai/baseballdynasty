@@ -66,20 +66,21 @@ beforeAll(async () => {
   const freshTeamsForForce = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as any[];
   forceMinimumTrades(freshTeamsForForce as any[], leagueId, schedLeague.season_number);
 
+  // Count DISTINCT trades via news_items (one row per executeTrade — §1.2b fix)
   tradeCount = (prepared(
-    "SELECT COUNT(*) as cnt FROM transactions WHERE league_id = ? AND transaction_type = 'trade'"
+    "SELECT COUNT(*) as cnt FROM news_items WHERE league_id = ? AND event_type = 'trade'"
   ).get(leagueId) as any).cnt;
 }, 120000);
 
-describe('Trade floor — ≥3 trades in a full season with divergent standings', () => {
-  it('at least 3 trade transactions recorded after trade deadline', () => {
+describe('Trade floor — ≥3 distinct trades in a full season with divergent standings', () => {
+  it('at least 3 distinct trades (news_items) recorded after trade deadline', () => {
     expect(tradeCount).toBeGreaterThanOrEqual(3);
   });
 
-  it('trade transactions have team_id and player_id set', async () => {
+  it('trade news items have team_id and player_id set', async () => {
     const { prepared } = await import('../db.js');
     const trades = prepared(
-      "SELECT team_id, player_id FROM transactions WHERE league_id = ? AND transaction_type = 'trade' LIMIT 3"
+      "SELECT team_id, player_id FROM news_items WHERE league_id = ? AND event_type = 'trade' LIMIT 3"
     ).all(leagueId) as any[];
     for (const t of trades) {
       expect(t.team_id).not.toBeNull();
@@ -87,12 +88,10 @@ describe('Trade floor — ≥3 trades in a full season with divergent standings'
     }
   });
 
-  it('forceMinimumTrades guarantees the floor even when no natural trades occur', async () => {
+  it('forceMinimumTrades guarantees the ≥3 distinct-trade floor', async () => {
     const { prepared } = await import('../db.js');
-    // The forceMinimumTrades function is designed to always produce ≥3 trades
-    // This test verifies the database count is correct after it runs
     const cnt = (prepared(
-      "SELECT COUNT(*) as cnt FROM transactions WHERE league_id = ? AND transaction_type = 'trade'"
+      "SELECT COUNT(*) as cnt FROM news_items WHERE league_id = ? AND event_type = 'trade'"
     ).get(leagueId) as any).cnt;
     expect(cnt).toBeGreaterThanOrEqual(3);
   });

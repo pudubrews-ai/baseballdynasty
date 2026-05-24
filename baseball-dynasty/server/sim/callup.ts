@@ -153,9 +153,10 @@ export function evaluateCallUps(
         const prospect = findMinorLeaguer(team.id, leagueId, pos, false);
         if (prospect) {
           if (shouldManipulate(prospect, team, currentGameNumber)) {
+            const manipRng = seedFor('manip_' + prospect.id + '_' + currentGameNumber, league.worldgen_seed);
             db.prepare(
               'UPDATE players SET manipulation_delay_until_game = ? WHERE id = ?'
-            ).run(currentGameNumber + Math.floor(Math.random() * 11) + 10, prospect.id);
+            ).run(currentGameNumber + Math.floor(manipRng() * 11) + 10, prospect.id);
             continue;
           }
           promotePlayer(prospect, team, leagueId, seasonNumber, currentGameNumber, db);
@@ -208,9 +209,10 @@ export function evaluateCallUps(
       if (bestAaa && bestAaa.overall_rating >= mlbPlayer.overall_rating + 5) {
         // Send down the MLB player and call up AAA prospect
         if (shouldManipulate(bestAaa, team, currentGameNumber)) {
+          const manipRng2 = seedFor('manip_' + bestAaa.id + '_' + currentGameNumber, league.worldgen_seed);
           db.prepare(
             'UPDATE players SET manipulation_delay_until_game = ? WHERE id = ?'
-          ).run(currentGameNumber + Math.floor(Math.random() * 11) + 10, bestAaa.id);
+          ).run(currentGameNumber + Math.floor(manipRng2() * 11) + 10, bestAaa.id);
           continue;
         }
         // The actual send-down will be handled by evaluateSendDowns

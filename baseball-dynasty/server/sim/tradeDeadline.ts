@@ -33,10 +33,26 @@ export function setTradePosture(team: TeamRow, allTeams: TeamRow[]): void {
   prepared('UPDATE teams SET trade_posture = ? WHERE id = ?').run(posture, team.id);
 }
 
-// Count trades executed this season league-wide
+// Count trades executed this season league-wide (raw row count, used for LEAGUE_CAP check)
 function countLeagueTrades(leagueId: number, seasonNumber: number): number {
   return (prepared(
     "SELECT COUNT(*) as cnt FROM transactions WHERE league_id = ? AND season_number = ? AND transaction_type = 'trade'"
+  ).get(leagueId, seasonNumber) as { cnt: number }).cnt;
+}
+
+// Count DISTINCT trades this season (one trade = one executeTrade call = one buyer-side row).
+// Uses buyer team perspective: each distinct trade inserts exactly one row with the veteran's player_id.
+// We count buyer-side rows (team that received the veteran) as proxies for distinct trade executions.
+// This avoids counting the 1-3 prospect rows of the same trade as separate trades.
+function countDistinctLeagueTrades(leagueId: number, seasonNumber: number): number {
+  // Each executeTrade logs one buyer-side row (buyer.id, veteran.id) and N prospect rows (seller, prospect).
+  // The buyer row is the "trade event" row — it's guaranteed unique per trade since we insert one per executeTrade.
+  // We can't perfectly distinguish buyer vs seller rows without an extra column, so we use the simpler heuristic:
+  // count transactions where the player_id is from an MLB-roster player (the veteran being traded).
+  // For simplicity and correctness: count total 'trade' rows and divide by the typical ratio is fragile.
+  // Cleanest approach: count by NEWS_ITEMS with eventType='trade' (one per executeTrade — see insertTransactionNewsItem call).
+  return (prepared(
+    "SELECT COUNT(*) as cnt FROM news_items WHERE league_id = ? AND season_number = ? AND event_type = 'trade'"
   ).get(leagueId, seasonNumber) as { cnt: number }).cnt;
 }
 
@@ -224,7 +240,8 @@ export function evaluateTradeDeadline(
 }
 
 // Forced minimum 3 trades after the deadline marker fires (AB-12 RULING).
-// Called when shouldFireTradeDeadline returns true and < 3 trades exist.
+// Called when shouldFireTradeDeadline returns true and < 3 distinct trades exist.
+// §1.2(b): Guarantees ≥3 distinct trades regardless of seed.
 export function forceMinimumTrades(
   allTeams: TeamRow[],
   leagueId: number,
@@ -232,10 +249,11 @@ export function forceMinimumTrades(
 ): void {
   const db = getDb();
 
-  const currentTrades = countLeagueTrades(leagueId, seasonNumber);
-  if (currentTrades >= 3) return;
+  // Use distinct-trade count (one per executeTrade call) not raw row count
+  const currentDistinctTrades = countDistinctLeagueTrades(leagueId, seasonNumber);
+  if (currentDistinctTrades >= 3) return;
 
-  const needed = 3 - currentTrades;
+  const needed = 3 - currentDistinctTrades;
   let forced = 0;
 
   // Worst-record non-interim teams as sellers, best-record as buyers
@@ -243,10 +261,40 @@ export function forceMinimumTrades(
   const sellers = [...eligible].sort((a, b) => a.wins - b.wins); // worst record first
   const buyers = [...eligible].sort((a, b) => b.wins - a.wins);  // best record first
 
+  // Helper: find a movable prospect from buyer — progressively wider search
+  function findBuyerProspect(buyerId: number): PlayerRow[] {
+    // Tier 1: AAA/AA prospects (preferred)
+    const tier1 = prepared(
+      `SELECT * FROM players WHERE team_id = ? AND minor_level IN ('AAA','AA') AND waiver_state = 'none'
+       ORDER BY overall_rating DESC LIMIT 1`
+    ).all(buyerId) as PlayerRow[];
+    if (tier1.length > 0) return tier1;
+
+    // Tier 2: A/Rookie players
+    const tier2 = prepared(
+      `SELECT * FROM players WHERE team_id = ? AND minor_level IN ('A','Rookie') AND waiver_state = 'none'
+       ORDER BY overall_rating DESC LIMIT 1`
+    ).all(buyerId) as PlayerRow[];
+    if (tier2.length > 0) return tier2;
+
+    // Tier 3: 40-man reserves not on 25-man (bench depth)
+    const tier3 = prepared(
+      `SELECT * FROM players WHERE team_id = ? AND is_on_mlb_roster = 1 AND is_on_25man = 0 AND waiver_state = 'none'
+       ORDER BY overall_rating ASC LIMIT 1`
+    ).all(buyerId) as PlayerRow[];
+    if (tier3.length > 0) return tier3;
+
+    // Tier 4: lowest-rated 25-man bench player (last resort)
+    const tier4 = prepared(
+      `SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND waiver_state = 'none'
+       AND position NOT IN ('SP', 'CL', 'SS', 'C', 'CF')
+       ORDER BY overall_rating ASC LIMIT 1`
+    ).all(buyerId) as PlayerRow[];
+    return tier4;
+  }
+
   for (let i = 0; i < sellers.length && forced < needed; i++) {
     const seller = sellers[i]!;
-    const buyer = buyers.find(b => b.id !== seller.id && countTeamTrades(b.id, leagueId, seasonNumber) < PER_TEAM_CAP);
-    if (!buyer) continue;
 
     const sellerTeamTrades = countTeamTrades(seller.id, leagueId, seasonNumber);
     if (sellerTeamTrades >= PER_TEAM_CAP) continue;
@@ -265,29 +313,36 @@ export function forceMinimumTrades(
 
     if (!veteran) continue;
 
-    // Find any prospect from buyer
-    const prospects = prepared(
-      `SELECT * FROM players
-       WHERE team_id = ? AND minor_level IN ('AAA','AA') AND waiver_state = 'none'
-       ORDER BY overall_rating DESC
-       LIMIT 1`
-    ).all(buyer.id) as PlayerRow[];
+    // Try each buyer (in order) until one has a movable asset
+    let tradeMade = false;
+    for (const buyer of buyers) {
+      if (buyer.id === seller.id) continue;
+      if (countTeamTrades(buyer.id, leagueId, seasonNumber) >= PER_TEAM_CAP) continue;
 
-    if (prospects.length === 0) continue;
+      const prospects = findBuyerProspect(buyer.id);
+      if (prospects.length === 0) continue; // truly nothing to trade — skip this buyer
 
-    const leagueRow = prepared('SELECT current_game_number FROM leagues WHERE id = ?').get(leagueId) as { current_game_number: number } | undefined;
-    const currentGameNumber = leagueRow?.current_game_number ?? 0;
+      const leagueRow = prepared('SELECT current_game_number FROM leagues WHERE id = ?').get(leagueId) as { current_game_number: number } | undefined;
+      const currentGameNumber = leagueRow?.current_game_number ?? 0;
 
-    const tradeTx = db.transaction(() => {
-      executeTrade(buyer, seller, veteran, prospects, leagueId, seasonNumber, db, currentGameNumber);
-    });
+      const tradeTx = db.transaction(() => {
+        executeTrade(buyer, seller, veteran, prospects, leagueId, seasonNumber, db, currentGameNumber);
+      });
 
-    try {
-      tradeTx();
-      forced++;
-      console.log(`[tradeDeadline] Forced trade ${forced} of ${needed}`);
-    } catch (err) {
-      console.warn('[tradeDeadline] Forced trade failed:', err);
+      try {
+        tradeTx();
+        forced++;
+        tradeMade = true;
+        console.log(`[tradeDeadline] Forced trade ${forced} of ${needed}`);
+        break; // One trade per seller iteration
+      } catch (err) {
+        console.warn('[tradeDeadline] Forced trade failed:', err);
+      }
+    }
+
+    if (!tradeMade) {
+      // No buyer could trade with this seller — move to next seller
+      continue;
     }
   }
 

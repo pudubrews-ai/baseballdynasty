@@ -207,6 +207,8 @@ export function insertMilestoneNewsItem(params: {
   playerId: number;
   headlineText?: string;
   detailsJson?: string;
+  sourceTable?: string;
+  sourceId?: number;
 }): void {
   insertNewsItem({
     leagueId: params.leagueId,
@@ -217,6 +219,8 @@ export function insertMilestoneNewsItem(params: {
     playerId: params.playerId,
     headlineText: params.headlineText ?? null,
     detailsJson: params.detailsJson ?? null,
+    sourceTable: params.sourceTable ?? null,
+    sourceId: params.sourceId ?? null,
   });
 }
 

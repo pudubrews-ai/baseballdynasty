@@ -268,13 +268,14 @@ function resolveWaiverEntry(
          VALUES (?, ?, 'waiver_claim', ?, ?, NULL, ?)`
       ).run(leagueId, seasonNumber, claimingTeam.id, player.id, Date.now());
 
-      // §1.1(a): Insert waiver claim news item
+      // §1.1(a): Insert waiver claim news item (§4.2: pass dfa_team_id as secondaryTeamId)
       insertTransactionNewsItem({
         leagueId,
         seasonNumber,
         gameNumber: currentGameNumber,
         eventType: 'waiver_claim',
         teamId: claimingTeam.id,
+        secondaryTeamId: player.dfa_team_id ?? null,
         playerId: player.id,
         sourceTable: 'transactions',
         sourceId: claimTxResult.lastInsertRowid as number,

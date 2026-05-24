@@ -554,3 +554,42 @@ All 5 filter buttons (news-filter-all/transactions/frontoffice/injuries/mileston
 ## Phase 2 — Iteration 2
 
 **Step 4 (Iteration 2):** Spawning Developer for all Critical/High/Medium fixes per developer-instructions-2.md.
+
+**Step 4 (Iteration 2) COMPLETE:** Developer iteration 2 complete. 389 tests passing (0 failures), clean build, 0 TypeScript errors, 0 ESLint errors, 7 migrations in dist/. 39 new regression tests added across 9 test files. Completion report: `reports/v0.2.0-developer-iter2-complete.md`.
+
+**Step 5 (Iteration 2):** Spawning CISO and Adversary as background agents for Iteration 2 post-build review.
+
+**Step 5 (Iteration 2) COMPLETE:**
+
+`reports/v0.2.0-ciso-iter2-post-build.md` — 0 Critical / 0 High / 0 Medium / 2 Low (carryovers). NB-1 RESOLVED: news pipeline wired correctly. Ship-eligible from security standpoint.
+
+`reports/v0.2.0-adversary-iter2-post-build.md` — Verdict: NOT READY. 2 Critical / 2 High / 3 Medium / 2 Low.
+- AB-01 (Critical): rosterMaintenance.ts:120-138 resets `recent_*` to zero BEFORE evaluateSendDowns/evaluateCallUps read them — triggers structurally unreachable. 0 send-downs, 0 call-ups, 0 DFAs, 0 waiver claims in full-season probes.
+- AB-02 (Critical): INJURY and MILESTONE news producers missing (2 of 15 spec types). forceMinimumTrades produces 0 trades on unfavorable seeds — ≥3 floor not guaranteed.
+- AB-05 (Medium): Wrong .gitignore file edited — server/data/*.ts still gitignored, clean checkout can't boot.
+
+**Governance Decision — Run testers despite 2 Criticals:** Server starts and sim runs. Testers provide full signal on all working systems.
+
+**Step 6 (Iteration 2):** Spawning API Tester, then UI Tester A, then UI Tester B.
+
+**Step 6 (Iteration 2) — API Tester COMPLETE:** `reports/v0.2.0-api-tester-iter2-results.md`. Groups 0, 3, 7, 8, 10 passing. Criticals confirmed: waiver wire never populates (0 DFAs across 4 seasons); 0 mid-season call-ups/send-downs. Mediums: news ?type=FRONT+OFFICE returns 400 (working value is `frontoffice`); pagination offset ignored; details_json null on front-office events; spring cut uses `send_down` type not `release`.
+
+**Step 6 (Iteration 2) — UI Tester A COMPLETE:** `reports/v0.2.0-ui-tester-a-iter2-results.md` — 31 Pass / 4 Fail / 2 Skip. news-ticker globally visible on all tabs (5 items), news-tab nav correct, all filters present, minors-stats-{playerId} confirmed (150+ entries). Fails: `new-dynasty-button` testid uses suffix `-header`; GET /api/front-office-events returns 404.
+
+**Step 6 (Iteration 2) — UI Tester B COMPLETE:** `reports/v0.2.0-ui-tester-b-iter2-results.md` — 22 Pass. Core news testids all present. Gaps: news-badge/news-headline/news-game-number sub-testids missing from news item spans; news-item-detail missing from expanded view; minors tab testid is `team-minors-tab` not `minors-tab`; non-game headlines are procedural fallbacks (no ANTHROPIC_API_KEY). Game result events correctly show score-only. Injuries and milestones return 0 (no such events in DB — corroborates AB-02 INJURY/MILESTONE producer gap).
+
+**Step 7 (Iteration 2):** Spawning Architect for ITERATE/COMPLETE decision.
+
+**Step 7 (Iteration 2) COMPLETE:** `reports/v0.2.0-architect-eval-2.md` and `reports/v0.2.0-developer-instructions-3.md` written. Decision: **ITERATE**. 2 Critical / 1 High / 5 Medium / 3 Low.
+
+**2 Confirmed Criticals:**
+1. AB-01: rosterMaintenance.ts:124-131 zeroes `recent_*` to 0 immediately BEFORE evaluateSendDowns/evaluateCallUps read them — triggers structurally unreachable. §5.2 test gives false green.
+2. AB-02: INJURY and MILESTONE news producers have zero callers. forceMinimumTrades non-deterministic (0 trades on seed 11).
+
+**False positives:** ?type=FRONT+OFFICE 400 correct; details_json NULL acceptable; spring cuts send_down+release correct.
+
+---
+
+## Phase 2 — Iteration 3
+
+**Step 4 (Iteration 3):** Spawning Developer for Iteration 3 fixes per developer-instructions-3.md.

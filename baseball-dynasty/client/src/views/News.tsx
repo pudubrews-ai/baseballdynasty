@@ -116,18 +116,18 @@ export default function News() {
             >
               {/* Compact row */}
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                <BadgePill badge={item.badge} />
-                <span style={{ color: '#64748b', fontSize: '12px', whiteSpace: 'nowrap' }}>
+                <span data-testid="news-badge"><BadgePill badge={item.badge} /></span>
+                <span data-testid="news-game-number" style={{ color: '#64748b', fontSize: '12px', whiteSpace: 'nowrap' }}>
                   G{item.game_number}
                 </span>
-                <span style={{ flex: 1, fontSize: '14px', color: item.headline_text ? '#e2e8f0' : '#64748b' }}>
+                <span data-testid="news-headline" style={{ flex: 1, fontSize: '14px', color: item.headline_text ? '#e2e8f0' : '#64748b' }}>
                   {item.headline_text ?? (item.is_headline_pending ? '(generating…)' : item.event_type)}
                 </span>
               </div>
 
               {/* Expanded detail */}
               {expandedId === item.id && (
-                <div style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid #334155', fontSize: '13px', color: '#94a3b8' }}>
+                <div data-testid="news-item-detail" style={{ marginTop: '12px', paddingTop: '12px', borderTop: '1px solid #334155', fontSize: '13px', color: '#94a3b8' }}>
                   <div>Season {item.season_number} · Game {item.game_number}</div>
                   {item.event_type && <div style={{ marginTop: '4px' }}>Event: {item.event_type}</div>}
                   {item.team_id && <div>Team ID: {item.team_id}</div>}

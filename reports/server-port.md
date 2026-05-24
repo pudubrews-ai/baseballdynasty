@@ -1,7 +1,9 @@
-# Server Port Info
+# Server Port Info — v0.2.0 Iteration 2
 
-- Server port: 3001
-- Server PID: 14183
-- Client port: 5173
-- Client PID: 14192
-- Started: 2026-05-24
+- **Port:** 3001
+- **Server PID:** 20982
+- **Client PID:** 20988
+- **Start time:** 2026-05-24
+- **Entry point:** dist/server/server/index.js
+- **Status:** Running — "Baseball Dynasty server running on http://127.0.0.1:3001"
+- **Client:** http://localhost:5173 (Vite dev server)

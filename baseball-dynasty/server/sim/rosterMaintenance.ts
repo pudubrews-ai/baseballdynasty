@@ -119,7 +119,14 @@ export function runRosterMaintenance(
         // AB-01: 5-game per-team cadence for call-ups/send-downs
         const callUpDue = team.games_played - team.last_call_up_check_game >= 5;
         if (callUpDue) {
-          // §2.7: Reset recent_* windows every 5 games (sliding window approximation)
+          // §1.1 (iter-3 fix): Evaluate FIRST so evaluators read the accumulated window,
+          // THEN reset for the next 5-game cycle.
+          // (Previous order reset before evaluate, making recent_* always 0 at eval time.)
+          evaluateSendDowns(team, leagueId, league.season_number, gameNumber);
+          evaluateCallUps(team, leagueId, league.season_number, gameNumber);
+          // Note: last_call_up_check_game is updated inside evaluateCallUps
+
+          // §2.7: Reset recent_* windows AFTER evaluation (sliding window approximation)
           // This makes recent stats reflect only the last ~5 games, not season totals
           try {
             prepared(
@@ -132,9 +139,6 @@ export function runRosterMaintenance(
           } catch (err) {
             console.warn(`[rosterMaintenance] recent_* reset error for team ${teamId}:`, err);
           }
-          evaluateSendDowns(team, leagueId, league.season_number, gameNumber);
-          evaluateCallUps(team, leagueId, league.season_number, gameNumber);
-          // Note: last_call_up_check_game is updated inside evaluateCallUps
         }
 
         // Firing evaluation (Phase 9): every tick (cadence is gated inside evaluateFirings)

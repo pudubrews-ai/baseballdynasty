@@ -203,8 +203,47 @@ function runSpringCutsForTeam(
     const overage = trimCandidates.find(p => !wouldViolateMinimum(p.position, posMap));
 
     if (!overage) {
-      // All remaining are minimum-protected — accept the slight overcount
-      break;
+      // All remaining are minimum-protected. §2.1 fix: find the position with the largest
+      // surplus over its own minimum and cut the lowest-rated player there. This guarantees
+      // exactly-25 even when every player holds a position minimum.
+      let surplusPos: string | null = null;
+      let maxSurplus = 0;
+      for (const { pos, min } of POSITION_MINIMUMS) {
+        const have = posMap.get(pos) ?? 0;
+        const surplus = have - min;
+        if (surplus > maxSurplus) {
+          maxSurplus = surplus;
+          surplusPos = pos;
+        }
+      }
+
+      if (!surplusPos) {
+        // Truly cannot trim without violating minimums — accept overcount
+        break;
+      }
+
+      // Cut lowest-rated player at the surplus position
+      const surplusCandidate = trimCandidates.find(p => p.position === surplusPos);
+      if (!surplusCandidate) break;
+
+      const hasOpts = (surplusCandidate.options_remaining ?? 3) > 0;
+      if (hasOpts) {
+        prepared(
+          `UPDATE players SET is_on_25man = 0, minor_level = 'AAA', options_remaining = options_remaining - 1 WHERE id = ?`
+        ).run(surplusCandidate.id);
+        const sdRes = prepared(
+          `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at) VALUES (?, ?, 'send_down', ?, ?, NULL, ?)`
+        ).run(leagueId, seasonNumber, team.id, surplusCandidate.id, Date.now());
+        insertRosterNewsItem({
+          leagueId, seasonNumber, gameNumber: 0, eventType: 'send_down',
+          teamId: team.id, playerId: surplusCandidate.id,
+          sourceTable: 'transactions', sourceId: sdRes.lastInsertRowid as number,
+        });
+      } else {
+        releaseToFa(surplusCandidate, team.id, seasonNumber, leagueId);
+      }
+      postRepair25Man--;
+      continue;
     }
 
     const hasOptions = (overage.options_remaining ?? 3) > 0;

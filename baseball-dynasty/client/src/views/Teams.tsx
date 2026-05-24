@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { getTeams, getTeam, getTeamRoster, getTeamMinors, getTeamHistory } from '../api.js';
+import { useLeagueState } from '../hooks/useLeagueState.js';
 
 interface WaiverEntry {
   player_id: number;
@@ -12,13 +13,15 @@ interface WaiverEntry {
 
 function WaiversPanel() {
   const [waivers, setWaivers] = useState<WaiverEntry[]>([]);
+  const { state } = useLeagueState();
 
+  // §3.2: Re-fetch waivers whenever lastNewsId advances (sim state changes)
   useEffect(() => {
     fetch('/api/waivers')
       .then(r => r.ok ? r.json() : [])
       .then((data: WaiverEntry[]) => setWaivers(data))
       .catch(() => {});
-  }, []);
+  }, [state?.lastNewsId]);
 
   return (
     <div style={{ marginTop: '16px' }}>
@@ -201,23 +204,58 @@ export default function Teams() {
           {activeTab === 'minors' && (
             <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
               {(() => {
-                const minors = (tabData ?? {}) as Record<string, Array<{ id: number; first_name: string; last_name: string; position: string; overall_rating: number }>>;
+                interface MinorPlayer {
+                  id: number;
+                  first_name: string;
+                  last_name: string;
+                  position: string;
+                  overall_rating: number;
+                  season_stats?: {
+                    games_played?: number;
+                    at_bats?: number;
+                    hits?: number;
+                    home_runs?: number;
+                    era?: number;
+                    k?: number;
+                    ip?: number;
+                    battingAvg?: number;
+                  };
+                }
+                const minors = (tabData ?? {}) as Record<string, MinorPlayer[]>;
                 const levels: Array<'AAA' | 'AA' | 'A' | 'Rookie'> = ['AAA', 'AA', 'A', 'Rookie'];
                 const hasAny = levels.some(lvl => Array.isArray(minors[lvl]) && minors[lvl]!.length > 0);
                 if (!hasAny) return <p style={{ color: '#64748b', fontSize: '12px' }}>No minor league depth yet</p>;
+                const isPitcher = (pos: string) => pos === 'SP' || pos === 'CL' || pos === 'RP';
                 return levels.map(level => {
                   const players = Array.isArray(minors[level]) ? minors[level]! : [];
                   if (players.length === 0) return null;
                   return (
                     <div key={level} style={{ marginBottom: '8px' }}>
                       <div style={{ color: '#f59e0b', fontSize: '11px', fontWeight: 'bold', marginBottom: '4px' }}>{level}</div>
-                      {players.map(p => (
-                        <div key={p.id} data-testid={`minors-stats-${p.id}`} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #334155', fontSize: '12px' }}>
-                          <span>{p.first_name} {p.last_name}</span>
-                          <span style={{ color: '#94a3b8' }}>{p.position}</span>
-                          <span style={{ color: '#60a5fa' }}>{p.overall_rating}</span>
-                        </div>
-                      ))}
+                      {players.map(p => {
+                        const ss = p.season_stats;
+                        const pit = isPitcher(p.position);
+                        return (
+                          <div key={p.id} data-testid={`minors-stats-${p.id}`} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #334155', fontSize: '12px', gap: '4px' }}>
+                            <span style={{ flex: 2 }}>{p.first_name} {p.last_name}</span>
+                            <span style={{ color: '#94a3b8', flex: 1 }}>{p.position}</span>
+                            <span style={{ color: '#60a5fa', flex: 1 }}>{p.overall_rating}</span>
+                            {pit ? (
+                              <>
+                                <span style={{ color: '#94a3b8', flex: 1 }} title="ERA">{ss?.era !== undefined ? Number(ss.era).toFixed(2) : '—'}</span>
+                                <span style={{ color: '#94a3b8', flex: 1 }} title="K">{ss?.k ?? '—'}K</span>
+                                <span style={{ color: '#94a3b8', flex: 1 }} title="IP">{ss?.ip !== undefined ? Number(ss.ip).toFixed(1) : '—'}IP</span>
+                              </>
+                            ) : (
+                              <>
+                                <span style={{ color: '#94a3b8', flex: 1 }} title="AVG">{ss?.battingAvg !== undefined ? Number(ss.battingAvg).toFixed(3).replace('0.', '.') : (ss?.at_bats && ss.at_bats > 0 ? (((ss.hits ?? 0) / ss.at_bats)).toFixed(3).replace('0.', '.') : '—')}</span>
+                                <span style={{ color: '#94a3b8', flex: 1 }} title="HR">{ss?.home_runs ?? '—'}HR</span>
+                                <span style={{ color: '#94a3b8', flex: 1 }} title="G">{ss?.games_played ?? '—'}G</span>
+                              </>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   );
                 });

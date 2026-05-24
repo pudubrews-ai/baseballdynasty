@@ -156,7 +156,16 @@ playersRouter.get('/:id', async (req: Request, res: Response, next: NextFunction
     if (!idResult.success) { res.status(400).json({ error: 'invalid_id' }); return; }
 
     const league = getActiveLeague();
-    const player = prepared('SELECT * FROM players WHERE id = ?').get(idResult.data) as PlayerRow | undefined;
+    const player = prepared(
+      `SELECT id, league_id, team_id, first_name, last_name, age, position, overall_rating, potential, potential_revealed,
+              contact, power, speed, fielding, arm, pitching_velocity, pitching_control, pitching_stamina,
+              is_on_mlb_roster, minor_level, annual_salary, contract_years_remaining, service_time, injury_prone,
+              coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country,
+              is_drafted, career_hits, career_hr, career_rbi, career_ip, career_k, career_wins,
+              is_on_25man, options_remaining, service_time_days, first_mlb_call_up_game, free_agent_eligible,
+              manipulation_delay_until_game, prospect_visible, waiver_state, dfa_team_id, claim_game_window_end
+       FROM players WHERE id = ?`
+    ).get(idResult.data) as PlayerRow | undefined;
     if (!player) { res.status(404).json({ error: 'Player not found' }); return; } // §2.16.2
 
     const team = player.team_id

@@ -379,7 +379,20 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
       const winPct = team.wins / Math.max(1, team.wins + team.losses);
       const securityDelta = winPct > 0.55 ? 1 : winPct < 0.45 ? -1 : 0;
       const newSecurity = Math.max(1, Math.min(10, team.job_security + securityDelta));
-      db.prepare('UPDATE teams SET job_security = ?, interim_manager = 0 WHERE id = ?').run(newSecurity, team.id);
+
+      // §3.5: If clearing interim_manager but manager_name is still 'Interim Manager',
+      // assign a fresh permanent manager name/ratings so no team ends up with
+      // interim_manager=0 AND manager_name='Interim Manager'.
+      if (team.interim_manager === 1 && team.manager_name === 'Interim Manager') {
+        const permFirst = ['Bob', 'Tom', 'Mike', 'Dave', 'Jim'][Math.floor(rng() * 5)] ?? 'Bob';
+        const permLast = ['Johnson', 'Smith', 'Williams', 'Brown', 'Jones'][Math.floor(rng() * 5)] ?? 'Johnson';
+        const permStyle = MANAGER_STYLES[Math.floor(rng() * 3)] ?? 'balanced';
+        db.prepare(
+          'UPDATE teams SET manager_name = ?, manager_style = ?, job_security = ?, interim_manager = 0 WHERE id = ?'
+        ).run(`${permFirst} ${permLast}`, permStyle, newSecurity, team.id);
+      } else {
+        db.prepare('UPDATE teams SET job_security = ?, interim_manager = 0 WHERE id = ?').run(newSecurity, team.id);
+      }
     }
 
     // GM fired if owner meddling (40% if win_pct < 0.45)

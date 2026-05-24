@@ -15,7 +15,7 @@ import { springCutsNeeded, runSpringCuts } from './springCuts.js';
 import { runRosterMaintenance } from './rosterMaintenance.js';
 import { forceMinimumTrades } from './tradeDeadline.js';
 import { getLlmStatus, resetNewsCallsThisSeason } from '../services/llm.js';
-import { insertGameNewsItem, fillPendingHeadlines, fillPendingTransactionFlavors } from './news.js';
+import { insertGameNewsItem, insertNewsItem, insertMilestoneNewsItem, fillPendingHeadlines, fillPendingTransactionFlavors } from './news.js';
 import { scrubError } from '../util/scrub.js';
 import type { LeagueStateSnapshot, SimSpeed } from '../../shared/types.js';
 import type { NewLeagueBodyType } from '../../shared/schemas.js';
@@ -427,10 +427,13 @@ async function runGameTick(league: LeagueRow): Promise<void> {
   );
 
   // §1.1(f): Insert game result news item (score-only, no LLM, immediate)
+  // §1.2(a): Also read notable_events_json to emit INJURY and MILESTONE news items.
   try {
     const gameRow = prepared(
-      'SELECT home_score, away_score FROM game_log WHERE league_id = ? AND game_number = ? AND season_number = ? ORDER BY id DESC LIMIT 1'
-    ).get(league.id, nextGame.gameNumber, league.season_number) as { home_score: number; away_score: number } | undefined;
+      'SELECT id, home_score, away_score, notable_events_json FROM game_log WHERE league_id = ? AND game_number = ? AND season_number = ? ORDER BY id DESC LIMIT 1'
+    ).get(league.id, nextGame.gameNumber, league.season_number) as {
+      id: number; home_score: number; away_score: number; notable_events_json: string | null;
+    } | undefined;
     if (gameRow) {
       insertGameNewsItem({
         leagueId: league.id,
@@ -443,6 +446,47 @@ async function runGameTick(league: LeagueRow): Promise<void> {
         homeTeamName: `${homeTeam.city} ${homeTeam.name}`,
         awayTeamName: `${awayTeam.city} ${awayTeam.name}`,
       });
+
+      // §1.2(a): Surface injury + milestone NotableEvents into the news feed
+      if (gameRow.notable_events_json) {
+        try {
+          const events = JSON.parse(gameRow.notable_events_json) as Array<{
+            type: string;
+            playerId?: number;
+            description?: string;
+          }>;
+          for (const ev of events) {
+            if (!ev.playerId) continue;
+            // Resolve team_id from players table (CB: structured columns only, never raw description)
+            const playerRow = prepared('SELECT team_id FROM players WHERE id = ?').get(ev.playerId) as { team_id: number | null } | undefined;
+            const teamId = playerRow?.team_id ?? null;
+            if (ev.type === 'milestone') {
+              insertMilestoneNewsItem({
+                leagueId: league.id,
+                seasonNumber: league.season_number,
+                gameNumber: nextGame.gameNumber,
+                playerId: ev.playerId,
+                teamId: teamId ?? nextGame.homeTeamId,
+                sourceTable: 'game_log',
+                sourceId: gameRow.id,
+              });
+            } else if (ev.type === 'injury') {
+              insertNewsItem({
+                leagueId: league.id,
+                seasonNumber: league.season_number,
+                gameNumber: nextGame.gameNumber,
+                eventType: 'injury',
+                playerId: ev.playerId,
+                teamId: teamId,
+                sourceTable: 'game_log',
+                sourceId: gameRow.id,
+              });
+            }
+          }
+        } catch (err) {
+          console.warn('[engine] notable-events news insert error:', scrubError(err).message);
+        }
+      }
     }
   } catch (err) {
     console.warn('[engine] Game news insert error:', scrubError(err).message);

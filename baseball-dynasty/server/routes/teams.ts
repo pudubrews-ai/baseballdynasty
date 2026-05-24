@@ -126,7 +126,17 @@ teamsRouter.get('/:id', async (req: Request, res: Response, next: NextFunction):
     const idResult = teamIdSchema.safeParse(req.params['id']);
     if (!idResult.success) { res.status(400).json({ error: 'invalid_id' }); return; }
 
-    const team = prepared('SELECT * FROM teams WHERE id = ?').get(idResult.data) as TeamRow | undefined;
+    const team = prepared(
+      `SELECT id, league_id, name, city, state_province, region, market_size, conference, division, color, abbreviation,
+              wins, losses, runs_scored, runs_allowed, games_played, payroll_budget, current_payroll, revenue,
+              gm_name, gm_philosophy, gm_risk_tolerance, gm_focus, gm_archetype,
+              manager_name, manager_style, manager_tactics, manager_motivation, manager_communication,
+              owner_name, owner_personality, owner_age,
+              job_security, trade_posture, interim_gm, interim_manager,
+              last_call_up_check_game, last_firing_check_game, last_gm_firing_check_game,
+              last_service_time_update_game, deadline_trades_this_season
+       FROM teams WHERE id = ?`
+    ).get(idResult.data) as TeamRow | undefined;
     if (!team) { res.status(404).json({ error: 'Team not found' }); return; } // §2.16.1
 
     const minors = buildMinorsObject(team.id); // §3.3
