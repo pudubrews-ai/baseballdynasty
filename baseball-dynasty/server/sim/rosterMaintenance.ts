@@ -21,6 +21,7 @@ import { processWaivers } from './waivers.js';
 import { evaluateCallUps } from './callup.js';
 import { evaluateSendDowns } from './sendDown.js';
 import { accrueServiceTime } from './serviceTime.js';
+import { runProspectDev } from './prospectDev.js';
 
 // Roster invariant: each team should have <= 25 on is_on_25man=1 (hard cap after cuts).
 // During regular season, we log a warning if any team exceeds 25.
@@ -98,5 +99,13 @@ export function runRosterMaintenance(
     console.warn('[rosterMaintenance] Invariant check error:', err);
   }
 
-  // Steps (firings, prospect dev) added in Phases 7-9.
+  // Step 4: Prospect dev tick (league-wide, only when gameNumber % 10 === 0)
+  if (gameNumber % 10 === 0) {
+    try {
+      runProspectDev(leagueId, gameNumber);
+    } catch (err) {
+      console.warn('[rosterMaintenance] Prospect dev error:', err);
+    }
+  }
+  // Step 5: Firings added in Phase 9.
 }

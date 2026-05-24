@@ -101,11 +101,10 @@ async function runDevelopmentStep(leagueId: number, seed: number): Promise<void>
       const newAge = player.age + 1;
       let ratingChange = 0;
 
-      // Development model
-      if (newAge <= 27 && player.minor_level !== null) {
-        // Young minor leaguers grow: +1 to +3
-        ratingChange = randInt(rng, 0, 3);
-      } else if (newAge >= 28 && newAge <= 32) {
+      // Development model — AB-10 RULING: young minor leaguer growth (+0..+3) REMOVED.
+      // Minor leaguer growth now happens ONLY in-season via prospectDev.ts.
+      // Keep: peak/decline curves for 28+ players (applies to MLB and AAA players).
+      if (newAge >= 28 && newAge <= 32) {
         // Stars in peak years: -1 to +1
         ratingChange = randInt(rng, -1, 1);
       } else if (newAge >= 33) {
@@ -113,7 +112,7 @@ async function runDevelopmentStep(leagueId: number, seed: number): Promise<void>
         ratingChange = randInt(rng, -2, 0);
       }
 
-      const newRating = Math.max(25, Math.min(99, player.overall_rating + ratingChange));
+      let newRating = Math.max(25, Math.min(99, player.overall_rating + ratingChange));
 
       // 5% injury chance per season
       const injured = rng() < 0.05 ? 1 : 0;
@@ -124,9 +123,20 @@ async function runDevelopmentStep(leagueId: number, seed: number): Promise<void>
       // Contract year reduction
       const newContractYears = Math.max(0, player.contract_years_remaining - 1);
 
+      // AB-10: Bust downgrade — once per player per season, AFTER aging.
+      // If newAge === 26 AND minor_level IN ('AA','A','Rookie') AND potential IN ('C','D'):
+      // potential='D', overall_rating = MIN(overall_rating, 65).
+      let newPotential = player.potential;
+      const bustLevels = ['AA', 'A', 'Rookie'];
+      if (newAge === 26 && player.minor_level !== null && bustLevels.includes(player.minor_level) &&
+          (player.potential === 'C' || player.potential === 'D')) {
+        newPotential = 'D';
+        newRating = Math.min(newRating, 65);
+      }
+
       db.prepare(
-        'UPDATE players SET age = ?, overall_rating = ?, is_injured = ?, potential_revealed = ?, contract_years_remaining = ? WHERE id = ?'
-      ).run(newAge, newRating, injured, potentialRevealed, newContractYears, player.id);
+        'UPDATE players SET age = ?, overall_rating = ?, potential = ?, is_injured = ?, potential_revealed = ?, contract_years_remaining = ? WHERE id = ?'
+      ).run(newAge, newRating, newPotential, injured, potentialRevealed, newContractYears, player.id);
     }
   });
 
