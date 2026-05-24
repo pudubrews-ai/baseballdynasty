@@ -91,6 +91,15 @@ function selectCitiesWithMarketQuota(rng: () => number, allCities: CityData[]): 
     }
   }
 
+  // §3.3: Throw clear error if any quota is unsatisfied
+  if (selected.length < 20) {
+    const unmet: string[] = [];
+    for (const [size, count] of Object.entries(remaining)) {
+      if (count > 0) unmet.push(`${size}=${count}`);
+    }
+    throw new Error(`[worldgen] Insufficient cities to satisfy market quotas: ${unmet.join(', ')}`);
+  }
+
   return selected;
 }
 

@@ -8,6 +8,7 @@ import Anthropic from '@anthropic-ai/sdk';
 import { z } from 'zod';
 import { prepared } from '../db.js';
 import { DraftPickResponse, SeasonNarrativeResponse } from '../../shared/schemas.js';
+import { scrubError } from '../util/scrub.js';
 
 // Anthropic client — constructed once, only here
 const client = new Anthropic({
@@ -159,17 +160,6 @@ export function sanitizeNarrative(s: string): string {
       .replace(/vbscript:/gi, '');
   } while (cur !== prev);
   return cur.slice(0, 280).trim();
-}
-
-// §4.1: Error scrubber — strips API keys from error messages
-export function scrubError(err: unknown): { code: string; message: string } {
-  const msg = err instanceof Error ? err.message : String(err);
-  const code = (err as Record<string, unknown>)?.['status'] ? `http_${(err as Record<string, unknown>)['status']}` : 'llm_error';
-  const scrubbed = msg
-    .replace(/sk-ant-[a-zA-Z0-9_-]+/g, '[REDACTED_KEY]')
-    .replace(/authorization[^,}\n]*/gi, 'authorization: [REDACTED]')
-    .replace(/x-api-key[^,}\n]*/gi, 'x-api-key: [REDACTED]');
-  return { code, message: scrubbed };
 }
 
 // Queue implementation: max 5 concurrent + 100ms gap

@@ -19,6 +19,7 @@ import { z } from 'zod';
 import { initDb } from './db.js';
 import { SimSpeedBody, NewLeagueBody, SimAdvanceBody } from '../shared/schemas.js';
 import { startNewLeague, deleteCurrentLeague, getActiveLeagueState, initEngine, setSimSpeed, advanceSim } from './sim/engine.js';
+import { getActiveLeague } from './db.js';
 
 const PORT = parseInt(process.env['PORT'] ?? '3001', 10);
 
@@ -43,6 +44,12 @@ function validateBody<T>(schema: z.ZodSchema<T>) {
 // Rate limiting for POST /api/league/new (1 per 30s)
 let lastLeagueCreateMs = 0;
 function rateLimitLeagueNew(_req: Request, res: Response, next: NextFunction): void {
+  // §3.1: Architect ruling: LEAGUE_EXISTS takes precedence over rate-limit window
+  const existing = getActiveLeague();
+  if (existing) {
+    res.status(409).json({ error: 'League already exists. Use /api/league/reset to start over.' });
+    return;
+  }
   const now = Date.now();
   if (now - lastLeagueCreateMs < 30_000) {
     res.status(429).json({ error: 'rate_limited', retryAfterMs: 30_000 - (now - lastLeagueCreateMs) });
@@ -98,7 +105,7 @@ app.post('/api/league/new', rateLimitLeagueNew, validateBody(NewLeagueBody), asy
     res.status(200).json({ leagueId: result.leagueId, phase: 'draft' }); // HTTP 200, phase:"draft" (§2.14)
   } catch (err: unknown) {
     if (err instanceof Error && err.message === 'LEAGUE_EXISTS') {
-      lastLeagueCreateMs = Date.now(); // Also lock on legitimate 409 (§4.7)
+      // §3.1: Do NOT lock rate window on 409 (rateLimitLeagueNew handles 409 before we get here)
       res.status(409).json({ error: 'League already exists. Use /api/league/reset to start over.' }); // §2.16.4
       return;
     }
@@ -106,19 +113,32 @@ app.post('/api/league/new', rateLimitLeagueNew, validateBody(NewLeagueBody), asy
   }
 });
 
+// §4.5: Rate-limit for reset/delete endpoints
+let lastLeagueResetMs = 0;
+function rateLimitLeagueReset(_req: Request, res: Response, next: NextFunction): void {
+  const now = Date.now();
+  if (now - lastLeagueResetMs < 5_000) {
+    res.status(429).json({ error: 'rate_limited', retryAfterMs: 5_000 - (now - lastLeagueResetMs) });
+    return;
+  }
+  next();
+}
+
 // Alias POST /api/league/reset → same as DELETE /api/league/current (§2.16.4)
-app.post('/api/league/reset', async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
+app.post('/api/league/reset', rateLimitLeagueReset, async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     await deleteCurrentLeague();
+    lastLeagueResetMs = Date.now();
     res.json({ ok: true });
   } catch (err) {
     next(err);
   }
 });
 
-app.delete('/api/league/current', async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
+app.delete('/api/league/current', rateLimitLeagueReset, async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     await deleteCurrentLeague();
+    lastLeagueResetMs = Date.now();
     res.json({ ok: true });
   } catch (err) {
     next(err);
@@ -168,14 +188,16 @@ app.use('/api/players', playersRouter);
 app.use('/api/games', gamesRouter);
 app.use('/api/timeline', timelineRouter);
 
-// §2.9: Draft order endpoint for UI to show correct pick order
+// §2.9 / §3.2: Draft order endpoint — branches on phase (expansion vs annual)
 app.get('/api/draft/order', async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const { getActiveLeague } = await import('./db.js');
     const league = getActiveLeague();
     if (!league) { res.json({ teamOrder: [] }); return; }
-    const { getExpansionDraftOrder } = await import('./sim/draft.js');
-    res.json({ teamOrder: getExpansionDraftOrder(league.id) });
+    const { getExpansionDraftOrder, getAnnualDraftOrder } = await import('./sim/draft.js');
+    const teamOrder = league.phase === 'annual_draft'
+      ? getAnnualDraftOrder(league.id)
+      : getExpansionDraftOrder(league.id);
+    res.json({ teamOrder });
   } catch (err) { next(err); }
 });
 
@@ -216,7 +238,7 @@ async function main() {
       console.log(`[server] Baseball Dynasty server running on http://127.0.0.1:${PORT} (localhost only)`);
     });
   } catch (err) {
-    console.error('[server] Fatal startup error:', err);
+    console.error('[server] Fatal startup error:', scrubError(err).message);
     process.exit(1);
   }
 }
