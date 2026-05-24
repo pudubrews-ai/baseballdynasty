@@ -72,8 +72,8 @@ app.get('/api/healthz', (_req: Request, res: Response) => {
 
 app.get('/api/state', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const sincePickId = req.query['sincePickId'] ? parseInt(String(req.query['sincePickId']), 10) : 0;
-    const sinceGameId = req.query['sinceGameId'] ? parseInt(String(req.query['sinceGameId']), 10) : 0;
+    const sincePickId = z.coerce.number().int().min(0).catch(0).parse(req.query['sincePickId'] ?? 0);
+    const sinceGameId = z.coerce.number().int().min(0).catch(0).parse(req.query['sinceGameId'] ?? 0);
     const state = await getActiveLeagueState(sincePickId, sinceGameId);
     if (!state) {
       // §3.5: Return full shape even when no league exists
@@ -92,6 +92,8 @@ app.get('/api/state', async (req: Request, res: Response, next: NextFunction): P
         worldgenSeed: 0,
         picksDelta: [],
         gamesDelta: [],
+        waiverCount: 0,
+        lastNewsId: 0,
       });
       return;
     }

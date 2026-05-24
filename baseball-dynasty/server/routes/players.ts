@@ -77,10 +77,10 @@ playersRouter.get('/leaders', async (req: Request, res: Response, next: NextFunc
        ORDER BY ss.strikeouts_pitching DESC LIMIT 10`
     ).all(league.id, season) as LeaderRow[]).map(mapLeader('K'));
 
-    // WHIP leaders (min 75 IP — raised from 50 per §2.5 Iter 4 to improve realism)
+    // WHIP leaders (min 75 IP — AB-21: use hits_allowed not hits)
     const whip = (prepared(
       `SELECT p.first_name, p.last_name, t.city || ' ' || t.name as team_name,
-       (ss.walks_pitching + ss.hits) / ss.innings_pitched as value
+       (ss.walks_pitching + ss.hits_allowed) / ss.innings_pitched as value
        FROM season_stats ss
        JOIN players p ON p.id = ss.player_id
        LEFT JOIN teams t ON t.id = ss.team_id

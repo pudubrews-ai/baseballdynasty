@@ -91,6 +91,17 @@ export async function refreshCache(leagueId: number): Promise<LeagueStateSnapsho
     return null;
   }
 
+  // Compute waiverCount and lastNewsId for v0.2.0
+  const waiverCountRow = prepared(
+    "SELECT COUNT(*) as cnt FROM players WHERE league_id = ? AND waiver_state IN ('dfa','waivers')"
+  ).get(league.id) as { cnt: number } | undefined;
+  const waiverCount = waiverCountRow?.cnt ?? 0;
+
+  const lastNewsRow = prepared(
+    'SELECT MAX(id) as maxId FROM news_items WHERE league_id = ?'
+  ).get(league.id) as { maxId: number | null } | undefined;
+  const lastNewsId = lastNewsRow?.maxId ?? 0;
+
   const snapshot: LeagueStateSnapshot = {
     leagueId: league.id,
     phase: mapPhase(league.phase),
@@ -104,6 +115,8 @@ export async function refreshCache(leagueId: number): Promise<LeagueStateSnapsho
     lastGameId: league.last_game_id,
     llmStatus: getLlmStatus(),
     worldgenSeed: league.worldgen_seed,
+    waiverCount,
+    lastNewsId,
   };
 
   updateCache(leagueId, snapshot);

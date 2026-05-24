@@ -6,6 +6,7 @@ import { getDb, prepared, type PlayerRow, type LeagueRow, type TeamRow } from '.
 import { seedFor, randInt, shuffle } from './prng.js';
 import { callDraftPick } from '../services/llm.js';
 import { getDraftPickDelay } from './engine.js';
+import { NAME_POOLS, ORIGIN_DISTRIBUTION } from '../data/names.js';
 
 export interface DraftPlayer {
   id: number;
@@ -197,6 +198,46 @@ function runDraftPickSync(
   return pickResult.lastInsertRowid as number;
 }
 
+// v0.2.0 §2: Draft flavor sample set — deterministic 20-pick sample per draft
+// Cache per (leagueId, season, isExpansion) key
+const draftFlavorSampleCache = new Map<string, Set<string>>();
+
+function getDraftFlavorSampleKey(leagueId: number, season: number, isExpansion: boolean): string {
+  return `${leagueId}_${season}_${isExpansion ? 'exp' : 'ann'}`;
+}
+
+export function isInDraftFlavorSample(
+  leagueId: number,
+  season: number,
+  isExpansion: boolean,
+  round: number,
+  pickNumber: number
+): boolean {
+  const cacheKey = getDraftFlavorSampleKey(leagueId, season, isExpansion);
+  if (!draftFlavorSampleCache.has(cacheKey)) {
+    // Build a deterministic set of 20 picks using reservoir sampling
+    const seed = (leagueId ^ season) + (isExpansion ? 1000000 : 0);
+    const rng = seedFor('draft_sample', seed);
+    const totalPicks = isExpansion ? 600 : 600;
+    const sampleSet = new Set<string>();
+    // Reservoir sampling: pick 20 from totalPicks
+    const indices: number[] = [];
+    for (let i = 1; i <= 20; i++) indices.push(i);
+    for (let i = 21; i <= totalPicks; i++) {
+      const j = Math.floor(rng() * i) + 1;
+      if (j <= 20) {
+        indices[j - 1] = i;
+      }
+    }
+    for (const idx of indices) {
+      sampleSet.add(String(idx));
+    }
+    draftFlavorSampleCache.set(cacheKey, sampleSet);
+  }
+  const sampleSet = draftFlavorSampleCache.get(cacheKey)!;
+  return sampleSet.has(String(pickNumber));
+}
+
 export async function runDraftPick(
   league: LeagueRow,
   team: TeamRow,
@@ -213,11 +254,17 @@ export async function runDraftPick(
     return await handleExhaustedPool(leagueId, team.id, round, pickNumber, isExpansion);
   }
 
-  let selectedPlayer: PlayerRow | null = null;
-  let reasoning: string | null = null;
+  // v0.2.0 §2: Pick is ALWAYS procedural now (LLM restructure)
+  let selectedPlayer: PlayerRow | null = pickProcedural(team.id, leagueId, round);
+  if (!selectedPlayer) {
+    selectedPlayer = topPlayers[0] ?? null; // safety
+  }
 
-  if (!isTurbo) {
-    // Try LLM
+  if (!selectedPlayer) return null;
+
+  // LLM flavor text only — for sampled picks in non-turbo mode (LLM never chooses a player)
+  let reasoning: string | null = null;
+  if (!isTurbo && isInDraftFlavorSample(leagueId, league.season_number, isExpansion, round, pickNumber)) {
     const needsJson = JSON.stringify(getRosterNeeds(team.id));
     const playersJson = JSON.stringify(topPlayers.map((p, idx) => ({
       index: idx,
@@ -237,25 +284,9 @@ export async function runDraftPick(
       needsJson,
       playersJson
     );
-
-    if (llmResult.ok) {
-      const idx = llmResult.pickIndex;
-      const candidate = topPlayers[idx];
-      // Verify not already drafted (top-N was pre-filtered, but double-check)
-      if (candidate && candidate.is_drafted === 0) {
-        selectedPlayer = candidate;
-        reasoning = llmResult.reasoning;
-      } else {
-        console.warn(`[draft] LLM returned already-drafted player at index ${idx}, using procedural fallback`);
-      }
-    }
+    // Use ONLY the reasoning string — the pickIndex from LLM is IGNORED (player is always procedural)
+    reasoning = llmResult.ok ? llmResult.reasoning : null;
   }
-
-  if (!selectedPlayer) {
-    selectedPlayer = pickProcedural(team.id, leagueId, round);
-  }
-
-  if (!selectedPlayer) return null;
 
   // Record the pick
   const db = getDb();
@@ -350,17 +381,24 @@ export function assignRosterLevels(leagueId: number): void {
     for (let i = 0; i < drafted.length; i++) {
       const player = drafted[i]!;
       if (i < 25) {
-        // MLB roster
-        prepared('UPDATE players SET is_on_mlb_roster = 1, minor_level = NULL WHERE id = ?').run(player.id);
+        // MLB roster (25-man active)
+        prepared('UPDATE players SET is_on_mlb_roster = 1, is_on_25man = 1, minor_level = NULL WHERE id = ?').run(player.id);
+      } else if (i < 40) {
+        // 40-man but not 25-man (optioned to AAA)
+        let level: string;
+        if (player.overall_rating >= 60) level = 'AAA';
+        else if (player.overall_rating >= 50) level = 'AA';
+        else level = 'A';
+        prepared('UPDATE players SET is_on_mlb_roster = 1, is_on_25man = 0, minor_level = ? WHERE id = ?').run(level, player.id);
       } else {
-        // Minors — tier by rating
+        // Pure minor leaguers (not on 40-man)
         let level: string;
         if (player.overall_rating >= 60) level = 'AAA';
         else if (player.overall_rating >= 50) level = 'AA';
         else if (player.overall_rating >= 40) level = 'A';
         else level = 'Rookie';
 
-        prepared('UPDATE players SET is_on_mlb_roster = 0, minor_level = ? WHERE id = ?').run(level, player.id);
+        prepared('UPDATE players SET is_on_mlb_roster = 0, is_on_25man = 0, minor_level = ? WHERE id = ?').run(level, player.id);
       }
     }
   }
@@ -546,31 +584,75 @@ export async function runAnnualDraft(
   assignRosterLevels(leagueId);
 }
 
-// Generate a draft class for the annual draft
+// AB-15: Generate 620 named prospects for annual draft (never flood with "Replacement Player")
 function generateDraftClass(leagueId: number, seed: number): void {
   const rng = seedFor('draft_class', seed);
   const db = getDb();
+  const POTENTIAL_DIST = [
+    { grade: 'A', pct: 0.10 },
+    { grade: 'B', pct: 0.25 },
+    { grade: 'C', pct: 0.40 },
+    { grade: 'D', pct: 0.25 },
+  ];
 
-  // Generate 200 new prospects
-  for (let i = 0; i < 200; i++) {
+  function pickPotential(): string {
+    const roll = rng();
+    let cumulative = 0;
+    for (const tier of POTENTIAL_DIST) {
+      cumulative += tier.pct;
+      if (roll < cumulative) return tier.grade;
+    }
+    return 'C';
+  }
+
+  function pickRandomName(origin: string): { first: string; last: string; country: string } {
+    const pool = (NAME_POOLS as Record<string, { first: string[]; last: string[]; country: string }>)[origin] ?? NAME_POOLS['us'];
+    const firstIdx = Math.floor(rng() * pool.first.length);
+    const lastIdx = Math.floor(rng() * pool.last.length);
+    return {
+      first: pool.first[firstIdx] ?? 'Alex',
+      last: pool.last[lastIdx] ?? 'Smith',
+      country: pool.country,
+    };
+  }
+
+  // AB-15: 620 named prospects so pool never exhausts during 600-pick draft
+  const DRAFT_CLASS_SIZE = 620;
+  for (let i = 0; i < DRAFT_CLASS_SIZE; i++) {
     const overall = randInt(rng, 30, 65);
     const age = randInt(rng, 18, 22);
-    const positions = ['SP', 'RP', 'C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF'];
+    const positions = ['SP', 'RP', 'C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'CL'];
     const position = positions[Math.floor(rng() * positions.length)] ?? 'LF';
     const sub = (base: number) => Math.max(1, Math.min(99, randInt(rng, base - 10, base + 10)));
+    const potential = pickPotential();
+
+    // Pick origin from distribution array
+    const originRoll = rng();
+    let originCumulative = 0;
+    let origin: string = 'us';
+    for (const entry of ORIGIN_DISTRIBUTION) {
+      originCumulative += entry.pct;
+      if (originRoll < originCumulative) {
+        origin = entry.key;
+        break;
+      }
+    }
+
+    const { first, last, country } = pickRandomName(origin);
+
+    // Set minor_level based on potential for freshly drafted prospects
+    const minorLevel = overall >= 55 ? 'AA' : overall >= 45 ? 'A' : 'Rookie';
 
     db.prepare(
-      `INSERT INTO players (league_id, team_id, first_name, last_name, age, position, overall_rating, potential, contact, power, speed, fielding, arm, pitching_velocity, pitching_control, pitching_stamina, is_on_mlb_roster, annual_salary, contract_years_remaining, service_time, injury_prone, coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country, is_drafted) VALUES (?, NULL, 'Prospect', ?, ?, ?, ?, 'C', ?, ?, ?, ?, ?, ?, ?, ?, 0, 575000, 6, 0, ?, ?, ?, ?, 'us', '', 'USA', 0)`
+      `INSERT INTO players (league_id, team_id, first_name, last_name, age, position, overall_rating, potential, contact, power, speed, fielding, arm, pitching_velocity, pitching_control, pitching_stamina, is_on_mlb_roster, minor_level, annual_salary, contract_years_remaining, service_time, injury_prone, coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country, is_drafted) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 575000, 6, 0, ?, ?, ?, ?, ?, ?, ?, 0)`
     ).run(
-      leagueId,
-      `Draft${i + 1}`,
-      age,
-      position,
-      overall,
+      leagueId, first, last, age, position, overall, potential,
       sub(overall), sub(overall), sub(overall), sub(overall), sub(overall),
       sub(overall), sub(overall), sub(overall),
+      minorLevel,
       randInt(rng, 1, 8),
-      randInt(rng, 1, 10), randInt(rng, 1, 10), randInt(rng, 1, 10)
+      randInt(rng, 1, 10), randInt(rng, 1, 10), randInt(rng, 1, 10),
+      origin, '', country
     );
   }
 }

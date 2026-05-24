@@ -471,3 +471,36 @@ Then create PR via `gh pr create --base main`.
 ## Phase 1 — Pre-Build
 
 **Step 1:** Spawning Architect for `reports/v0.2.0-architect-eval-0.md`
+
+**Infrastructure note:** WorktreeCreate hook was outputting git's "HEAD is now at..." message to stdout, concatenating it with the path, causing harness to reject the path as non-existent directory. Fixed hook to redirect all git output to /dev/null — only the path is now echoed. All agent calls from here forward should work correctly.
+
+**Step 1 COMPLETE:** `reports/v0.2.0-architect-eval-0.md` written. Key findings: 14 cross-document contradictions, 28 spec gaps, 9 architecture risks, 14-phase build sequence, 21 binding decisions. Critical issues: (C1) GM personality model mismatch — v0.2.0 needs analytics/old-school/balanced archetypes but v0.1.0 has gm_philosophy/gm_risk_tolerance/gm_focus columns with incompatible CHECK constraints; (C2) 25-man/40-man distinction absent from v0.1.0 schema; (C6) service time in years not games; (C14) owner_personality CHECK constraint missing patient/win-now values (requires SQLite table-swap). LLM restructure finding: callTransactionFlavor exists but has zero callers — wire in rather than build; owner death bug fix already implemented at offseason.ts:283 and :303 — re-verify not re-fix.
+
+**Step 2:** Spawning CISO and Adversary in parallel for pre-build security and adversarial reviews.
+
+**Step 2 COMPLETE:** Both pre-build reviews written.
+
+`reports/v0.2.0-ciso-pre-build.md` — 0 Critical / 0 High / 5 Medium / 6 Low. Key findings: No Critical/High because all names are server-generated from fixed pools — LLM injection/XSS vectors are low-severity. Mediums: sanitize batched news/transaction headline LLM functions (CB-1); treat names as data-not-instructions in news prompts (CB-2); validate /api/news?type against Zod enum returning exact `{"error":"Invalid event type filter"}` 400 (CB-3); clamp ?limit/?before/?team params (CB-4); bound in-memory LLM queue + per-feature budget caps (CB-5). Note: actual llm.ts lives at `server/services/llm.ts`. Also found two existing SELECT * violations at players.ts:131 and teams.ts:66.
+
+`reports/v0.2.0-adversary-pre-build.md` — Verdict: NOT READY. 4 Critical / 9 High / 7 Medium / 4 Low.
+- AB-01 (Critical): Ambiguous "game" unit — two counters: league-wide `current_game_number` (1-500+) and per-team `games_played` (0-50). All v0.2.0 timing uses undefined units. Requires explicit time-unit mapping table.
+- AB-02 (Critical): Minor-league games never simulated — season_stats always empty — call-up OPS/ERA triggers and Group 6 tests unsatisfiable as written.
+- AB-03 (Critical): Waiver expiry races turbo loop; skipped on missing-SP/box-score-fail ticks.
+- AB-04 (Critical): DFA-to-create-40-man-space circular — DFA'd player stays on 40-man during waiver window.
+- Key Highs: free-agency unreachable (20.6 seasons); no worldgen guarantee both analytics/old-school cohorts exist for test Groups 3/4/6; undefined LLM behavior when model returns 9/10 headlines.
+
+**Step 3:** Spawning Architect to synthesize all findings and write `reports/v0.2.0-developer-instructions-1.md`.
+
+**Step 3 COMPLETE:** `reports/v0.2.0-developer-instructions-1.md` written (915 lines). All 4 Adversary Criticals ruled:
+- [AB-01 RULING]: All "game N" thresholds and "every N games" cadences use per-team `teams.games_played` (matching existing `shouldFireTradeDeadline` at season.ts:245). Prospect dev / service time batch boundaries use `current_game_number % 10`.
+- [AB-02 RULING]: Call-up/send-down decisions rating-based on AAA side; lightweight per-10-game stat synthesizer writes display-only stats for /api/teams/:id/minors.
+- [AB-03 RULING]: Waiver expiry uses `>=` range check (not `==`); maintenance hook moved OUT of simulateGame into runGameTick so it fires even on skipped games.
+- [AB-04 RULING]: DFA immediately vacates 40-man slot (overrides Architect eval-D4). Breaks circular dependency.
+- [AB-05 RULING]: Service time rescaled to 30 games/service-year (FA at 180 games) for the 50-game world.
+Migration 007 is a single-file teams table-swap with FK-pragma management. Build sequenced into 14 gated phases against 152-test baseline. DoD: zero TS/ESLint errors, all G0-G11, turbo <15s/season.
+
+---
+
+## Phase 2 — Build and Verify (Iteration 1)
+
+**Step 4:** Spawning Developer for v0.2.0 implementation (reads only feature spec + developer-instructions-1).

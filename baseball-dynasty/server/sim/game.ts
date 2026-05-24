@@ -54,9 +54,10 @@ export interface GameResult {
 const POSITIONS_ORDER = ['C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'DH'];
 
 // D6: Select lineup — top 9 position players by overall, one per position
+// AB-11: use is_on_25man=1 for the active 25-man roster (not is_on_mlb_roster)
 export function selectLineup(team: TeamRow): PlayerRow[] {
   const roster = prepared(
-    'SELECT * FROM players WHERE team_id = ? AND is_on_mlb_roster = 1 AND position NOT IN (\'SP\',\'RP\',\'CL\') ORDER BY overall_rating DESC'
+    'SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position NOT IN (\'SP\',\'RP\',\'CL\') ORDER BY overall_rating DESC'
   ).all(team.id) as PlayerRow[];
 
   const lineup: PlayerRow[] = [];
@@ -94,9 +95,10 @@ export function selectLineup(team: TeamRow): PlayerRow[] {
 }
 
 // D6: Select starting pitcher — rotates by team game count mod 5
+// AB-11: use is_on_25man=1 for active 25-man roster
 export function selectStartingPitcher(team: TeamRow): PlayerRow | null {
   const starters = prepared(
-    'SELECT * FROM players WHERE team_id = ? AND is_on_mlb_roster = 1 AND position = \'SP\' ORDER BY overall_rating DESC LIMIT 5'
+    'SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position = \'SP\' ORDER BY overall_rating DESC LIMIT 5'
   ).all(team.id) as PlayerRow[];
 
   if (starters.length === 0) return null;
@@ -857,13 +859,37 @@ function upsertBatterStats(
   ).get(leagueId, seasonNumber, batter.playerId);
 
   if (existing) {
+    // Also update recent_* rolling stats for call-up/send-down triggers (AB-02)
     db.prepare(
-      'UPDATE season_stats SET games_played = games_played + 1, at_bats = at_bats + ?, hits = hits + ?, home_runs = home_runs + ?, rbi = rbi + ?, walks = walks + ?, strikeouts_batting = strikeouts_batting + ? WHERE league_id = ? AND season_number = ? AND player_id = ?'
-    ).run(batter.atBats, batter.hits, batter.homeRuns, batter.rbi, batter.walks, batter.strikeouts, leagueId, seasonNumber, batter.playerId);
+      `UPDATE season_stats SET
+        games_played = games_played + 1,
+        at_bats = at_bats + ?,
+        hits = hits + ?,
+        home_runs = home_runs + ?,
+        rbi = rbi + ?,
+        walks = walks + ?,
+        strikeouts_batting = strikeouts_batting + ?,
+        recent_ab = recent_ab + ?,
+        recent_hits = recent_hits + ?,
+        recent_hr = recent_hr + ?,
+        recent_walks = recent_walks + ?
+       WHERE league_id = ? AND season_number = ? AND player_id = ?`
+    ).run(
+      batter.atBats, batter.hits, batter.homeRuns, batter.rbi, batter.walks, batter.strikeouts,
+      batter.atBats, batter.hits, batter.homeRuns, batter.walks,
+      leagueId, seasonNumber, batter.playerId
+    );
   } else {
     db.prepare(
-      'INSERT INTO season_stats (league_id, season_number, player_id, team_id, games_played, at_bats, hits, home_runs, rbi, walks, strikeouts_batting) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?)'
-    ).run(leagueId, seasonNumber, batter.playerId, batter.teamId, batter.atBats, batter.hits, batter.homeRuns, batter.rbi, batter.walks, batter.strikeouts);
+      `INSERT INTO season_stats (league_id, season_number, player_id, team_id, games_played,
+        at_bats, hits, home_runs, rbi, walks, strikeouts_batting,
+        recent_ab, recent_hits, recent_hr, recent_walks)
+       VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      leagueId, seasonNumber, batter.playerId, batter.teamId,
+      batter.atBats, batter.hits, batter.homeRuns, batter.rbi, batter.walks, batter.strikeouts,
+      batter.atBats, batter.hits, batter.homeRuns, batter.walks
+    );
   }
 }
 
@@ -882,12 +908,39 @@ function upsertPitcherStats(
   const saves = pitcher.save ? 1 : 0;
 
   if (existing) {
+    // AB-21: persist hits_allowed; also update rolling recent_* stats for call-up/send-down triggers
     db.prepare(
-      'UPDATE season_stats SET games_played = games_played + 1, innings_pitched = innings_pitched + ?, earned_runs = earned_runs + ?, strikeouts_pitching = strikeouts_pitching + ?, walks_pitching = walks_pitching + ?, wins = wins + ?, losses = losses + ?, saves = saves + ? WHERE league_id = ? AND season_number = ? AND player_id = ?'
-    ).run(pitcher.inningsPitched, pitcher.earnedRuns, pitcher.strikeouts, pitcher.walks, wins, losses, saves, leagueId, seasonNumber, pitcher.playerId);
+      `UPDATE season_stats SET
+        games_played = games_played + 1,
+        innings_pitched = innings_pitched + ?,
+        earned_runs = earned_runs + ?,
+        strikeouts_pitching = strikeouts_pitching + ?,
+        walks_pitching = walks_pitching + ?,
+        wins = wins + ?,
+        losses = losses + ?,
+        saves = saves + ?,
+        hits_allowed = hits_allowed + ?,
+        recent_er = recent_er + ?,
+        recent_ip = recent_ip + ?,
+        recent_starts = recent_starts + 1
+       WHERE league_id = ? AND season_number = ? AND player_id = ?`
+    ).run(
+      pitcher.inningsPitched, pitcher.earnedRuns, pitcher.strikeouts, pitcher.walks,
+      wins, losses, saves, pitcher.hitsAllowed,
+      pitcher.earnedRuns, pitcher.inningsPitched,
+      leagueId, seasonNumber, pitcher.playerId
+    );
   } else {
     db.prepare(
-      'INSERT INTO season_stats (league_id, season_number, player_id, team_id, games_played, innings_pitched, earned_runs, strikeouts_pitching, walks_pitching, wins, losses, saves) VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)'
-    ).run(leagueId, seasonNumber, pitcher.playerId, pitcher.teamId, pitcher.inningsPitched, pitcher.earnedRuns, pitcher.strikeouts, pitcher.walks, wins, losses, saves);
+      `INSERT INTO season_stats (league_id, season_number, player_id, team_id, games_played,
+        innings_pitched, earned_runs, strikeouts_pitching, walks_pitching, wins, losses, saves,
+        hits_allowed, recent_er, recent_ip, recent_starts)
+       VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`
+    ).run(
+      leagueId, seasonNumber, pitcher.playerId, pitcher.teamId,
+      pitcher.inningsPitched, pitcher.earnedRuns, pitcher.strikeouts, pitcher.walks,
+      wins, losses, saves, pitcher.hitsAllowed,
+      pitcher.earnedRuns, pitcher.inningsPitched
+    );
   }
 }

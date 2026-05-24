@@ -24,6 +24,8 @@ export interface LlmStatus {
   dailyBudgetRemaining: number;
   circuitBreakerOpen: boolean;
   retryAfterMs: number;
+  newsCallsThisSeason?: number;
+  newsCallsRemaining?: number;
 }
 
 export interface LeagueStateSnapshot {
@@ -39,6 +41,9 @@ export interface LeagueStateSnapshot {
   lastGameId: number;
   llmStatus: LlmStatus;
   worldgenSeed: number;
+  // v0.2.0
+  waiverCount: number;
+  lastNewsId: number;
 }
 
 // API response types
