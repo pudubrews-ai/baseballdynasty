@@ -409,4 +409,65 @@ Build gates: 178/178 tests passing, 0 TypeScript errors, 0 ESLint errors, SQL in
 
 **Phase 3 Step 1 COMPLETE:** Developer commit confirmed on feature/v0.1.0-initial-build (commit 2619d4d). PR cannot be created without git remote. Founder action required (see Infrastructure note above and PM Handoff Report below).
 
-**PM Handoff Report:** See stdout output below (as required by build-rules).
+**Developer Phase 3 commit complete.** Branch `feature/v0.1.0-initial-build` finalized at commit `4d481cf`. All 32 report/doc files committed. Working tree clean. Scratch files removed.
+
+**No git remote configured.** Founder must run before PR creation:
+```
+git remote add origin https://github.com/pudubrews-ai/baseballdynasty
+git push -u origin feature/v0.1.0-initial-build
+```
+Then create PR via `gh pr create --base main`.
+
+**PM Handoff Report:** Printed to stdout below per build-rules.
+
+---
+
+## BUILD COMPLETE — v0.1.0 Baseball Dynasty Simulator
+
+**Final status:** COMPLETE — 0 Critical / 0 High / 0 Medium  
+**Branch:** feature/v0.1.0-initial-build  
+**Final commit:** 4d481cf  
+**Build date:** 2026-05-24  
+**Iterations:** 5  
+**Tests:** 178/178 passing
+
+---
+
+---
+
+# Governance Log — Baseball Dynasty Simulator v0.2.0
+
+---
+
+## Build Initialization
+
+**Date:** 2026-05-24  
+**Version:** v0.2.0  
+**Orchestrator model:** claude-sonnet-4-6
+
+**Active agent set:**
+- Architect (Opus)
+- CISO (Opus)
+- Adversary (Opus)
+- Developer (Sonnet)
+- API Tester (Sonnet)
+- UI Tester A (Sonnet)
+- UI Tester B (Sonnet)
+
+**Decision:** All agents active. v0.2.0 introduces new UI (news tab, live ticker), new APIs (/api/waivers, /api/news, player transactions), complex procedural logic (waiver wire, call-ups, send-downs, firings, market dynamics), and a breaking LLM restructure. All agent roles required.
+
+**Documents confirmed present:**
+- `build-rules.md` ✓
+- `app-spec.md` ✓
+- `v0.2.0-app-spec-section.md` ✓
+- `v0.2.0-test-spec.md` ✓
+
+**Branch decision:** No git remote configured. main branch has no production code (PR from v0.1.0 never merged due to missing remote). Branching `feature/v0.2.0-live-org-market-firings-news` from `feature/v0.1.0-initial-build` which contains all production-ready v0.1.0 code. Documented here per Orchestrator authority.
+
+**Report naming decision:** All v0.2.0 reports use `v0.2.0-` prefix (e.g., `reports/v0.2.0-architect-eval-0.md`) to avoid collision with v0.1.0 reports in the same directory. Agents instructed accordingly.
+
+---
+
+## Phase 1 — Pre-Build
+
+**Step 1:** Spawning Architect for `reports/v0.2.0-architect-eval-0.md`
