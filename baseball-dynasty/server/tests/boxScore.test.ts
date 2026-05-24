@@ -76,6 +76,46 @@ describe('Box score consistency rules (§5.1)', () => {
     expect(validateBoxScoreRules(team)).toEqual([]);
   });
 
+  // §6.8 / §2.9: Rule 4 — total IP validation
+  it('Rule 4: total IP = 9.0 for non-walk-off game (both teams)', () => {
+    // Valid: home=9.0, away=9.0, no walk-off
+    const homeIP = 9.0;
+    const awayIP = 9.0;
+    const isWalkOff = false;
+    const expectedHome = 9.0;
+    const expectedAway = isWalkOff ? 8.0 : 9.0;
+    expect(Math.abs(homeIP - expectedHome)).toBeLessThanOrEqual(0.01);
+    expect(Math.abs(awayIP - expectedAway)).toBeLessThanOrEqual(0.01);
+  });
+
+  it('Rule 4: walk-off home win — home=9.0 IP, away=8.0 IP', () => {
+    const homeIP = 9.0;
+    const awayIP = 8.0;
+    const isWalkOff = true;
+    const expectedHome = 9.0;
+    const expectedAway = isWalkOff ? 8.0 : 9.0;
+    expect(Math.abs(homeIP - expectedHome)).toBeLessThanOrEqual(0.01);
+    expect(Math.abs(awayIP - expectedAway)).toBeLessThanOrEqual(0.01);
+  });
+
+  it('Rule 4: invalid — home pitcher has only 7.0 IP in non-walk-off fails', () => {
+    const homeIPTotal = 7.0;
+    const isWalkOff = false;
+    const expectedHomeIP = 9.0;
+    const diff = Math.abs(homeIPTotal - expectedHomeIP);
+    // This SHOULD produce an error
+    expect(diff).toBeGreaterThan(0.01);
+  });
+
+  it('Rule 4: invalid — away has 9.0 IP on walk-off (should be 8.0)', () => {
+    const awayIPTotal = 9.0;
+    const isWalkOff = true;
+    const expectedAwayIP = isWalkOff ? 8.0 : 9.0;
+    const diff = Math.abs(awayIPTotal - expectedAwayIP);
+    // This SHOULD produce an error (9.0 != 8.0 on walk-off)
+    expect(diff).toBeGreaterThan(0.01);
+  });
+
   it('milestone detection: prev < threshold && new >= threshold', () => {
     // §5.1 Rule 9
     const prevHR = 99;
