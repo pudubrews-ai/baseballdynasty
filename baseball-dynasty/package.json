@@ -1,0 +1,48 @@
+{
+  "name": "baseball-dynasty",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0 <23.0.0"
+  },
+  "scripts": {
+    "dev": "concurrently -k -n server,client -c blue,green \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "export $(grep -v '^#' .env | xargs) && tsx watch server/index.ts",
+    "dev:client": "vite",
+    "build": "tsc -p tsconfig.server.json && vite build && npm run security:bundle-grep",
+    "start": "node dist/server/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "security:bundle-grep": "node scripts/check-bundle-no-keys.mjs",
+    "security:sql-grep": "node scripts/check-no-template-sql.mjs",
+    "precommit": "npm run security:sql-grep && npm run lint && npm run typecheck && npm run test"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.32.1",
+    "better-sqlite3": "11.5.0",
+    "express": "5.0.1",
+    "zod": "3.23.8"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "@types/better-sqlite3": "7.6.11",
+    "@types/express": "5.0.0",
+    "@types/node": "20.16.5",
+    "@types/react": "19.0.0",
+    "@types/react-dom": "19.0.0",
+    "@vitejs/plugin-react": "4.3.4",
+    "concurrently": "9.1.0",
+    "eslint": "9.15.0",
+    "eslint-plugin-security": "3.0.1",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "tailwindcss": "4.0.0",
+    "tsx": "4.19.2",
+    "typescript": "5.7.2",
+    "vite": "6.0.3",
+    "vitest": "2.1.8"
+  }
+}

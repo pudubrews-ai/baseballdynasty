@@ -1,0 +1,24 @@
+{
+  "hooks": {
+    "WorktreeCreate": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "input=$(cat 2>/dev/null || echo '{}'); path=$(echo \"$input\" | jq -r '.path // empty' 2>/dev/null || echo ''); branch=$(echo \"$input\" | jq -r '.branch // empty' 2>/dev/null || echo ''); if [ -z \"$path\" ] || [ \"$path\" = \"null\" ]; then path=\"/tmp/claude-worktree-$$\"; fi; git worktree remove \"$path\" --force 2>/dev/null || true; if [ -n \"$branch\" ] && [ \"$branch\" != \"null\" ] && [ \"$branch\" != \"undefined\" ]; then git branch -d \"$branch\" 2>/dev/null || true; git worktree add \"$path\" -b \"$branch\" 2>/dev/null || git worktree add \"$path\" 2>/dev/null || true; else git worktree add \"$path\" 2>/dev/null || true; fi; echo \"$path\""
+          }
+        ]
+      }
+    ],
+    "WorktreeRemove": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "input=$(cat 2>/dev/null || echo '{}'); path=$(echo \"$input\" | jq -r '.path // empty' 2>/dev/null || echo ''); if [ -n \"$path\" ] && [ \"$path\" != \"null\" ]; then git worktree remove \"$path\" --force 2>/dev/null || true; fi; exit 0"
+          }
+        ]
+      }
+    ]
+  }
+}

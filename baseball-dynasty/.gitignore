@@ -1,0 +1,25 @@
+node_modules/
+dist/
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+.env
+.env.*
+!.env.example
+
+.DS_Store
+.vscode/
+.idea/
+
+coverage/
+*.log
+
+# §3.4 Iter4: Leftover Playwright/UI-tester spec files
+check-*.spec.ts
+ui-tester-*.spec.ts
+playwright.config.ts
+test-results/
+playwright-report/
