@@ -19,7 +19,7 @@ export async function runOffseason(league: LeagueRow, isTurbo: boolean): Promise
 
   console.log(`[offseason] Starting from step: ${currentStep}`);
 
-  const steps = ['retirement', 'development', 'free_agency', 'front_office', 'annual_draft', 'done'];
+  const steps = ['retirement', 'development', 'non_tender', 'free_agency', 'front_office', 'annual_draft', 'done'];
   const startIdx = steps.indexOf(currentStep);
 
   // §1.2 Iter-5: Import pause-check for cooperative offseason cancellation
@@ -35,6 +35,9 @@ export async function runOffseason(league: LeagueRow, isTurbo: boolean): Promise
         break;
       case 'development':
         await runDevelopmentStep(leagueId, league.worldgen_seed ^ league.season_number);
+        break;
+      case 'non_tender':
+        await runNonTenderStep(leagueId, league.season_number);
         break;
       case 'free_agency':
         await runFreeAgencyStep(leagueId, league.season_number);
@@ -144,7 +147,85 @@ async function runDevelopmentStep(leagueId: number, seed: number): Promise<void>
   console.log(`[offseason] Development: ${players.length} players aged and developed`);
 }
 
-// Step 3: Free agency — D20
+// Step 3: Non-tender — analytics/small-market GMs non-tender high-arb players
+// Per §6 [AB-12]: runs before free_agency; at least one non-tender forced if zero natural.
+async function runNonTenderStep(leagueId: number, seasonNumber: number): Promise<void> {
+  const { getArchetype } = await import('./archetypes.js');
+  const teams = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
+  const db = getDb();
+  let totalNonTenders = 0;
+
+  const nonTenderTx = db.transaction(() => {
+    for (const team of teams) {
+      if (team.interim_gm === 1) continue;
+
+      const archetype = getArchetype(team.gm_archetype ?? 'balanced');
+      if (!archetype.nontender_arb_year || !archetype.nontender_salary_threshold) continue;
+
+      // Non-tender players with arb-year >= 3 (approx: service_time_days >= 3*30=90)
+      // and salary > threshold
+      const candidates = prepared(
+        `SELECT * FROM players
+         WHERE team_id = ? AND is_on_mlb_roster = 1
+           AND service_time_days >= ? AND annual_salary > ?
+         ORDER BY annual_salary DESC`
+      ).all(
+        team.id,
+        archetype.nontender_arb_year * 30,
+        archetype.nontender_salary_threshold
+      ) as PlayerRow[];
+
+      for (const player of candidates) {
+        // Non-tender: release to FA pool
+        db.prepare(
+          'UPDATE players SET team_id = NULL, is_on_mlb_roster = 0, is_on_25man = 0, minor_level = NULL WHERE id = ?'
+        ).run(player.id);
+
+        db.prepare(
+          `INSERT INTO transactions
+             (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
+           VALUES (?, ?, 'non_tender', ?, ?, NULL, ?)`
+        ).run(leagueId, seasonNumber, team.id, player.id, Date.now());
+
+        totalNonTenders++;
+      }
+    }
+
+    // Force at least one non-tender if zero natural candidates (eval G23)
+    if (totalNonTenders === 0) {
+      // Find highest-salary player with service_time_days >= 4*30 AND age >= 30
+      // on any small/medium market team
+      const forcedCandidate = db.prepare(
+        `SELECT p.* FROM players p
+         JOIN teams t ON t.id = p.team_id
+         WHERE t.league_id = ? AND t.market_size IN ('small','medium') AND t.interim_gm = 0
+           AND p.is_on_mlb_roster = 1 AND p.service_time_days >= 120 AND p.age >= 30
+         ORDER BY p.annual_salary DESC
+         LIMIT 1`
+      ).get(leagueId) as PlayerRow | undefined;
+
+      if (forcedCandidate) {
+        db.prepare(
+          'UPDATE players SET team_id = NULL, is_on_mlb_roster = 0, is_on_25man = 0, minor_level = NULL WHERE id = ?'
+        ).run(forcedCandidate.id);
+
+        db.prepare(
+          `INSERT INTO transactions
+             (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
+           VALUES (?, ?, 'non_tender', ?, ?, NULL, ?)`
+        ).run(leagueId, seasonNumber, forcedCandidate.team_id, forcedCandidate.id, Date.now());
+
+        totalNonTenders++;
+        console.log(`[offseason] Forced non-tender: ${forcedCandidate.first_name} ${forcedCandidate.last_name}`);
+      }
+    }
+  });
+
+  nonTenderTx();
+  console.log(`[offseason] Non-tender step: ${totalNonTenders} players non-tendered`);
+}
+
+// Step 4 (was 3): Free agency — D20
 async function runFreeAgencyStep(leagueId: number, seasonNumber?: number): Promise<void> {
   const db = getDb();
 

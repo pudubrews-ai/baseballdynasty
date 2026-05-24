@@ -22,6 +22,7 @@ import { evaluateCallUps } from './callup.js';
 import { evaluateSendDowns } from './sendDown.js';
 import { accrueServiceTime } from './serviceTime.js';
 import { runProspectDev } from './prospectDev.js';
+import { evaluateTradeDeadline, setTradePosture } from './tradeDeadline.js';
 
 // Roster invariant: each team should have <= 25 on is_on_25man=1 (hard cap after cuts).
 // During regular season, we log a warning if any team exceeds 25.
@@ -85,6 +86,19 @@ export function runRosterMaintenance(
           evaluateSendDowns(team, leagueId, league.season_number);
           evaluateCallUps(team, leagueId, league.season_number, gameNumber);
           // Note: last_call_up_check_game is updated inside evaluateCallUps
+        }
+
+        // Trade posture / deadline evaluation
+        try {
+          if (team.games_played >= 30) {
+            const allTeams = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
+            if (!team.trade_posture) {
+              setTradePosture(team, allTeams);
+            }
+            evaluateTradeDeadline(team, allTeams, leagueId, league.season_number);
+          }
+        } catch (err) {
+          console.warn(`[rosterMaintenance] Trade deadline eval error for team ${teamId}:`, err);
         }
       } catch (err) {
         console.warn(`[rosterMaintenance] Per-team maintenance error for team ${teamId}:`, err);

@@ -13,6 +13,7 @@ import { runPlayoffs } from './playoffs.js';
 import { runOffseason } from './offseason.js';
 import { springCutsNeeded, runSpringCuts } from './springCuts.js';
 import { runRosterMaintenance } from './rosterMaintenance.js';
+import { forceMinimumTrades } from './tradeDeadline.js';
 import { getLlmStatus } from '../services/llm.js';
 import { scrubError } from '../util/scrub.js';
 import type { LeagueStateSnapshot, SimSpeed } from '../../shared/types.js';
@@ -397,6 +398,13 @@ async function runGameTick(league: LeagueRow): Promise<void> {
   // Check trade deadline
   if (shouldFireTradeDeadline(league.id, league.season_number)) {
     fireTradeDeadline(league.id, league.season_number);
+    // AB-12: force minimum 3 trades after the deadline marker fires
+    try {
+      const allTeams = prepared('SELECT * FROM teams WHERE league_id = ?').all(league.id) as TeamRow[];
+      forceMinimumTrades(allTeams, league.id, league.season_number);
+    } catch (err) {
+      console.warn('[engine] Force minimum trades error:', err);
+    }
   }
 
   const homeTeam = prepared('SELECT * FROM teams WHERE id = ?').get(nextGame.homeTeamId) as TeamRow | undefined;
