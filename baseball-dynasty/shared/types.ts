@@ -29,6 +29,7 @@ export interface LlmStatus {
 export interface LeagueStateSnapshot {
   leagueId: number;
   phase: LeaguePhase;
+  subPhase: 'expansion' | 'annual' | null;
   seasonNumber: number;
   currentGameDate: number; // epoch ms
   currentGameNumber: number;

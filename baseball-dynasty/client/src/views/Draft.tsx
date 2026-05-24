@@ -26,6 +26,7 @@ export default function Draft() {
   const [allPicks, setAllPicks] = useState<DraftPick[]>([]);
   const [latestPick, setLatestPick] = useState<DraftPick | null>(null);
   const [teams, setTeams] = useState<TeamInfo[]>([]);
+  const [teamOrder, setTeamOrder] = useState<number[]>([]);
   const isBatchMode = useRef(false);
 
   // Load teams on mount
@@ -35,6 +36,21 @@ export default function Draft() {
       .then((data: TeamInfo[]) => setTeams(data))
       .catch(console.error);
   }, []);
+
+  // Fetch draft order when phase is 'draft' — re-fetch if subPhase changes (§1.2.1)
+  useEffect(() => {
+    if (state?.phase === 'draft') {
+      fetch('/api/draft/order')
+        .then(r => r.json())
+        .then((data: { teamOrder: number[] }) => setTeamOrder(data.teamOrder || []))
+        .catch(console.error);
+    }
+  }, [state?.phase, state?.subPhase]);
+
+  // Teams in correct draft order — fallback to /api/teams order until draft order loads (§1.2.1)
+  const teamsInDraftOrder: TeamInfo[] = teamOrder.length > 0
+    ? teamOrder.map(id => teams.find(t => t.id === id)).filter((t): t is TeamInfo => t !== undefined)
+    : teams;
 
   // Load all existing picks on mount
   useEffect(() => {
@@ -76,26 +92,29 @@ export default function Draft() {
   }, [picksDelta]);
 
   const totalRounds = 30;
-  const totalTeams = teams.length || 20;
+  const totalTeams = teamsInDraftOrder.length || 20;
 
-  // Determine on-clock team
-  const lastPick = allPicks[allPicks.length - 1];
+  // Determine on-clock team using teamsInDraftOrder (§1.2.2)
   const totalPicksMade = allPicks.length;
   const currentRound = Math.floor(totalPicksMade / totalTeams) + 1;
   const currentPickInRound = totalPicksMade % totalTeams;
 
-  // Snake order: odd rounds go 0→19, even rounds go 19→0
+  // Snake order: odd rounds go 0→N-1, even rounds go N-1→0
   let onClockTeamId: number | null = null;
-  if (teams.length > 0 && state?.phase === 'expansion_draft') {
-    const teamOrder = [...teams];
-    const roundOrder = currentRound % 2 === 1 ? teamOrder : [...teamOrder].reverse();
+  if (teamsInDraftOrder.length > 0 && state?.phase === 'draft') {
+    const roundOrder = currentRound % 2 === 1 ? teamsInDraftOrder : [...teamsInDraftOrder].reverse();
     onClockTeamId = roundOrder[currentPickInRound]?.id ?? null;
   }
 
+  // Helper to compute actual pick number for a cell (§1.2.3)
+  const getPickNumberForCell = (round: number, teamIdx: number, totalTeamsCount: number): number => {
+    // Snake order: odd rounds forward, even rounds reversed
+    const pickInRound = round % 2 === 1 ? teamIdx + 1 : (totalTeamsCount - teamIdx);
+    return (round - 1) * totalTeamsCount + pickInRound;
+  };
+
   const getPickForCell = (round: number, teamIndex: number): DraftPick | undefined => {
-    // Snake order: odd rounds are ascending, even rounds are descending
-    const actualPickInRound = round % 2 === 1 ? teamIndex : (teams.length - 1 - teamIndex);
-    const pickNumber = (round - 1) * teams.length + actualPickInRound + 1;
+    const pickNumber = getPickNumberForCell(round, teamIndex, teamsInDraftOrder.length || totalTeams);
     return allPicks.find(p => p.pick_number === pickNumber);
   };
 
@@ -104,7 +123,8 @@ export default function Draft() {
     return '★'.repeat(Math.max(1, Math.min(5, stars))) + '☆'.repeat(Math.max(0, 5 - Math.max(1, Math.min(5, stars))));
   };
 
-  if (state?.phase !== 'expansion_draft' && state?.phase !== 'annual_draft') {
+  // §1.1.3: Check for 'draft' not 'expansion_draft'/'annual_draft'
+  if (state?.phase !== 'draft') {
     return (
       <div style={{ padding: '20px', color: '#64748b' }}>
         <h2>Draft</h2>
@@ -120,11 +140,12 @@ export default function Draft() {
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: '16px', marginBottom: '16px' }}>
         <h2 style={{ margin: 0 }}>
-          {state.phase === 'expansion_draft' ? 'Expansion Draft' : 'Annual Draft'}
+          {/* §1.1.3: Use subPhase for title */}
+          {state.subPhase === 'expansion' ? 'Expansion Draft' : 'Annual Draft'}
         </h2>
         {onClockTeamId && (
           <div data-testid="draft-onclock-team" style={{ background: '#f59e0b', color: '#000', padding: '4px 12px', borderRadius: '4px', fontSize: '13px', fontWeight: 'bold' }}>
-            On the Clock: {teams.find(t => t.id === onClockTeamId)?.city} {teams.find(t => t.id === onClockTeamId)?.name}
+            On the Clock: {teamsInDraftOrder.find(t => t.id === onClockTeamId)?.city} {teamsInDraftOrder.find(t => t.id === onClockTeamId)?.name}
           </div>
         )}
         <div style={{ color: '#64748b', fontSize: '13px' }}>
@@ -164,7 +185,8 @@ export default function Draft() {
           <thead>
             <tr style={{ background: '#0f172a' }}>
               <th style={{ padding: '6px', textAlign: 'left', minWidth: '50px', color: '#94a3b8' }}>Round</th>
-              {teams.map(team => (
+              {/* §1.2.2: Use teamsInDraftOrder */}
+              {teamsInDraftOrder.map(team => (
                 <th
                   key={team.id}
                   style={{
@@ -186,12 +208,13 @@ export default function Draft() {
               return (
                 <tr key={round} style={{ background: round % 2 === 0 ? '#0f172a' : 'transparent' }}>
                   <td style={{ padding: '4px 6px', color: '#64748b', fontWeight: 'bold' }}>{round}</td>
-                  {teams.map((team, teamIdx) => {
+                  {/* §1.2.2: Use teamsInDraftOrder */}
+                  {teamsInDraftOrder.map((team, teamIdx) => {
                     const pick = getPickForCell(round, teamIdx);
                     return (
                       <td
                         key={team.id}
-                        data-testid={`draft-pick-${round}-${teamIdx + 1}`}
+                        data-testid={`draft-pick-${round}-${getPickNumberForCell(round, teamIdx, teamsInDraftOrder.length || totalTeams)}`}
                         style={{
                           padding: '3px 5px',
                           textAlign: 'center',

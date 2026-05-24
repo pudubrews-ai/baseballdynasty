@@ -29,6 +29,17 @@ const TICK_INTERVALS: Record<SimSpeed, number> = {
   turbo: 0, // immediate via setImmediate
 };
 
+// §2.3: Per-pick delays for draft pacing — must honor currentSpeed
+export function getDraftPickDelay(): number {
+  switch (currentSpeed) {
+    case 'paused': return 0;
+    case 'normal': return 1500;  // spec: 1400-1600ms
+    case 'fast':   return 200;   // spec: 180-220ms
+    case 'turbo':  return 0;     // immediate
+    default:       return 1500;
+  }
+}
+
 // D17: Server boot — restore active league, force paused
 export async function initEngine(): Promise<void> {
   const league = getActiveLeague();
@@ -63,13 +74,22 @@ async function refreshCache(leagueId: number): Promise<LeagueStateSnapshot> {
       case 'regular_season': return 'regular_season';
       case 'playoffs': return 'playoffs';
       case 'offseason': return 'offseason';
-      default: return dbPhase as LeagueStateSnapshot['phase'];
+      default:
+        throw new Error(`[engine] Unrecognized DB phase: ${dbPhase}`);
     }
+  }
+
+  // §1.1: Map DB phase to subPhase for UI title distinction
+  function mapSubPhase(dbPhase: string): 'expansion' | 'annual' | null {
+    if (dbPhase === 'expansion_draft') return 'expansion';
+    if (dbPhase === 'annual_draft') return 'annual';
+    return null;
   }
 
   const snapshot: LeagueStateSnapshot = {
     leagueId: league.id,
     phase: mapPhase(league.phase),
+    subPhase: mapSubPhase(league.phase),
     seasonNumber: league.season_number,
     currentGameDate: league.current_game_date,
     currentGameNumber: league.current_game_number,
@@ -309,12 +329,19 @@ async function runDraftTick(league: LeagueRow, isTurbo: boolean): Promise<void> 
   } catch (err) {
     if (err instanceof Error && err.message === 'DRAFT_PAUSED') {
       console.log('[engine] Draft paused');
+      simRunning = false;
     } else {
       console.error('[engine] Draft tick error:', scrubError(err).message);
+      simRunning = false;
     }
   } finally {
     draftRunning = false;
-    simRunning = false; // Draft handles its own pacing
+    // §2.10: Only set simRunning=false if paused.
+    // If draft completed naturally at non-paused speed, leave simRunning=true
+    // so the tick loop continues into regular_season.
+    if (currentSpeed === 'paused') {
+      simRunning = false;
+    }
   }
 }
 

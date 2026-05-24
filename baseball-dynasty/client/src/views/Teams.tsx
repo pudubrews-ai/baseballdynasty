@@ -10,19 +10,22 @@ interface TeamSummary {
   division: string;
   wins: number;
   losses: number;
-  marketSize: string;
+  market_size: string;
   color: string;
 }
 
+// §1.4.4: snake_case to match API response
 interface TeamDetail extends TeamSummary {
-  gmName: string;
-  gmPhilosophy: string;
-  gmRiskTolerance: string;
-  gmFocus: string;
-  managerName: string;
-  ownerName: string;
-  payrollBudget: number;
-  currentPayroll: number;
+  gm_name: string;
+  gm_personality: {
+    philosophy: string;
+    risk_tolerance: string;
+    focus: string;
+  };
+  manager_name: string;
+  owner_name: string;
+  payroll_budget: number;
+  current_payroll: number;
   revenue: number;
 }
 
@@ -33,7 +36,8 @@ export default function Teams() {
   const [selectedTeamId, setSelectedTeamId] = useState<number | null>(null);
   const [teamDetail, setTeamDetail] = useState<TeamDetail | null>(null);
   const [activeTab, setActiveTab] = useState<TeamTab>('roster');
-  const [tabData, setTabData] = useState<unknown[]>([]);
+  // §1.4.1: tabData accepts either array or object
+  const [tabData, setTabData] = useState<unknown>([]);
 
   useEffect(() => {
     getTeams().then(data => setTeams(data as TeamSummary[])).catch(console.error);
@@ -135,31 +139,48 @@ export default function Teams() {
           </div>
 
           {/* Tab content */}
+          {/* §1.4.3: snake_case field names to match API */}
           {activeTab === 'roster' && (
             <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
-              {(tabData as Array<{ id: number; firstName: string; lastName: string; position: string; overallRating: number; annualSalary: number }>).map(p => (
+              {Array.isArray(tabData) && (tabData as Array<{ id: number; first_name: string; last_name: string; position: string; overall_rating: number; annual_salary: number }>).map(p => (
                 <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #334155', fontSize: '12px' }}>
-                  <span>{p.firstName} {p.lastName}</span>
+                  <span>{p.first_name} {p.last_name}</span>
                   <span style={{ color: '#94a3b8' }}>{p.position}</span>
-                  <span style={{ color: '#60a5fa' }}>{p.overallRating}</span>
+                  <span style={{ color: '#60a5fa' }}>{p.overall_rating}</span>
                 </div>
               ))}
             </div>
           )}
 
+          {/* §1.4.2: Rewrite minors tab to consume {AAA, AA, A, Rookie} grouped object */}
           {activeTab === 'minors' && (
             <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
-              {(tabData as Array<{ id: number; firstName: string; lastName: string; position: string; overallRating: number; minorLevel: string }>).map(p => (
-                <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #334155', fontSize: '12px' }}>
-                  <span>{p.firstName} {p.lastName}</span>
-                  <span style={{ color: '#94a3b8' }}>{p.position}</span>
-                  <span style={{ color: '#f59e0b' }}>{p.minorLevel}</span>
-                  <span style={{ color: '#60a5fa' }}>{p.overallRating}</span>
-                </div>
-              ))}
+              {(() => {
+                const minors = (tabData ?? {}) as Record<string, Array<{ id: number; first_name: string; last_name: string; position: string; overall_rating: number }>>;
+                const levels: Array<'AAA' | 'AA' | 'A' | 'Rookie'> = ['AAA', 'AA', 'A', 'Rookie'];
+                const hasAny = levels.some(lvl => Array.isArray(minors[lvl]) && minors[lvl]!.length > 0);
+                if (!hasAny) return <p style={{ color: '#64748b', fontSize: '12px' }}>No minor league depth yet</p>;
+                return levels.map(level => {
+                  const players = Array.isArray(minors[level]) ? minors[level]! : [];
+                  if (players.length === 0) return null;
+                  return (
+                    <div key={level} style={{ marginBottom: '8px' }}>
+                      <div style={{ color: '#f59e0b', fontSize: '11px', fontWeight: 'bold', marginBottom: '4px' }}>{level}</div>
+                      {players.map(p => (
+                        <div key={p.id} style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 0', borderBottom: '1px solid #334155', fontSize: '12px' }}>
+                          <span>{p.first_name} {p.last_name}</span>
+                          <span style={{ color: '#94a3b8' }}>{p.position}</span>
+                          <span style={{ color: '#60a5fa' }}>{p.overall_rating}</span>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                });
+              })()}
             </div>
           )}
 
+          {/* §1.4.4: snake_case field names for financials */}
           {activeTab === 'financials' && (
             <div style={{ fontSize: '13px' }}>
               <div style={{ marginBottom: '8px' }}>
@@ -168,31 +189,31 @@ export default function Teams() {
               </div>
               <div style={{ marginBottom: '8px' }}>
                 <span style={{ color: '#94a3b8' }}>Payroll Budget: </span>
-                <span>{formatMoney(teamDetail.payrollBudget)}</span>
+                <span>{formatMoney(teamDetail.payroll_budget)}</span>
               </div>
               <div style={{ marginBottom: '8px' }}>
                 <span style={{ color: '#94a3b8' }}>Current Payroll: </span>
-                <span style={{ color: teamDetail.currentPayroll > teamDetail.payrollBudget ? '#f87171' : '#4ade80' }}>
-                  {formatMoney(teamDetail.currentPayroll)}
+                <span style={{ color: teamDetail.current_payroll > teamDetail.payroll_budget ? '#f87171' : '#4ade80' }}>
+                  {formatMoney(teamDetail.current_payroll)}
                 </span>
               </div>
               <div style={{ marginTop: '12px', borderTop: '1px solid #334155', paddingTop: '12px' }}>
-                <div style={{ marginBottom: '6px' }}>GM: {teamDetail.gmName}</div>
+                <div style={{ marginBottom: '6px' }}>GM: {teamDetail.gm_name}</div>
                 <div style={{ marginBottom: '6px', color: '#94a3b8', fontSize: '12px' }}>
-                  {teamDetail.gmPhilosophy} / {teamDetail.gmRiskTolerance} / {teamDetail.gmFocus}
+                  {teamDetail.gm_personality?.philosophy} / {teamDetail.gm_personality?.risk_tolerance} / {teamDetail.gm_personality?.focus}
                 </div>
-                <div style={{ marginBottom: '6px' }}>Manager: {teamDetail.managerName}</div>
-                <div>Owner: {teamDetail.ownerName}</div>
+                <div style={{ marginBottom: '6px' }}>Manager: {teamDetail.manager_name}</div>
+                <div>Owner: {teamDetail.owner_name}</div>
               </div>
             </div>
           )}
 
           {activeTab === 'history' && (
             <div style={{ maxHeight: '400px', overflowY: 'auto', fontSize: '12px' }}>
-              {tabData.length === 0 ? (
+              {Array.isArray(tabData) && (tabData as unknown[]).length === 0 ? (
                 <p style={{ color: '#64748b' }}>No history yet</p>
               ) : (
-                (tabData as Array<{ id: number; event_type: string; departing_person: string; incoming_person: string; narrative: string }>).map(event => (
+                Array.isArray(tabData) && (tabData as Array<{ id: number; event_type: string; departing_person: string; incoming_person: string; narrative: string }>).map(event => (
                   <div key={event.id} style={{ padding: '6px 0', borderBottom: '1px solid #334155' }}>
                     <div style={{ color: '#f59e0b', fontSize: '11px' }}>{event.event_type}</div>
                     {/* §4.4: Render as text node, never dangerouslySetInnerHTML */}
