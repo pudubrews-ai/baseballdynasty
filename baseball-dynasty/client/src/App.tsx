@@ -6,9 +6,61 @@ import Games from './views/Games.js';
 import Draft from './views/Draft.js';
 import Players from './views/Players.js';
 import Timeline from './views/Timeline.js';
+import News from './views/News.js';
 import { createLeague, deleteLeague } from './api.js';
 
-type TabName = 'league' | 'teams' | 'games' | 'draft' | 'players' | 'timeline';
+// News ticker: shows last 5 events, scrolls as new ones arrive
+interface TickerItem {
+  id: number;
+  badge: string;
+  headline_text: string | null;
+  event_type: string;
+  game_number: number;
+}
+
+function NewsTicker({ lastNewsId }: { lastNewsId: number }) {
+  const [items, setItems] = useState<TickerItem[]>([]);
+
+  useEffect(() => {
+    fetch('/api/news?limit=5')
+      .then(r => r.ok ? r.json() : [])
+      .then((data: TickerItem[]) => setItems(data))
+      .catch(() => {});
+  }, [lastNewsId]);
+
+  if (items.length === 0) return null;
+
+  return (
+    <div
+      data-testid="news-ticker"
+      style={{
+        background: '#0f172a',
+        borderBottom: '1px solid #1e3a5f',
+        padding: '6px 16px',
+        display: 'flex',
+        gap: '16px',
+        overflowX: 'auto',
+        fontSize: '12px',
+        color: '#94a3b8',
+        whiteSpace: 'nowrap',
+      }}
+    >
+      <span style={{ color: '#3b82f6', fontWeight: 'bold', flexShrink: 0 }}>LIVE</span>
+      {items.map(item => (
+        <span
+          key={item.id}
+          data-testid={`news-ticker-item-${item.id}`}
+          style={{ borderLeft: '1px solid #334155', paddingLeft: '12px' }}
+        >
+          <span style={{ marginRight: '6px', opacity: 0.6 }}>[{item.badge}]</span>
+          {item.headline_text ?? item.event_type}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+type TabName = 'league' | 'teams' | 'games' | 'draft' | 'players' | 'timeline' | 'news';
 
 // React error boundary
 class ErrorBoundary extends React.Component<
@@ -81,6 +133,7 @@ function AppContent() {
     { id: 'draft', label: 'Draft' },
     { id: 'players', label: 'Players' },
     { id: 'timeline', label: 'Timeline' },
+    { id: 'news', label: 'News' },
   ];
 
   return (
@@ -142,6 +195,11 @@ function AppContent() {
           ))}
         </nav>
 
+        {/* News ticker — shown during active sim when news items exist */}
+        {state && state.phase !== 'no_league' && (
+          <NewsTicker lastNewsId={state.lastNewsId ?? 0} />
+        )}
+
         {/* Main content */}
         <main style={{ padding: '16px' }}>
           <ErrorBoundary>
@@ -167,6 +225,7 @@ function AppContent() {
                 {activeTab === 'draft' && <Draft />}
                 {activeTab === 'players' && <Players />}
                 {activeTab === 'timeline' && <Timeline />}
+                {activeTab === 'news' && <News />}
               </>
             )}
           </ErrorBoundary>

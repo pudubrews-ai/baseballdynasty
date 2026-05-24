@@ -43,12 +43,14 @@ newsRouter.get('/', (req: Request, res: Response, next: NextFunction): void => {
     const teamSchema = z.coerce.number().int().positive().optional().catch(undefined);
     const teamId = teamSchema.parse(req.query['team']);
 
-    const items = getNewsFeed({
+    const feedParams: { leagueId: number; filter: typeof filter; limit: number; teamId?: number } = {
       leagueId: league.id,
       filter,
-      teamId,
       limit,
-    });
+    };
+    if (teamId !== undefined) feedParams.teamId = teamId;
+
+    const items = getNewsFeed(feedParams);
 
     res.json(items);
   } catch (err) {

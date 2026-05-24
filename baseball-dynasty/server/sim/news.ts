@@ -138,7 +138,7 @@ export function insertRosterNewsItem(params: {
     teamId: params.teamId,
     playerId: params.playerId,
     sourceTable: params.sourceTable ?? 'transactions',
-    sourceId: params.sourceId,
+    sourceId: params.sourceId ?? null,
   });
 }
 
@@ -159,11 +159,11 @@ export function insertTransactionNewsItem(params: {
     seasonNumber: params.seasonNumber,
     gameNumber: params.gameNumber,
     eventType: params.eventType,
-    teamId: params.teamId,
-    secondaryTeamId: params.secondaryTeamId,
-    playerId: params.playerId,
+    teamId: params.teamId ?? null,
+    secondaryTeamId: params.secondaryTeamId ?? null,
+    playerId: params.playerId ?? null,
     sourceTable: params.sourceTable ?? 'transactions',
-    sourceId: params.sourceId,
+    sourceId: params.sourceId ?? null,
   });
 }
 
@@ -184,7 +184,7 @@ export function insertFrontOfficeNewsItem(params: {
     eventType: params.eventType,
     teamId: params.teamId,
     sourceTable: params.sourceTable ?? 'front_office_events',
-    sourceId: params.sourceId,
+    sourceId: params.sourceId ?? null,
   });
 }
 
@@ -205,8 +205,8 @@ export function insertMilestoneNewsItem(params: {
     eventType: 'milestone',
     teamId: params.teamId,
     playerId: params.playerId,
-    headlineText: params.headlineText,
-    detailsJson: params.detailsJson,
+    headlineText: params.headlineText ?? null,
+    detailsJson: params.detailsJson ?? null,
   });
 }
 
