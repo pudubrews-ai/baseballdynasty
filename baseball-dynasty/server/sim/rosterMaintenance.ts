@@ -23,6 +23,7 @@ import { evaluateSendDowns } from './sendDown.js';
 import { accrueServiceTime } from './serviceTime.js';
 import { runProspectDev } from './prospectDev.js';
 import { evaluateTradeDeadline, setTradePosture } from './tradeDeadline.js';
+import { evaluateFirings } from './firings.js';
 
 // Roster invariant: each team should have <= 25 on is_on_25man=1 (hard cap after cuts).
 // During regular season, we log a warning if any team exceeds 25.
@@ -88,6 +89,13 @@ export function runRosterMaintenance(
           // Note: last_call_up_check_game is updated inside evaluateCallUps
         }
 
+        // Firing evaluation (Phase 9): every tick (cadence is gated inside evaluateFirings)
+        try {
+          evaluateFirings(team, leagueId, league.season_number);
+        } catch (err) {
+          console.warn(`[rosterMaintenance] Firing eval error for team ${teamId}:`, err);
+        }
+
         // Trade posture / deadline evaluation
         try {
           if (team.games_played >= 30) {
@@ -121,5 +129,5 @@ export function runRosterMaintenance(
       console.warn('[rosterMaintenance] Prospect dev error:', err);
     }
   }
-  // Step 5: Firings added in Phase 9.
+  // Step 5: Firings — evaluateFirings called per-team above (Phase 9).
 }

@@ -324,14 +324,14 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
       );
 
       db.prepare(
-        'UPDATE teams SET manager_name = ?, manager_style = ?, job_security = 5 WHERE id = ?'
+        'UPDATE teams SET manager_name = ?, manager_style = ?, job_security = 5, interim_manager = 0 WHERE id = ?'
       ).run(`${newFirst} ${newLast}`, newStyle, team.id);
     } else {
-      // Reduce job security by win rate
+      // Reduce job security by win rate; clear interim_manager flag at offseason
       const winPct = team.wins / Math.max(1, team.wins + team.losses);
       const securityDelta = winPct > 0.55 ? 1 : winPct < 0.45 ? -1 : 0;
       const newSecurity = Math.max(1, Math.min(10, team.job_security + securityDelta));
-      db.prepare('UPDATE teams SET job_security = ? WHERE id = ?').run(newSecurity, team.id);
+      db.prepare('UPDATE teams SET job_security = ?, interim_manager = 0 WHERE id = ?').run(newSecurity, team.id);
     }
 
     // GM fired if owner meddling (40% if win_pct < 0.45)
@@ -353,7 +353,20 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
       );
 
       db.prepare(
-        'UPDATE teams SET gm_name = ?, gm_philosophy = ?, gm_risk_tolerance = ?, gm_focus = ? WHERE id = ?'
+        'UPDATE teams SET gm_name = ?, gm_philosophy = ?, gm_risk_tolerance = ?, gm_focus = ?, interim_gm = 0 WHERE id = ?'
+      ).run(`${newFirst} ${newLast}`, newPhilosophy, newRisk, newFocus, team.id);
+    }
+
+    // If team still has interim GM at offseason (fired mid-season, non-meddling owner),
+    // hire a permanent GM now. Also clear interim flags universally at offseason end.
+    if (team.interim_gm === 1) {
+      const newFirst = ['Alex', 'Chris', 'Pat', 'Sam', 'Terry'][Math.floor(rng() * 5)] ?? 'Alex';
+      const newLast = ['Martinez', 'Garcia', 'Wilson', 'Davis', 'Miller'][Math.floor(rng() * 5)] ?? 'Garcia';
+      const newPhilosophy = GM_PHILOSOPHIES[Math.floor(rng() * 3)] ?? 'balanced';
+      const newRisk = GM_RISK_TOLERANCES[Math.floor(rng() * 3)] ?? 'moderate';
+      const newFocus = GM_FOCUSES[Math.floor(rng() * 3)] ?? 'hitting';
+      db.prepare(
+        'UPDATE teams SET gm_name = ?, gm_philosophy = ?, gm_risk_tolerance = ?, gm_focus = ?, interim_gm = 0 WHERE id = ?'
       ).run(`${newFirst} ${newLast}`, newPhilosophy, newRisk, newFocus, team.id);
     }
 
