@@ -6,6 +6,7 @@ import { seedFor, randInt, randNormal } from './prng.js';
 import { runAnnualDraft } from './draft.js';
 import { callSeasonNarrative } from '../services/llm.js';
 import { insertTransactionNewsItem, insertFrontOfficeNewsItem } from './news.js';
+import { getFranchiseState, resetGmConfidence } from './franchise.js';
 
 const GM_PHILOSOPHIES: Array<'win-now' | 'rebuild' | 'balanced'> = ['win-now', 'rebuild', 'balanced'];
 const GM_RISK_TOLERANCES: Array<'conservative' | 'moderate' | 'aggressive'> = ['conservative', 'moderate', 'aggressive'];
@@ -401,21 +402,61 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
   const teams = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
   const db = getDb();
 
+  // Check gm_resign_pending_season for owned team
+  const fs = getFranchiseState(leagueId);
+
   for (const team of teams) {
+    // Handle GM resignation pending (low-confidence, owned team)
+    if (fs && fs.owned_team_id === team.id && fs.gm_resign_pending_season === seasonNumber) {
+      const newFirst = ['Alex', 'Chris', 'Pat', 'Sam', 'Terry'][Math.floor(rng() * 5)] ?? 'Alex';
+      const newLast = ['Martinez', 'Garcia', 'Wilson', 'Davis', 'Miller'][Math.floor(rng() * 5)] ?? 'Garcia';
+      const newPhilosophy = GM_PHILOSOPHIES[Math.floor(rng() * 3)] ?? 'balanced';
+      const newRisk = GM_RISK_TOLERANCES[Math.floor(rng() * 3)] ?? 'moderate';
+      const newFocus = GM_FOCUSES[Math.floor(rng() * 3)] ?? 'hitting';
+
+      const resignReason = 'Resigned citing philosophical differences with ownership';
+      const resignHeadline = `${team.gm_name} resigned, ${team.city} ${team.name} — ${resignReason}`;
+      const resignFoeResult = db.prepare(
+        'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, reason, hired_person_context, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      ).run(
+        leagueId, seasonNumber, team.id, 'gm_fired',
+        team.gm_name, `${newFirst} ${newLast}`,
+        `${team.gm_name} resigned. ${newFirst} ${newLast} takes over as GM.`,
+        resignReason, 'Hired in offseason', Date.now()
+      );
+      insertFrontOfficeNewsItem({
+        leagueId, seasonNumber, gameNumber: 0, eventType: 'gm_fired',
+        teamId: team.id, sourceTable: 'front_office_events',
+        sourceId: resignFoeResult.lastInsertRowid as number,
+        headlineText: resignHeadline,
+        detailsJson: JSON.stringify({ reason: resignReason, eventType: 'gm_fired', teamId: team.id }),
+      });
+      db.prepare(
+        'INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at) VALUES (?, ?, ?, ?, NULL, ?, 0, ?)'
+      ).run(leagueId, seasonNumber, 'gm_fired', team.id, resignHeadline, Date.now());
+      db.prepare(
+        'UPDATE teams SET gm_name = ?, gm_philosophy = ?, gm_risk_tolerance = ?, gm_focus = ?, interim_gm = 0 WHERE id = ?'
+      ).run(`${newFirst} ${newLast}`, newPhilosophy, newRisk, newFocus, team.id);
+      resetGmConfidence(leagueId);
+      db.prepare('UPDATE franchise_state SET gm_resign_pending_season = NULL WHERE league_id = ?').run(leagueId);
+    }
+
     // Manager fired if job_security < 3 (60% chance)
     if (team.job_security < 3 && rng() < 0.6) {
       const newFirst = ['Bob', 'Tom', 'Mike', 'Dave', 'Jim'][Math.floor(rng() * 5)] ?? 'Bob';
       const newLast = ['Johnson', 'Smith', 'Williams', 'Brown', 'Jones'][Math.floor(rng() * 5)] ?? 'Johnson';
       const newStyle = MANAGER_STYLES[Math.floor(rng() * 3)] ?? 'balanced';
 
+      const mgrReason = `Fired after going ${team.wins}-${team.losses} through ${team.games_played} games (Season ${seasonNumber})`;
+      const mgrHeadline = `${team.manager_name} fired, ${team.city} ${team.name} — ${mgrReason}`;
       const mgrFoeResult = db.prepare(
-        'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, reason, hired_person_context, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
       ).run(
         leagueId, seasonNumber, team.id, 'manager_fired',
         team.manager_name,
         `${newFirst} ${newLast}`,
         `${team.manager_name} fired after poor performance. ${newFirst} ${newLast} hired as new manager.`,
-        Date.now()
+        mgrReason, 'Hired in offseason', Date.now()
       );
 
       // §1.1(e): Insert offseason manager firing news item
@@ -427,7 +468,14 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
         teamId: team.id,
         sourceTable: 'front_office_events',
         sourceId: mgrFoeResult.lastInsertRowid as number,
+        headlineText: mgrHeadline,
+        detailsJson: JSON.stringify({ reason: mgrReason, eventType: 'manager_fired', teamId: team.id }),
       });
+
+      // D6a: transaction parity row
+      db.prepare(
+        'INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at) VALUES (?, ?, ?, ?, NULL, ?, 0, ?)'
+      ).run(leagueId, seasonNumber, 'manager_fired', team.id, mgrHeadline, Date.now());
 
       db.prepare(
         'UPDATE teams SET manager_name = ?, manager_style = ?, job_security = 5, interim_manager = 0 WHERE id = ?'
@@ -462,13 +510,16 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
       const newRisk = GM_RISK_TOLERANCES[Math.floor(rng() * 3)] ?? 'moderate';
       const newFocus = GM_FOCUSES[Math.floor(rng() * 3)] ?? 'hitting';
 
+      const gmUnder500 = Math.max(0, team.losses - team.wins);
+      const gmReason = `Fired after team went ${team.wins}-${team.losses}, ${gmUnder500} games under .500 at time of dismissal`;
+      const gmHeadline = `${team.gm_name} fired, ${team.city} ${team.name} — ${gmReason}`;
       const gmFoeResult = db.prepare(
-        'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, reason, hired_person_context, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
       ).run(
         leagueId, seasonNumber, team.id, 'gm_fired',
         team.gm_name, `${newFirst} ${newLast}`,
         `${team.gm_name} dismissed. ${newFirst} ${newLast} takes over as GM with a ${newPhilosophy} philosophy.`,
-        Date.now()
+        gmReason, 'Hired in offseason', Date.now()
       );
 
       // §1.1(e): Insert offseason GM firing news item
@@ -480,11 +531,23 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
         teamId: team.id,
         sourceTable: 'front_office_events',
         sourceId: gmFoeResult.lastInsertRowid as number,
+        headlineText: gmHeadline,
+        detailsJson: JSON.stringify({ reason: gmReason, eventType: 'gm_fired', teamId: team.id }),
       });
+
+      // D6a: transaction parity row
+      db.prepare(
+        'INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at) VALUES (?, ?, ?, ?, NULL, ?, 0, ?)'
+      ).run(leagueId, seasonNumber, 'gm_fired', team.id, gmHeadline, Date.now());
 
       db.prepare(
         'UPDATE teams SET gm_name = ?, gm_philosophy = ?, gm_risk_tolerance = ?, gm_focus = ?, interim_gm = 0 WHERE id = ?'
       ).run(`${newFirst} ${newLast}`, newPhilosophy, newRisk, newFocus, team.id);
+
+      // Reset GM confidence if owned team
+      if (fs && fs.owned_team_id === team.id) {
+        resetGmConfidence(leagueId);
+      }
     }
 
     // If team still has interim GM at offseason (fired mid-season, non-meddling owner),
@@ -498,6 +561,18 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
       db.prepare(
         'UPDATE teams SET gm_name = ?, gm_philosophy = ?, gm_risk_tolerance = ?, gm_focus = ?, interim_gm = 0 WHERE id = ?'
       ).run(`${newFirst} ${newLast}`, newPhilosophy, newRisk, newFocus, team.id);
+      // D6a: write FO event for interim→permanent conversion
+      db.prepare(
+        'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, reason, hired_person_context, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      ).run(
+        leagueId, seasonNumber, team.id, 'gm_fired',
+        'Interim GM', `${newFirst} ${newLast}`,
+        `Interim GM replaced by permanent hire ${newFirst} ${newLast}.`,
+        'Hired in offseason', 'Hired in offseason', Date.now()
+      );
+      if (fs && fs.owned_team_id === team.id) {
+        resetGmConfidence(leagueId);
+      }
     }
 
     // 2% owner sell
@@ -506,13 +581,15 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
       const newLast = ['Thompson', 'Anderson', 'Taylor', 'Moore', 'Jackson'][Math.floor(rng() * 5)] ?? 'Thompson';
       const newPersonality = OWNER_PERSONALITIES[Math.floor(rng() * OWNER_PERSONALITIES.length)] ?? 'moderate';
 
+      const saleReason = `Sold franchise after Season ${seasonNumber}. New ownership group takes control.`;
+      const saleHeadline = `${team.owner_name} sells franchise, ${team.city} ${team.name} — ${saleReason}`;
       const soldFoeResult = db.prepare(
-        'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, reason, hired_person_context, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)'
       ).run(
         leagueId, seasonNumber, team.id, 'owner_sold_team',
         team.owner_name, `${newFirst} ${newLast}`,
         `${team.owner_name} sells the franchise to ${newFirst} ${newLast}.`,
-        Date.now()
+        saleReason, Date.now()
       );
 
       // §1.1(e): Insert owner sold team news item
@@ -524,7 +601,14 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
         teamId: team.id,
         sourceTable: 'front_office_events',
         sourceId: soldFoeResult.lastInsertRowid as number,
+        headlineText: saleHeadline,
+        detailsJson: JSON.stringify({ reason: saleReason, eventType: 'owner_sold_team', teamId: team.id }),
       });
+
+      // D6a: transaction parity row
+      db.prepare(
+        'INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at) VALUES (?, ?, ?, ?, NULL, ?, 0, ?)'
+      ).run(leagueId, seasonNumber, 'owner_sold_team', team.id, saleHeadline, Date.now());
 
       db.prepare('UPDATE teams SET owner_name = ?, owner_personality = ? WHERE id = ?')
         .run(`${newFirst} ${newLast}`, newPersonality, team.id);
@@ -536,13 +620,15 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
       const heirFirst = ['Robert', 'Henry', 'Arthur', 'Charles', 'Winston'][Math.floor(rng() * 5)] ?? 'Robert';
       const heirLast = team.owner_name.split(' ')[1] ?? 'Heir'; // Same surname for heir
 
+      const deathReason = `Passed away during Season ${seasonNumber}. Succeeded by ${heirFirst} ${heirLast}.`;
+      const deathHeadline = `${team.owner_name} passes away, ${team.city} ${team.name} — ${deathReason}`;
       const diedFoeResult = db.prepare(
-        'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, reason, hired_person_context, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)'
       ).run(
         leagueId, seasonNumber, team.id, 'owner_died',
         team.owner_name, `${heirFirst} ${heirLast}`,
         `${team.owner_name} passed away. Heir ${heirFirst} ${heirLast} takes control of the franchise.`,
-        Date.now()
+        deathReason, Date.now()
       );
 
       // §1.1(e): Insert owner died news item
@@ -554,7 +640,14 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
         teamId: team.id,
         sourceTable: 'front_office_events',
         sourceId: diedFoeResult.lastInsertRowid as number,
+        headlineText: deathHeadline,
+        detailsJson: JSON.stringify({ reason: deathReason, eventType: 'owner_died', teamId: team.id }),
       });
+
+      // D6a: transaction parity row
+      db.prepare(
+        'INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at) VALUES (?, ?, ?, ?, NULL, ?, 0, ?)'
+      ).run(leagueId, seasonNumber, 'owner_died', team.id, deathHeadline, Date.now());
 
       const heirPersonality = OWNER_PERSONALITIES[Math.floor(rng() * OWNER_PERSONALITIES.length)] ?? 'moderate';
       db.prepare('UPDATE teams SET owner_name = ?, owner_personality = ? WHERE id = ?').run(`${heirFirst} ${heirLast}`, heirPersonality, team.id);

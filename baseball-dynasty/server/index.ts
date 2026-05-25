@@ -158,6 +158,20 @@ app.post('/api/sim/speed', async (req: Request, res: Response, next: NextFunctio
       res.status(400).json({ error: 'Invalid speed. Must be paused|normal|fast|turbo' });
       return;
     }
+
+    // D8-REV (AB-03): gate on franchise selection during draft phase
+    if (result.data.speed !== 'paused') {
+      const { getActiveLeague: getLeague } = await import('./db.js');
+      const activeLeague = getLeague();
+      if (activeLeague && (activeLeague.phase === 'expansion_draft' || activeLeague.phase === 'annual_draft')) {
+        const { isSelectionResolved } = await import('./sim/franchise.js');
+        if (!isSelectionResolved(activeLeague.id)) {
+          res.status(409).json({ error: 'awaiting_franchise_selection' });
+          return;
+        }
+      }
+    }
+
     await setSimSpeed(result.data.speed);
     res.json({ ok: true });
   } catch (err: unknown) {
@@ -190,6 +204,9 @@ import { timelineRouter } from './routes/timeline.js';
 import { waiversRouter } from './routes/waivers.js';
 import { newsRouter } from './routes/news.js';
 import { frontOfficeRouter } from './routes/frontOffice.js';
+import { watchRouter } from './routes/watch.js';
+import { franchiseRouter } from './routes/franchise.js';
+import { directivesRouter } from './routes/directives.js';
 
 app.use('/api/teams', teamsRouter);
 app.use('/api/players', playersRouter);
@@ -199,6 +216,10 @@ app.use('/api/waivers', waiversRouter);
 app.use('/api/news', newsRouter);
 // §3.3: League-wide front-office-events read endpoint (firings, owner events, resignations)
 app.use('/api/front-office-events', frontOfficeRouter);
+// v0.3.0: new routes
+app.use('/api/watch', watchRouter);
+app.use('/api/franchise', franchiseRouter);
+app.use('/api/directive', directivesRouter);
 
 // §2.9 / §3.2: Draft order endpoint — branches on phase (expansion vs annual)
 app.get('/api/draft/order', async (_req: Request, res: Response, next: NextFunction): Promise<void> => {

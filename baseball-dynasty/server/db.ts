@@ -220,6 +220,10 @@ export interface PlayerRow {
   waiver_state: string;
   dfa_team_id: number | null;
   claim_game_window_end: number | null;
+  // v0.3.0 new columns
+  last_send_down_game: number | null;
+  is_injured: number;
+  injury_return_game: number | null;
 }
 
 export interface GameLogRow {

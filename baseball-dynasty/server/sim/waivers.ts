@@ -36,11 +36,15 @@ export function dfaPlayer(
      WHERE id = ?`
   ).run(teamId, teamGamesPlayed + 3, playerId);
 
+  const gameNumForTx = currentGameNumber ?? (prepared(
+    'SELECT current_game_number FROM leagues WHERE id = ?'
+  ).get(leagueId) as { current_game_number: number } | undefined)?.current_game_number ?? 0;
+
   const txResult = prepared(
     `INSERT INTO transactions
-       (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
-     VALUES (?, ?, 'dfa', ?, ?, NULL, ?)`
-  ).run(leagueId, seasonNumber, teamId, playerId, Date.now());
+       (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at)
+     VALUES (?, ?, 'dfa', ?, ?, NULL, ?, ?)`
+  ).run(leagueId, seasonNumber, teamId, playerId, gameNumForTx, Date.now());
 
   // §1.1(a): Insert DFA news item
   const gameNum = currentGameNumber ?? (prepared(

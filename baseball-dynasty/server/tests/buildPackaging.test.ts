@@ -73,10 +73,11 @@ describe('Build packaging — migrations in dist', () => {
     }
   });
 
-  it('source migrations directory has exactly 8 .sql files', () => {
+  it('source migrations directory has exactly 9 .sql files', () => {
     // Updated from 7 → 8 in v0.2.0 Iteration 5: migration 008_injury_return.sql added (AB-10 Part A)
+    // Updated from 8 → 9 in v0.3.0: migration 009_v0_3_0_schema.sql added (franchise/owner state, game_number column, send-down cooldown)
     const srcFiles = fs.readdirSync(SRC_MIGRATIONS).filter(f => f.endsWith('.sql'));
-    expect(srcFiles.length).toBe(8);
+    expect(srcFiles.length).toBe(9);
   });
 
   it('required migration files exist in source', () => {
@@ -89,6 +90,7 @@ describe('Build packaging — migrations in dist', () => {
       '006_player_draft_index.sql',
       '007_v0_2_0_schema.sql',
       '008_injury_return.sql',
+      '009_v0_3_0_schema.sql',
     ];
     for (const f of required) {
       expect(fs.existsSync(path.join(SRC_MIGRATIONS, f)), `${f} missing from source`).toBe(true);

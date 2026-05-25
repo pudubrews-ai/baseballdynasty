@@ -24,6 +24,9 @@ import { accrueServiceTime } from './serviceTime.js';
 import { runProspectDev } from './prospectDev.js';
 import { evaluateTradeDeadline, setTradePosture } from './tradeDeadline.js';
 import { evaluateFirings } from './firings.js';
+import { getFranchiseState, setGmConfidence } from './franchise.js';
+import { resolveDirectives } from './directives.js';
+import { insertNewsItem } from './news.js';
 
 // AB-NULL §4.3: One-time self-heal for carried-over DBs with stale is_on_25man on null-team players.
 // Called once per runRosterMaintenance invocation — cheap (no-op if already clean).
@@ -182,6 +185,67 @@ export function runRosterMaintenance(
       } catch (err) {
         console.warn(`[rosterMaintenance] Per-team maintenance error for team ${teamId}:`, err);
       }
+    }
+  }
+
+  // v0.3.0: GM confidence checkpoint + directive resolution for owned team
+  if (league) {
+    try {
+      const fs = getFranchiseState(leagueId);
+      if (fs && fs.owned_team_id != null) {
+        const ownedTeamId = fs.owned_team_id;
+        const ownedTeam = prepared('SELECT * FROM teams WHERE id = ?').get(ownedTeamId) as TeamRow | undefined;
+
+        if (ownedTeam && (homeTeamId === ownedTeamId || awayTeamId === ownedTeamId)) {
+          const gamesPlayed = ownedTeam.games_played;
+
+          // 10-game confidence checkpoint (D12-REV)
+          if (gamesPlayed - fs.last_confidence_checkpoint_game >= 10) {
+            const margin = ownedTeam.wins - ownedTeam.losses;
+            let delta = 0;
+            if (margin > 0) delta = 2 * Math.floor(margin / 5);
+            else if (margin < 0) delta = -1 * Math.floor((-margin) / 5);
+            if (delta !== 0) setGmConfidence(leagueId, delta);
+            prepared('UPDATE franchise_state SET last_confidence_checkpoint_game = ? WHERE league_id = ?')
+              .run(gamesPlayed, leagueId);
+
+            // Re-read confidence after update
+            const fsUpdated = getFranchiseState(leagueId);
+            const conf = fsUpdated?.gm_confidence ?? 100;
+
+            // Resign trigger
+            if (conf <= 0) {
+              const gmName = ownedTeam.gm_name ?? 'GM';
+              insertNewsItem({
+                leagueId, seasonNumber: league.season_number, gameNumber,
+                eventType: 'gm_fired', teamId: ownedTeamId,
+                headlineText: `${gmName} resigns, citing inability to operate with ownership interference.`,
+                detailsJson: JSON.stringify({ reason: 'low_confidence_resignation' }),
+              });
+              prepared('UPDATE franchise_state SET gm_resign_pending_season = ? WHERE league_id = ?')
+                .run(league.season_number, leagueId);
+            }
+
+            // Status update 80+ (<=1 per 10 games)
+            if (conf >= 80 && gamesPlayed - (fsUpdated?.last_status_update_game ?? 0) >= 10) {
+              const gmName = ownedTeam.gm_name ?? 'GM';
+              insertNewsItem({
+                leagueId, seasonNumber: league.season_number, gameNumber,
+                eventType: 'milestone', teamId: ownedTeamId,
+                headlineText: `${gmName}: The plan is working. We like where this club is headed.`,
+                detailsJson: JSON.stringify({ kind: 'gm_status' }),
+              });
+              prepared('UPDATE franchise_state SET last_status_update_game = ? WHERE league_id = ?')
+                .run(gamesPlayed, leagueId);
+            }
+          }
+
+          // Directive resolution
+          resolveDirectives(leagueId, league.season_number, gameNumber);
+        }
+      }
+    } catch (err) {
+      console.warn('[rosterMaintenance] Confidence/directive error:', err);
     }
   }
 

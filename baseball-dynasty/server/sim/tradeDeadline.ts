@@ -128,14 +128,14 @@ function executeTrade(
   db: ReturnType<typeof import('../db.js').getDb>,
   currentGameNumber: number = 0
 ): void {
-  // Transfer veteran from seller to buyer
+  // Transfer veteran from seller to buyer (D18: set is_on_25man=1, is_on_mlb_roster=1, minor_level=NULL)
   db.prepare(
-    'UPDATE players SET team_id = ? WHERE id = ?'
+    'UPDATE players SET team_id = ?, is_on_mlb_roster = 1, is_on_25man = 1, minor_level = NULL WHERE id = ?'
   ).run(buyer.id, veteran.id);
 
-  // Transfer prospects from buyer to seller
+  // Transfer prospects from buyer to seller (preserve minor state, do NOT set is_on_25man=1)
   for (const prospect of prospects) {
-    db.prepare('UPDATE players SET team_id = ? WHERE id = ?').run(seller.id, prospect.id);
+    db.prepare('UPDATE players SET team_id = ?, is_on_25man = 0 WHERE id = ?').run(seller.id, prospect.id);
   }
 
   const narrative = `${buyer.city} ${buyer.name} acquire ${veteran.position} from ${seller.city} ${seller.name}`;
@@ -143,9 +143,9 @@ function executeTrade(
   // Log trade for buyer team
   const buyerTxResult = db.prepare(
     `INSERT INTO transactions
-       (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
-     VALUES (?, ?, 'trade', ?, ?, ?, ?)`
-  ).run(leagueId, seasonNumber, buyer.id, veteran.id, narrative, Date.now());
+       (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at)
+     VALUES (?, ?, 'trade', ?, ?, ?, ?, ?)`
+  ).run(leagueId, seasonNumber, buyer.id, veteran.id, narrative, currentGameNumber, Date.now());
 
   // §1.1(d): Insert one trade news item (for buyer — one per trade)
   insertTransactionNewsItem({
@@ -164,9 +164,9 @@ function executeTrade(
   for (const prospect of prospects) {
     db.prepare(
       `INSERT INTO transactions
-         (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
-       VALUES (?, ?, 'trade', ?, ?, ?, ?)`
-    ).run(leagueId, seasonNumber, seller.id, prospect.id, narrative, Date.now());
+         (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at)
+       VALUES (?, ?, 'trade', ?, ?, ?, ?, ?)`
+    ).run(leagueId, seasonNumber, seller.id, prospect.id, narrative, currentGameNumber, Date.now());
   }
 
   // Increment deadline_trades_this_season for both teams

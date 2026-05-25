@@ -257,10 +257,13 @@ export function shouldFireTradeDeadline(leagueId: number, seasonNumber: number):
 // Fire trade deadline (procedural in v0.1.0)
 export function fireTradeDeadline(leagueId: number, seasonNumber: number): void {
   const db = getDb();
+  // Get current game number for the marker row
+  const leagueRow = prepared('SELECT current_game_number FROM leagues WHERE id = ?').get(leagueId) as { current_game_number: number } | undefined;
+  const currentGameNumber = leagueRow?.current_game_number ?? 0;
   // Mark that trade deadline fired
   db.prepare(
-    "INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at) VALUES (?, ?, 'trade_deadline', NULL, NULL, 'Trade deadline passed.', ?)"
-  ).run(leagueId, seasonNumber, Date.now());
+    "INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at) VALUES (?, ?, 'trade_deadline', NULL, NULL, 'Trade deadline passed.', ?, ?)"
+  ).run(leagueId, seasonNumber, currentGameNumber, Date.now());
 
   console.log(`[season] Trade deadline fired for season ${seasonNumber}`);
 }

@@ -1,4 +1,5 @@
 import { prepared, getActiveLeague, type TeamRow } from '../db.js';
+import { computeTeamStreak } from '../sim/streak.js';
 
 export async function getStandings(): Promise<object> {
   const league = getActiveLeague();
@@ -39,6 +40,7 @@ export async function getStandings(): Promise<object> {
                 ? ((leader.wins - t.wins) + (t.losses - leader.losses)) / 2
                 : 0;
               const pct = (t.wins + t.losses) > 0 ? t.wins / (t.wins + t.losses) : 0;
+              const { streak, last10 } = computeTeamStreak(league.id, t.id, league.season_number);
               return {
                 teamId: t.id,
                 teamName: `${t.city} ${t.name}`,
@@ -49,6 +51,8 @@ export async function getStandings(): Promise<object> {
                 runsScored: t.runs_scored,
                 runsAllowed: t.runs_allowed,
                 runDifferential: t.runs_scored - t.runs_allowed,
+                streak,
+                last10,
               };
             }),
           };

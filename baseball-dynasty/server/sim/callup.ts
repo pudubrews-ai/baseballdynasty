@@ -67,6 +67,15 @@ function promotePlayer(
   currentGameNumber: number,
   db: ReturnType<typeof import('../db.js').getDb>
 ): void {
+  // AB-18: block same-tick re-promotion (send-down cooldown)
+  if (player.last_send_down_game !== null && player.last_send_down_game !== undefined) {
+    const delta = currentGameNumber - (player.last_send_down_game as number);
+    if (delta < 5) {
+      console.log(`[callup] ${player.first_name} ${player.last_name} blocked: sent down ${delta} games ago`);
+      return;
+    }
+  }
+
   // Check 40-man cap
   if (count40Man(team.id) >= 40) {
     // Find a DFA candidate and DFA them first (AB-04 trigger 2)
@@ -96,9 +105,9 @@ function promotePlayer(
   // Log call-up transaction
   const callUpResult = db.prepare(
     `INSERT INTO transactions
-       (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
-     VALUES (?, ?, 'call_up', ?, ?, NULL, ?)`
-  ).run(leagueId, seasonNumber, team.id, player.id, Date.now());
+       (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at)
+     VALUES (?, ?, 'call_up', ?, ?, NULL, ?, ?)`
+  ).run(leagueId, seasonNumber, team.id, player.id, currentGameNumber, Date.now());
 
   // §1.1(a): Insert call-up news item
   insertRosterNewsItem({

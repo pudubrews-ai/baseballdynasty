@@ -132,11 +132,17 @@ export default function News() {
                   {item.event_type && <div style={{ marginTop: '4px' }}>Event: {item.event_type}</div>}
                   {item.team_id && <div>Team ID: {item.team_id}</div>}
                   {item.player_id && <div>Player ID: {item.player_id}</div>}
-                  {item.details_json && (
-                    <pre style={{ marginTop: '8px', background: '#0f172a', padding: '8px', borderRadius: '4px', fontSize: '12px', overflow: 'auto' }}>
-                      {JSON.stringify(JSON.parse(item.details_json), null, 2)}
-                    </pre>
-                  )}
+                  {item.details_json && (() => {
+                    try {
+                      return (
+                        <pre style={{ marginTop: '8px', background: '#0f172a', padding: '8px', borderRadius: '4px', fontSize: '12px', overflow: 'auto' }}>
+                          {JSON.stringify(JSON.parse(item.details_json), null, 2)}
+                        </pre>
+                      );
+                    } catch {
+                      return null;
+                    }
+                  })()}
                 </div>
               )}
             </div>

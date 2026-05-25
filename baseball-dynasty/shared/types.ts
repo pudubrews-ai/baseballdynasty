@@ -44,6 +44,9 @@ export interface LeagueStateSnapshot {
   // v0.2.0
   waiverCount: number;
   lastNewsId: number;
+  // v0.3.0
+  ownedTeamId: number | null;
+  selectionResolved: boolean;
 }
 
 // API response types
@@ -241,6 +244,9 @@ export interface Transaction {
   playerName: string | null;
   narrative: string | null;
   createdAt: number;
+  // v0.3.0
+  reason: string | null;
+  gameNumber: number;
 }
 
 export interface TimelineSeason {
