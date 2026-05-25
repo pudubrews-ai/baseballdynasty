@@ -156,7 +156,7 @@ timelineRouter.get('/', async (_req: Request, res: Response, next: NextFunction)
             `SELECT p.first_name, p.last_name
              FROM season_stats ss JOIN players p ON p.id = ss.player_id
              WHERE ss.league_id = ? AND ss.season_number = ? AND ss.at_bats >= 40
-               AND (p.position IS NULL OR p.position NOT IN ('SP','RP'))
+               AND (p.position IS NULL OR p.position NOT IN ('SP','RP','CL'))
              ORDER BY (ss.hits + 2*ss.home_runs) DESC LIMIT 1`
           ).get(league.id, s.season_number) as { first_name: string; last_name: string } | undefined;
           if (mvp) mvpName = `${mvp.first_name} ${mvp.last_name}`;

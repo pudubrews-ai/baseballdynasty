@@ -171,6 +171,59 @@ function deriveEmotion(team: WatchOwnedTeam | null, fireworks: boolean): Emotion
   return 'neutral';
 }
 
+// ---- Turbo calendar overlay (M-02) ----
+function TurboCalendarOverlay({ gameNumber, gameDate }: { gameNumber: number | null; gameDate: number | null }) {
+  const [weekIdx, setWeekIdx] = useState(0);
+
+  useEffect(() => {
+    const t = setInterval(() => setWeekIdx(i => i + 1), 120);
+    return () => clearInterval(t);
+  }, []);
+
+  // Derive a week label from game number or date
+  const weekLabel = (() => {
+    if (gameNumber !== null) {
+      const week = Math.floor(gameNumber / 7) + weekIdx % 20;
+      return `WEEK ${week + 1}`;
+    }
+    if (gameDate !== null) {
+      const d = new Date(gameDate + weekIdx * 7 * 24 * 3600 * 1000);
+      return `${d.toLocaleString('en-US', { month: 'short' }).toUpperCase()} ${d.getDate()}`;
+    }
+    return `WEEK ${(weekIdx % 26) + 1}`;
+  })();
+
+  return (
+    <motion.div
+      data-testid="watch-turbo-calendar"
+      key={weekIdx}
+      initial={{ opacity: 0, y: -8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0, y: 8 }}
+      transition={{ duration: 0.08 }}
+      style={{
+        position: 'absolute',
+        top: '50%',
+        left: '50%',
+        transform: 'translate(-50%, -50%)',
+        background: 'rgba(13,17,23,0.85)',
+        border: '2px solid #f59e0b',
+        borderRadius: '6px',
+        padding: '12px 24px',
+        zIndex: 15,
+        pointerEvents: 'none',
+        fontFamily: "'Bebas Neue', sans-serif",
+        fontSize: '22px',
+        color: '#fef3c7',
+        letterSpacing: '0.1em',
+        textAlign: 'center',
+      }}
+    >
+      {weekLabel}
+    </motion.div>
+  );
+}
+
 // ---- Turbo headline flash ----
 function TurboHeadlineFlash({ items }: { items: TickerItem[] }) {
   const [idx, setIdx] = useState(0);
@@ -223,6 +276,8 @@ export default function Watch() {
   const [tickerPaused, setTickerPaused] = useState(false);
   const lastNewsIdRef = useRef<number>(0);
   const prevPhaseRef = useRef<string | null>(null);
+  const paperTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastShownSeasonRef = useRef<number | null>(null);
   const [seasonEndPaper, setSeasonEndPaper] = useState<NewspaperLike | null>(null);
 
   const isTurbo = state?.simSpeed === 'turbo';
@@ -254,22 +309,38 @@ export default function Watch() {
     fetchTicker().then(setTickerItems).catch(() => {});
   }, []);
 
-  // M6: Season-end newspaper drop — hold ≥1.5s on phase transition into playoffs/offseason
+  // M-03: Season-end newspaper drop — fire on →offseason only (narrative is guaranteed written),
+  // dedupe per season, store timer in ref to ensure full 1.5s hold even in turbo.
   useEffect(() => {
     const p = watchState?.phase ?? state?.phase ?? null;
     const prev = prevPhaseRef.current;
-    if (prev && prev !== p && (p === 'playoffs' || p === 'offseason')) {
+    if (prev && prev !== p && p === 'offseason') {
       fetch('/api/timeline').then(r => r.ok ? r.json() : []).then((arr: unknown[]) => {
-        const firstEntry = arr?.[0] as { newspaper?: NewspaperLike } | undefined;
+        const firstEntry = arr?.[0] as { season_number?: number; newspaper?: NewspaperLike } | undefined;
         const latest = firstEntry?.newspaper ?? null;
-        if (latest) {
+        const seasonNum = firstEntry?.season_number ?? null;
+        // Dedupe: do not re-fire if this season's paper was already shown
+        if (latest && seasonNum !== null && seasonNum !== lastShownSeasonRef.current) {
+          lastShownSeasonRef.current = seasonNum;
           setSeasonEndPaper(latest);
-          setTimeout(() => setSeasonEndPaper(null), 1500); // non-skippable, even in turbo
+          // Clear any lingering timer before scheduling a new one
+          if (paperTimerRef.current !== null) clearTimeout(paperTimerRef.current);
+          paperTimerRef.current = setTimeout(() => {
+            setSeasonEndPaper(null);
+            paperTimerRef.current = null;
+          }, 1500); // non-skippable hold, even in turbo
         }
       }).catch(() => {});
     }
     prevPhaseRef.current = p ?? null;
   }, [watchState?.phase, state?.phase]);
+
+  // Cleanup paper timer on unmount
+  useEffect(() => {
+    return () => {
+      if (paperTimerRef.current !== null) clearTimeout(paperTimerRef.current);
+    };
+  }, []);
 
   const team = watchState?.ownedTeam ?? null;
   const latestGame = watchState?.latestGame ?? null;
@@ -390,6 +461,10 @@ export default function Watch() {
         <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
           {isTurbo && (
             <TurboHeadlineFlash items={tickerItems} />
+          )}
+          {/* M-02: Calendar overlay during turbo — pages tearing through weeks */}
+          {isTurbo && (
+            <TurboCalendarOverlay gameNumber={latestGame?.gameNumber ?? null} gameDate={latestGame?.gameDate ?? null} />
           )}
           <Ballpark
             daypart={team?.daypart ?? (isOffseason ? 'night' : 'night')}

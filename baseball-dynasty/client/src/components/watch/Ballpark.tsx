@@ -210,12 +210,32 @@ export default function Ballpark({
             <text x={80} y={H * 0.38 + 58} fill="#94a3b8" fontSize={10} fontFamily="Inter, sans-serif">
               {scoreboard.homeTeamName.substring(0, 8)}
             </text>
-            <text x={160} y={H * 0.38 + 44} textAnchor="end" fill="#f9fafb" fontSize={16} fontFamily="'Bebas Neue', sans-serif">
+            {/* Split-flap score spin in turbo mode — data-testid="watch-scoreboard-spin" */}
+            <motion.text
+              data-testid="watch-scoreboard-spin"
+              x={160} y={H * 0.38 + 44}
+              textAnchor="end"
+              fill="#f9fafb"
+              fontSize={16}
+              fontFamily="'Bebas Neue', sans-serif"
+              key={isTurboMode ? `turbo-away-${Date.now() % 1000}` : `away-${scoreboard.awayScore}`}
+              animate={isTurboMode ? { opacity: [1, 0.2, 1], filter: ['blur(0px)', 'blur(3px)', 'blur(0px)'] } : { opacity: 1 }}
+              transition={isTurboMode ? { duration: 0.1, repeat: Infinity } : { duration: 0.25 }}
+            >
               {scoreboard.awayScore}
-            </text>
-            <text x={160} y={H * 0.38 + 58} textAnchor="end" fill="#f9fafb" fontSize={16} fontFamily="'Bebas Neue', sans-serif">
+            </motion.text>
+            <motion.text
+              x={160} y={H * 0.38 + 58}
+              textAnchor="end"
+              fill="#f9fafb"
+              fontSize={16}
+              fontFamily="'Bebas Neue', sans-serif"
+              key={isTurboMode ? `turbo-home-${Date.now() % 1000}` : `home-${scoreboard.homeScore}`}
+              animate={isTurboMode ? { opacity: [1, 0.2, 1], filter: ['blur(0px)', 'blur(3px)', 'blur(0px)'] } : { opacity: 1 }}
+              transition={isTurboMode ? { duration: 0.1, repeat: Infinity, delay: 0.05 } : { duration: 0.25 }}
+            >
               {scoreboard.homeScore}
-            </text>
+            </motion.text>
             <text x={120} y={H * 0.38 + 76} textAnchor="middle" fill="#6b7280" fontSize={10} fontFamily="Inter, sans-serif">
               {`INN ${scoreboard.inning}`}
             </text>

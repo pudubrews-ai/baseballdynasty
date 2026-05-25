@@ -182,16 +182,16 @@ teamsRouter.get('/:id', async (req: Request, res: Response, next: NextFunction):
       hired_person_context: string | null; season_number: number; created_at: number;
     }>;
 
-    // Hire context for current GM/manager — M3: fall back to derived default for carried rows
+    // Hire context for current GM/manager — M-01: unconditional fallback for original worldgen GMs/managers
     const gmHireEvent = frontOfficeHistory.find(e => e.event_type === 'gm_fired');
     const gmHiredContext = gmHireEvent
       ? (gmHireEvent.hired_person_context ?? (team.interim_gm === 1 ? 'Interim appointment' : 'Hired in offseason'))
-      : null;
+      : (team.interim_gm === 1 ? 'Interim appointment' : 'Founding GM (league inception)');
     const managerHireEvent = frontOfficeHistory.find(e =>
       e.event_type === 'manager_fired' || e.event_type === 'manager_resigned');
     const managerHiredContext = managerHireEvent
       ? (managerHireEvent.hired_person_context ?? (team.interim_manager === 1 ? 'Interim appointment' : 'Hired in offseason'))
-      : null;
+      : (team.interim_manager === 1 ? 'Interim appointment' : 'Founding manager (league inception)');
 
     res.json({
       id: team.id,

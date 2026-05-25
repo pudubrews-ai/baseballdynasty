@@ -192,9 +192,9 @@ directivesRouter.post('/rebuild', async (req: Request, res: Response, next: Next
     } | undefined;
     if (!ownedTeamRow) { res.status(404).json({ error: 'team_not_found' }); return; }
 
+    recordDirective(lid, season, 'rebuild', currentGameNumber);
     prepared('UPDATE teams SET trade_posture = ? WHERE id = ?').run('SELLER', ownedTeamId);
     prepared('UPDATE franchise_state SET rebuild_season = ? WHERE league_id = ?').run(season, lid);
-    recordDirective(lid, season, 'rebuild', currentGameNumber);
     insertNewsItem({
       leagueId: lid, seasonNumber: season, gameNumber: currentGameNumber,
       eventType: 'milestone', teamId: ownedTeamId,
@@ -283,10 +283,10 @@ directivesRouter.post('/fire-manager', async (req: Request, res: Response, next:
       ? `Owner lost confidence in manager after ${streakN}-game losing streak`
       : 'Owner lost confidence in manager';
 
-    // Fire via existing path
+    // Fire via existing path — recordDirective first so UNIQUE index trips before side-effects (PB-7)
+    recordDirective(lid, season, 'fire_manager', currentGameNumber);
     promoteInterimManagerDirective(ownedTeamRow, lid, season, currentGameNumber, reason);
     prepared('UPDATE franchise_state SET fire_manager_season = ? WHERE league_id = ?').run(season, lid);
-    recordDirective(lid, season, 'fire_manager', currentGameNumber);
     setGmConfidence(lid, -10);
 
     const newConf = getFranchiseState(lid)?.gm_confidence ?? 0;
@@ -328,11 +328,11 @@ directivesRouter.post('/trust-process', async (req: Request, res: Response, next
     } | undefined;
     if (!ownedTeamRow) { res.status(404).json({ error: 'team_not_found' }); return; }
 
+    recordDirective(lid, season, 'trust_process', currentGameNumber);
     prepared(
       'UPDATE franchise_state SET firings_locked_season = ?, trust_process_season = ? WHERE league_id = ?'
     ).run(season, season, lid);
     setGmConfidence(lid, +5);
-    recordDirective(lid, season, 'trust_process', currentGameNumber);
     insertNewsItem({
       leagueId: lid, seasonNumber: season, gameNumber: currentGameNumber,
       eventType: 'milestone', teamId: ownedTeamId,
