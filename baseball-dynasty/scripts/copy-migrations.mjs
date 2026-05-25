@@ -10,7 +10,7 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const projectRoot = join(__dirname, '..');
 
 const src = join(projectRoot, 'server', 'migrations');
-const dst = join(projectRoot, 'dist', 'server', 'migrations');
+const dst = join(projectRoot, 'dist', 'server', 'server', 'migrations');
 
 mkdirSync(dst, { recursive: true });
 

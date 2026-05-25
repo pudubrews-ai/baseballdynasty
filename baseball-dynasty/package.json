@@ -12,7 +12,7 @@
     "dev:client": "vite",
     "build": "tsc -p tsconfig.server.json && node scripts/copy-migrations.mjs && vite build && npm run security:bundle-grep",
     "copy:migrations": "node scripts/copy-migrations.mjs",
-    "start": "node dist/server/index.js",
+    "start": "node dist/server/server/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint .",
