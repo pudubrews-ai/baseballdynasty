@@ -364,3 +364,77 @@ export function runCascadeEval(
 
   cascadeTx();
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Step 9: Synthetic Minor League Standings Generator
+// Updated every 5 games per the cascade clock (same cadence).
+// Rolls W/L for each team's affiliate based on mean overall vs league-average baseline.
+// Writes to minor_league_standings (UNIQUE on league+team+season+level).
+// ─────────────────────────────────────────────────────────────────────────────
+
+export function updateMinorStandings(
+  leagueId: number,
+  teamId: number,
+  seasonNumber: number,
+  gameNumber: number
+): void {
+  const db = getDb();
+
+  // Compute league-average overall for the minor leagues overall baseline
+  const leagueAvg = (db.prepare(
+    `SELECT AVG(overall_rating) as avg_overall FROM players
+     WHERE league_id = ? AND minor_level IS NOT NULL AND is_on_mlb_roster = 0`
+  ).get(leagueId) as { avg_overall: number | null } | undefined)?.avg_overall ?? 60;
+
+  const LEVELS = ['AAA', 'AA', 'A', 'Rookie'] as const;
+  const seed = leagueId ^ (teamId * 1337) ^ gameNumber;
+
+  const standingsTx = db.transaction(() => {
+    for (const level of LEVELS) {
+      // Compute mean overall for this team at this level
+      const stats = db.prepare(
+        `SELECT AVG(overall_rating) as mean_overall, COUNT(*) as cnt
+         FROM players
+         WHERE league_id = ? AND team_id = ? AND minor_level = ?
+           AND is_on_mlb_roster = 0`
+      ).get(leagueId, teamId, level) as { mean_overall: number | null; cnt: number } | undefined;
+
+      const meanOverall = stats?.mean_overall ?? leagueAvg;
+      const cnt = stats?.cnt ?? 0;
+
+      if (cnt === 0) {
+        // No players at this level — 0-0 row (do NOT upsert wins, leave existing unchanged)
+        db.prepare(
+          `INSERT OR IGNORE INTO minor_league_standings
+             (league_id, team_id, season_number, level, wins, losses, last_updated_game)
+           VALUES (?, ?, ?, ?, 0, 0, ?)`
+        ).run(leagueId, teamId, seasonNumber, level, gameNumber);
+        continue;
+      }
+
+      // Win probability based on relative talent advantage
+      // p_win = 0.5 + (meanOverall - leagueAvg) / 100 (clamped 0.25–0.75)
+      const pWin = Math.max(0.25, Math.min(0.75, 0.5 + (meanOverall - leagueAvg) / 100));
+
+      // Each 5-game window: roll ~5 simulated games
+      const rng = seedFor(`standings_${level}_${teamId}`, seed);
+      let wins = 0;
+      let losses = 0;
+      for (let g = 0; g < 5; g++) {
+        if (rng() < pWin) wins++; else losses++;
+      }
+
+      // Upsert: increment wins/losses (UNIQUE on league+team+season+level)
+      db.prepare(
+        `INSERT INTO minor_league_standings (league_id, team_id, season_number, level, wins, losses, last_updated_game)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(league_id, team_id, season_number, level)
+         DO UPDATE SET wins = wins + excluded.wins,
+                       losses = losses + excluded.losses,
+                       last_updated_game = excluded.last_updated_game`
+      ).run(leagueId, teamId, seasonNumber, level, wins, losses, gameNumber);
+    }
+  });
+
+  standingsTx();
+}

@@ -27,7 +27,7 @@ import { evaluateFirings } from './firings.js';
 import { getFranchiseState, setGmConfidence } from './franchise.js';
 import { resolveDirectives } from './directives.js';
 import { insertNewsItem } from './news.js';
-import { runCascadeEval } from './cascade.js';
+import { runCascadeEval, updateMinorStandings } from './cascade.js';
 
 // AB-NULL §4.3: One-time self-heal for carried-over DBs with stale is_on_25man on null-team players.
 // Called once per runRosterMaintenance invocation — cheap (no-op if already clean).
@@ -173,6 +173,7 @@ export function runRosterMaintenance(
         if (cascadeDue) {
           try {
             runCascadeEval(leagueId, teamId, league.season_number, gameNumber, team.gm_archetype ?? 'balanced');
+            updateMinorStandings(leagueId, teamId, league.season_number, gameNumber);
             prepared('UPDATE teams SET last_cascade_check_game = ? WHERE id = ?').run(team.games_played, teamId);
           } catch (err) {
             console.warn(`[rosterMaintenance] Cascade eval error for team ${teamId}:`, err);

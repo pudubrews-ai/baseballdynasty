@@ -106,3 +106,11 @@ export function getTimeline(): Promise<unknown[]> {
 export function getTransactions(): Promise<unknown[]> {
   return apiFetch('/api/transactions');
 }
+
+export function getMinorsStandings(): Promise<unknown> {
+  return apiFetch('/api/minors/standings');
+}
+
+export function getProspects(): Promise<unknown[]> {
+  return apiFetch('/api/players/prospects');
+}
