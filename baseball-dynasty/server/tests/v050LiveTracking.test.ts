@@ -122,4 +122,41 @@ describe('v0.5.0 live tracking — Fix 1/2/4 regression gate', () => {
     const ratio = rateWithRival / rateWithoutRival;
     expect(ratio).toBeGreaterThanOrEqual(1.0);
   });
+
+  it('Fix 5: a rivalry matchup produces a rivalry_game news item (not game_result)', async () => {
+    const { prepared, getDb } = await import('../db.js');
+    const { insertGameNewsItem } = await import('../sim/news.js');
+
+    // Pick two real teams in the league and register them as a rivalry (canonical a<b).
+    const teams = prepared(
+      'SELECT id FROM teams WHERE league_id = ? ORDER BY id LIMIT 2'
+    ).all(leagueId) as Array<{ id: number }>;
+    expect(teams.length).toBe(2);
+    const team0 = teams[0]!;
+    const team1 = teams[1]!;
+    const a = Math.min(team0.id, team1.id);
+    const b = Math.max(team0.id, team1.id);
+    const season = (prepared('SELECT season_number FROM leagues WHERE id = ?').get(leagueId) as any).season_number;
+    getDb().prepare(
+      `INSERT INTO rivalries (league_id, team_a_id, team_b_id, rivalry_score, formed_season, last_updated_season, origin_type)
+       VALUES (?, ?, ?, 40, ?, ?, 'playoff_series')`
+    ).run(leagueId, a, b, season, season);
+
+    // Emit a game-news item flagged as a rivalry (mirrors engine.ts after detection).
+    insertGameNewsItem({
+      leagueId, seasonNumber: season, gameNumber: 999,
+      homeTeamId: a, awayTeamId: b, homeScore: 5, awayScore: 3,
+      homeTeamName: 'Home', awayTeamName: 'Away',
+      isRivalry: true, sourceTable: 'game_log', sourceId: 12345,
+    });
+
+    const row = prepared(
+      `SELECT event_type, badge, source_id, is_headline_pending
+       FROM news_items WHERE league_id = ? AND game_number = 999 LIMIT 1`
+    ).get(leagueId) as any;
+    expect(row.event_type).toBe('rivalry_game');
+    expect(row.badge).toBe('RIVALRY');
+    expect(row.source_id).toBe(12345);       // testid suffix resolves to gameId
+    expect(row.is_headline_pending).toBe(0); // synchronous, no LLM
+  });
 });

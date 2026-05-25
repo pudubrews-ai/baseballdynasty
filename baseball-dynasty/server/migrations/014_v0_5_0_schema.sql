@@ -168,7 +168,43 @@ CREATE TABLE international_prospects (
 );
 
 -- =========================================================
--- 4. INDEXES
+-- 4. UPDATE news_items badge CHECK constraint to include RIVALRY (Feature 5)
+-- =========================================================
+-- SQLite cannot ALTER a CHECK constraint in-place; use the rename/recreate pattern.
+-- news_items only references other tables (leagues, teams, players) — not referenced by any table —
+-- so the copy is safe without disabling foreign_keys.
+ALTER TABLE news_items RENAME TO news_items_old;
+
+CREATE TABLE news_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  league_id INTEGER NOT NULL REFERENCES leagues(id),
+  season_number INTEGER NOT NULL,
+  game_number INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  event_type TEXT NOT NULL,
+  badge TEXT NOT NULL CHECK (badge IN ('ROSTER','TRANSACTION','FRONT OFFICE','INJURY','MILESTONE','GAME','RIVALRY')),
+  team_id INTEGER REFERENCES teams(id),
+  secondary_team_id INTEGER REFERENCES teams(id),
+  player_id INTEGER REFERENCES players(id),
+  source_table TEXT,
+  source_id INTEGER,
+  headline_text TEXT,
+  is_headline_pending INTEGER NOT NULL DEFAULT 1,
+  details_json TEXT,
+  pinned_until_game INTEGER DEFAULT NULL   -- added by migration 012
+);
+
+INSERT INTO news_items SELECT * FROM news_items_old;
+DROP TABLE news_items_old;
+
+CREATE INDEX IF NOT EXISTS idx_news_items_league_id ON news_items(league_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_news_items_team ON news_items(team_id);
+CREATE INDEX IF NOT EXISTS idx_news_items_secondary_team ON news_items(secondary_team_id);
+CREATE INDEX IF NOT EXISTS idx_news_items_badge ON news_items(badge);
+CREATE INDEX IF NOT EXISTS idx_news_items_pending ON news_items(is_headline_pending) WHERE is_headline_pending = 1;
+
+-- =========================================================
+-- 6. INDEXES (new tables)
 -- =========================================================
 
 CREATE INDEX idx_intl_prospects_league_season ON international_prospects (league_id, season_number);
@@ -176,7 +212,7 @@ CREATE INDEX idx_award_races_lookup ON award_races (league_id, season_number, aw
 CREATE INDEX idx_stadium_upgrades_team ON stadium_upgrades (league_id, team_id);
 
 -- =========================================================
--- 5. BACKFILL for existing data
+-- 7. BACKFILL for existing data
 -- =========================================================
 
 -- Backfill is_on_40man: all current MLB roster players are on the 40-man

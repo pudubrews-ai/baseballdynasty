@@ -124,6 +124,7 @@ export function insertNewsItem(params: {
 }
 
 // Insert a GAME news item (score-only, no LLM, immediate headline).
+// Pass isRivalry=true to emit a rivalry_game event with the RIVALRY badge instead.
 export function insertGameNewsItem(params: {
   leagueId: number;
   seasonNumber: number;
@@ -134,15 +135,22 @@ export function insertGameNewsItem(params: {
   awayScore: number;
   homeTeamName: string;
   awayTeamName: string;
+  isRivalry?: boolean;          // §5: tag rivalry matchups
+  sourceTable?: string | null;  // §5: source table for testid suffix resolution
+  sourceId?: number | null;     // §5: source id (game_log row) for testid suffix
 }): void {
-  const headline = `${params.awayTeamName} ${params.awayScore}, ${params.homeTeamName} ${params.homeScore}`;
+  const scoreLine = `${params.awayTeamName} ${params.awayScore}, ${params.homeTeamName} ${params.homeScore}`;
+  const isRivalry = params.isRivalry === true;
+  const headline = isRivalry ? `Rivalry showdown — ${scoreLine}` : scoreLine;
   insertNewsItem({
     leagueId: params.leagueId,
     seasonNumber: params.seasonNumber,
     gameNumber: params.gameNumber,
-    eventType: 'game_result',
+    eventType: isRivalry ? 'rivalry_game' : 'game_result',
     teamId: params.homeTeamId,
     secondaryTeamId: params.awayTeamId,
+    sourceTable: params.sourceTable ?? null,
+    sourceId: params.sourceId ?? null,
     headlineText: headline,
     detailsJson: JSON.stringify({
       home_team_id: params.homeTeamId,
