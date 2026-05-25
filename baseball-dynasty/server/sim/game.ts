@@ -7,6 +7,7 @@ import { getDb, prepared, type PlayerRow, type TeamRow } from '../db.js';
 import { seedFor, randInt, randTriangular, shuffle } from './prng.js';
 import type { NotableEvent } from '../../shared/types.js';
 import { assignInjury } from './injury.js';
+import { chemistryWinProbEffect } from './personality.js';
 
 export interface BatterBoxLine {
   playerId: number;
@@ -169,6 +170,12 @@ function winProbability(homeTeam: TeamRow, awayTeam: TeamRow, gameId: number): n
 
   prob += (homeMorale?.avg_bp ?? 0) / 10000;
   prob -= (awayMorale?.avg_bp ?? 0) / 10000; // away morale hurts home team
+
+  // Step 13: Chemistry win-prob effect (server-computed, never client-writable)
+  const homeChemEffect = chemistryWinProbEffect(homeTeam.chemistry_score ?? 50);
+  const awayChemEffect = chemistryWinProbEffect(awayTeam.chemistry_score ?? 50);
+  prob += homeChemEffect / 10000;
+  prob -= awayChemEffect / 10000;
 
   // Clamp to [0.15, 0.85]
   return Math.max(0.15, Math.min(0.85, prob));

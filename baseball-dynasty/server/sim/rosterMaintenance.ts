@@ -16,7 +16,7 @@
 // AB-18: Crash-gap acceptance — if crash between game commit and maintenance commit,
 // next tick re-evaluates conditions (all maintenance is cadence/range-based, idempotent).
 
-import { getDb, prepared, type TeamRow } from '../db.js';
+import { getDb, prepared, type TeamRow, type LeagueRow } from '../db.js';
 import { processWaivers } from './waivers.js';
 import { evaluateCallUps } from './callup.js';
 import { evaluateSendDowns } from './sendDown.js';
@@ -30,6 +30,7 @@ import { insertNewsItem } from './news.js';
 import { runCascadeEval, updateMinorStandings } from './cascade.js';
 import { seedFor as _seedFor } from './prng.js';
 import { decrementSuspensions } from './suspensions.js';
+import { recalcChemistry, checkMalcontentPressure, applyTradeDemandPenalties } from './personality.js';
 
 // AB-NULL §4.3: One-time self-heal for carried-over DBs with stale is_on_25man on null-team players.
 // Called once per runRosterMaintenance invocation — cheap (no-op if already clean).
@@ -121,6 +122,18 @@ export function runRosterMaintenance(
       accrueServiceTime(leagueId, gameNumber);
     } catch (err) {
       console.warn('[rosterMaintenance] Service time error:', err);
+    }
+
+    // Step 13: Chemistry recalc (per-team clock gated inside recalcChemistry)
+    // and trade demand penalty check
+    try {
+      const allTeamsForChem = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
+      for (const t of allTeamsForChem) {
+        recalcChemistry(leagueId, t.id, gameNumber);
+      }
+      applyTradeDemandPenalties(leagueId, gameNumber);
+    } catch (err) {
+      console.warn('[rosterMaintenance] Chemistry/personality error:', err);
     }
   }
 

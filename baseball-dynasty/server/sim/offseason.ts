@@ -743,12 +743,27 @@ async function runDevelopmentStep(leagueId: number, seed: number): Promise<void>
       // Development model — AB-10 RULING: young minor leaguer growth (+0..+3) REMOVED.
       // Minor leaguer growth now happens ONLY in-season via prospectDev.ts.
       // Keep: peak/decline curves for 28+ players (applies to MLB and AAA players).
-      if (newAge >= 28 && newAge <= 32) {
+      //
+      // Step 13: Work-ethic aging modifications (L2: seeded, once per season per player)
+      const workEthic = player.work_ethic ?? 50;
+      const declineStartAge = workEthic >= 75 ? 34 : (workEthic <= 35 ? 31 : 33);
+      const declineRateBonus = workEthic <= 35 ? 1.5 : (workEthic >= 75 ? 0.5 : 1.0);
+
+      if (newAge >= 28 && newAge < declineStartAge) {
         // Stars in peak years: -1 to +1
         ratingChange = randInt(rng, -1, 1);
-      } else if (newAge >= 33) {
-        // Aging decline: -2 to 0
-        ratingChange = randInt(rng, -2, 0);
+      } else if (newAge >= declineStartAge) {
+        // Aging decline: modified by work ethic
+        const baseDecline = randInt(rng, -2, 0);
+        ratingChange = Math.min(0, Math.round(baseDecline * declineRateBonus));
+      }
+
+      // Fountain of youth (20%/season at age 36-38 with work_ethic >= 80)
+      if (workEthic >= 80 && newAge >= 36 && newAge <= 38) {
+        const wfRng = seedFor(`fountain_${leagueId}_${player.id}`, seed ^ player.id);
+        if (wfRng() < 0.20) {
+          ratingChange = Math.max(ratingChange, randInt(rng, 1, 2));
+        }
       }
 
       let newRating = Math.max(25, Math.min(99, player.overall_rating + ratingChange));
@@ -771,6 +786,14 @@ async function runDevelopmentStep(leagueId: number, seed: number): Promise<void>
           (player.potential === 'C' || player.potential === 'D')) {
         newPotential = 'D';
         newRating = Math.min(newRating, 65);
+      }
+
+      // Step 13: Late-bloomer upgrade (10%/season): coachability >= 75 AND potential='B'
+      if (player.coachability >= 75 && newPotential === 'B') {
+        const lbRng = seedFor(`late_bloomer_${leagueId}_${player.id}`, seed ^ player.id);
+        if (lbRng() < 0.10) {
+          newPotential = 'A';
+        }
       }
 
       db.prepare(
@@ -949,7 +972,19 @@ async function runFreeAgencyStep(leagueId: number, seasonNumber?: number): Promi
     'SELECT * FROM players WHERE league_id = ? AND contract_years_remaining <= 0 AND team_id IS NOT NULL'
   ).all(leagueId) as PlayerRow[];
 
+  // Step 13 (A-6): Capture prior team BEFORE nulling team_id (loyalty discount check)
+  // Player with leadership >= 75 AND seasons_with_current_team >= 5 accepts 10-15% below market.
+  const leagueRowForFA = prepared('SELECT worldgen_seed, season_number FROM leagues WHERE id = ?').get(leagueId) as { worldgen_seed: number; season_number: number } | undefined;
+  const loyaltyDiscountIds = new Set<number>();
+
   for (const fa of freeAgents) {
+    const leadership = fa.leadership ?? 0;
+    const seasonsHere = fa.seasons_with_current_team ?? 0;
+    if (leadership >= 75 && seasonsHere >= 5 && fa.team_id !== null) {
+      // Loyalty discount eligible — flag for later bidding
+      loyaltyDiscountIds.add(fa.id);
+      prepared('UPDATE players SET loyalty_discount_eligible = 1 WHERE id = ?').run(fa.id);
+    }
     // AB-NULL FIX §2.1: also clear is_on_25man so free agents don't appear as phantom 25-man members.
     prepared('UPDATE players SET team_id = NULL, is_on_mlb_roster = 0, is_on_25man = 0, minor_level = NULL WHERE id = ?').run(fa.id);
   }
@@ -965,6 +1000,11 @@ async function runFreeAgencyStep(leagueId: number, seasonNumber?: number): Promi
     let bestBid = 0;
     let bestTeamId: number | null = null;
 
+    // Step 13 (A-6): loyalty discount applies if eligible — player accepts 10-15% below market
+    const hasLoyaltyDiscount = loyaltyDiscountIds.has(fa.id);
+    // Loyalty discount: player's market value reduced by 12% (midpoint of 10-15%)
+    const loyaltyDiscountFactor = hasLoyaltyDiscount ? 0.88 : 1.0;
+
     for (const team of teams) {
       // Check position need
       const posCount = prepared(
@@ -976,9 +1016,10 @@ async function runFreeAgencyStep(leagueId: number, seasonNumber?: number): Promi
       else if (posCount.cnt === 1) posNeedScore = 0.5;
 
       const needsMultiplier = 1.0 + (0.5 * posNeedScore);
+      const marketBid = Math.round(fa.overall_rating * 0.15 * 1_000_000 * needsMultiplier * loyaltyDiscountFactor);
       const bid = Math.min(
         team.payroll_budget - team.current_payroll,
-        Math.round(fa.overall_rating * 0.15 * 1_000_000 * needsMultiplier)
+        marketBid
       );
 
       if (bid > bestBid) {

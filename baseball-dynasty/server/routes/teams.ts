@@ -156,7 +156,8 @@ teamsRouter.get('/:id', async (req: Request, res: Response, next: NextFunction):
               owner_name, owner_personality, owner_age,
               job_security, trade_posture, interim_gm, interim_manager,
               last_call_up_check_game, last_firing_check_game, last_gm_firing_check_game,
-              last_service_time_update_game, deadline_trades_this_season
+              last_service_time_update_game, deadline_trades_this_season,
+              chemistry_score, franchise_value, relocation_threat_active, stadium_capacity
        FROM teams WHERE id = ?`
     ).get(idResult.data) as TeamRow | undefined;
     if (!team) { res.status(404).json({ error: 'Team not found' }); return; } // §2.16.1
@@ -234,6 +235,12 @@ teamsRouter.get('/:id', async (req: Request, res: Response, next: NextFunction):
       gm_hired_context: gmHiredContext,
       manager_hired_context: managerHiredContext,
       front_office_history: frontOfficeHistory,
+      // Step 13: chemistry (server-only, A-5/I-1 — never submitted by client)
+      chemistry_score: team.chemistry_score ?? 50,
+      // Step 14: franchise value and relocation
+      franchise_value: team.franchise_value ?? null,
+      relocation_threat_active: team.relocation_threat_active === 1,
+      stadium_capacity: team.stadium_capacity ?? null,
     });
   } catch (err) { next(err); }
 });

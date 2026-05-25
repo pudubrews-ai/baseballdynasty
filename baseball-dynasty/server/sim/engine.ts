@@ -19,6 +19,7 @@ import { insertGameNewsItem, insertNewsItem, insertMilestoneNewsItem, fillPendin
 import { scrubError } from '../util/scrub.js';
 import { rollAndResolveTragedy } from './tragedy.js';
 import { rollSuspensions } from './suspensions.js';
+import { rollMalcontent, rollTradeDemand, markPersonalityRollsDone } from './personality.js';
 import type { LeagueStateSnapshot, SimSpeed } from '../../shared/types.js';
 import type { NewLeagueBodyType } from '../../shared/schemas.js';
 
@@ -406,13 +407,23 @@ async function runGameTick(league: LeagueRow): Promise<void> {
     return;
   }
 
-  // Step 12: Suspension rolls — once per season (game 1), seeded by season+worldgen_seed.
-  // Re-rolling with same seed yields same result (deterministic), so idempotent if re-entered.
+  // Step 12 + 13: Per-season rolls at game 1 — suspensions, malcontent, trade demand.
+  // Seeded rolls: re-rolling with same seed is idempotent; gated by personality_rolls_done_season.
   if (nextGame.gameNumber === 1) {
     try {
       rollSuspensions(league.id, league.season_number, nextGame.gameNumber, league.worldgen_seed);
     } catch (err) {
       console.warn('[engine] Suspension roll error:', scrubError(err).message);
+    }
+    try {
+      const allTeams = prepared('SELECT * FROM teams WHERE league_id = ?').all(league.id) as TeamRow[];
+      for (const team of allTeams) {
+        rollMalcontent(league.id, league.season_number, nextGame.gameNumber, league.worldgen_seed, team);
+        rollTradeDemand(league.id, league.season_number, nextGame.gameNumber, league.worldgen_seed, team);
+      }
+      markPersonalityRollsDone(league.id, league.season_number);
+    } catch (err) {
+      console.warn('[engine] Personality roll error:', scrubError(err).message);
     }
   }
 
