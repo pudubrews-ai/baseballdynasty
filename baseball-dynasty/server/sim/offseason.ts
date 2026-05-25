@@ -414,12 +414,11 @@ async function runFinancialUpdate(leagueId: number, seasonNumber: number, seed: 
         }
       }
 
-      const attendanceRate = computeAttendanceRate(
-        team, rivalIds, isPlayoffRace,
-        false, // honeymoon handled by column in team
-        hasStarPlayer,
-        false  // per-season average: no specific rivalry game
-      );
+      const baseRate = computeAttendanceRate(team, rivalIds, isPlayoffRace, false, hasStarPlayer, false);
+      // Apply a fractional rivalry uplift: assume rivals account for ~ (rivalIds.length / 19) of opponents,
+      // played at home ~half the time. Uplift is +15% on that fraction of home games.
+      const rivalHomeShare = Math.min(1, rivalIds.length / 19); // 19 = other teams in a 20-team league
+      const attendanceRate = Math.min(1.0, baseRate * (1 + 0.15 * rivalHomeShare));
       const avgGameAttendance = Math.round(attendanceRate * capacity);
       const seasonAttendanceTotal = avgGameAttendance * homeGames;
 
@@ -1948,11 +1947,6 @@ async function runStadiumResolveStep(leagueId: number, seasonNumber: number, see
         }
       }
 
-      // Decrement honeymoon counter
-      if ((team.new_stadium_honeymoon_seasons_remaining ?? 0) > 0) {
-        db.prepare('UPDATE teams SET new_stadium_honeymoon_seasons_remaining = new_stadium_honeymoon_seasons_remaining - 1 WHERE id = ?').run(team.id);
-      }
-
       // 2. New upgrade decisions (only if no upgrade in progress, not relocating)
       if (team.stadium_upgrade_in_progress === 1 || relocatingTeams.has(team.id)) continue;
       if (team.interim_gm === 1) continue;
@@ -2529,6 +2523,12 @@ async function finalizeOffseason(leagueId: number, previousSeason: number): Prom
     // current_game_number just reset to 0 above; pins referencing old game numbers would bleed
     // into the new season if not cleared here.
     db.prepare('UPDATE news_items SET pinned_until_game = NULL WHERE league_id = ?').run(leagueId);
+
+    // Honeymoon decrement happens AFTER revenue so the completing-season still gets the uplift (X-F11b).
+    db.prepare(
+      `UPDATE teams SET new_stadium_honeymoon_seasons_remaining = new_stadium_honeymoon_seasons_remaining - 1
+       WHERE league_id = ? AND new_stadium_honeymoon_seasons_remaining > 0`
+    ).run(leagueId);
   });
 
   tx();

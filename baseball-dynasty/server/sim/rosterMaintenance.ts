@@ -119,14 +119,14 @@ function updateAwardRaces(leagueId: number, gameNumber: number): void {
         // MVP: batters by (hits + (hr * 4) + (rbi_est * 2)) — approximate WAR proxy
         sql = `
           SELECT ss.player_id,
-                 (ss.hits + ss.home_runs * 4 + CAST(ss.ab * 0.25 AS INTEGER)) AS value
+                 (ss.hits + ss.home_runs * 4 + CAST(ss.at_bats * 0.25 AS INTEGER)) AS value
           FROM season_stats ss
           JOIN players p ON p.id = ss.player_id
           JOIN teams t ON t.id = p.team_id
           WHERE ss.league_id = ? AND ss.season_number = ?
             AND t.conference = ?
             AND p.team_id IS NOT NULL
-            AND ss.ab > 30
+            AND ss.at_bats > 30
           ORDER BY value DESC, ss.player_id ASC
           LIMIT 5
         `;
@@ -134,7 +134,7 @@ function updateAwardRaces(leagueId: number, gameNumber: number): void {
         // Cy Young: pitchers by wins + (strikeouts / 10) − (earned_runs / 3)
         sql = `
           SELECT ss.player_id,
-                 (ss.pitcher_wins + CAST(ss.strikeouts / 10 AS INTEGER) - CAST(ss.earned_runs / 3 AS INTEGER)) AS value
+                 (ss.wins + CAST(ss.strikeouts_pitching / 10 AS INTEGER) - CAST(ss.earned_runs / 3 AS INTEGER)) AS value
           FROM season_stats ss
           JOIN players p ON p.id = ss.player_id
           JOIN teams t ON t.id = p.team_id
@@ -150,7 +150,7 @@ function updateAwardRaces(leagueId: number, gameNumber: number): void {
         // ROY: minimum service_time = 1 (first year), best stats overall
         sql = `
           SELECT ss.player_id,
-                 (ss.hits + ss.home_runs * 4 + ss.pitcher_wins * 3) AS value
+                 (ss.hits + ss.home_runs * 4 + ss.wins * 3) AS value
           FROM season_stats ss
           JOIN players p ON p.id = ss.player_id
           JOIN teams t ON t.id = p.team_id
@@ -271,14 +271,14 @@ function checkRecordChasers(leagueId: number, gameNumber: number, leagueGamesInS
   // Single-season win chasers (pitchers)
   if (gamesRemaining >= 10) {
     const winChasers = prepared(
-      `SELECT ss.player_id, ss.pitcher_wins, p.first_name, p.last_name, p.team_id
+      `SELECT ss.player_id, ss.wins, p.first_name, p.last_name, p.team_id
        FROM season_stats ss
        JOIN players p ON p.id = ss.player_id
        WHERE ss.league_id = ? AND ss.season_number = ?
-         AND ss.pitcher_wins >= 12 AND p.team_id IS NOT NULL
+         AND ss.wins >= 12 AND p.team_id IS NOT NULL
          AND (p.position = 'SP' OR p.position = 'RP')`
     ).all(leagueId, league.season_number) as Array<{
-      player_id: number; pitcher_wins: number; first_name: string; last_name: string; team_id: number;
+      player_id: number; wins: number; first_name: string; last_name: string; team_id: number;
     }>;
 
     for (const p of winChasers) {
@@ -286,7 +286,7 @@ function checkRecordChasers(leagueId: number, gameNumber: number, leagueGamesInS
         insertNewsItem({
           leagueId, seasonNumber: league.season_number, gameNumber,
           eventType: 'record_watch', teamId: p.team_id, playerId: p.player_id,
-          headlineText: `Record Watch — ${p.first_name} ${p.last_name} has ${p.pitcher_wins} wins with ${gamesRemaining} games remaining`,
+          headlineText: `Record Watch — ${p.first_name} ${p.last_name} has ${p.wins} wins with ${gamesRemaining} games remaining`,
         });
       } catch (_e) { /* non-critical */ }
     }
@@ -296,16 +296,16 @@ function checkRecordChasers(leagueId: number, gameNumber: number, leagueGamesInS
   const careerHrMilestones = [490, 585, 680];
   for (const threshold of careerHrMilestones) {
     const chasers = prepared(
-      `SELECT p.id, p.first_name, p.last_name, p.team_id, p.career_home_runs
+      `SELECT p.id, p.first_name, p.last_name, p.team_id, p.career_hr
        FROM players p
-       WHERE p.league_id = ? AND p.career_home_runs >= ? AND p.career_home_runs < ? + 20
+       WHERE p.league_id = ? AND p.career_hr >= ? AND p.career_hr < ? + 20
          AND p.team_id IS NOT NULL`
     ).all(leagueId, threshold, threshold) as Array<{
-      id: number; first_name: string; last_name: string; team_id: number; career_home_runs: number;
+      id: number; first_name: string; last_name: string; team_id: number; career_hr: number;
     }>;
     const target = threshold === 490 ? 500 : threshold === 585 ? 600 : 700;
     for (const p of chasers) {
-      const needed = target - p.career_home_runs;
+      const needed = target - p.career_hr;
       try {
         insertNewsItem({
           leagueId, seasonNumber: league.season_number, gameNumber,
@@ -363,15 +363,15 @@ function checkRecordChasers(leagueId: number, gameNumber: number, leagueGamesInS
 
   // Career strikeout milestone (2950→3000)
   const kChasers = prepared(
-    `SELECT p.id, p.first_name, p.last_name, p.team_id, p.career_strikeouts
+    `SELECT p.id, p.first_name, p.last_name, p.team_id, p.career_k
      FROM players p
-     WHERE p.league_id = ? AND p.career_strikeouts >= 2950 AND p.career_strikeouts < 3020
+     WHERE p.league_id = ? AND p.career_k >= 2950 AND p.career_k < 3020
        AND p.team_id IS NOT NULL`
   ).all(leagueId) as Array<{
-    id: number; first_name: string; last_name: string; team_id: number; career_strikeouts: number;
+    id: number; first_name: string; last_name: string; team_id: number; career_k: number;
   }>;
   for (const p of kChasers) {
-    const needed = 3000 - p.career_strikeouts;
+    const needed = 3000 - p.career_k;
     if (needed > 0) {
       try {
         insertNewsItem({

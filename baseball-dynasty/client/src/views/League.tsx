@@ -5,7 +5,7 @@ import { getStandings, getRecentGames, setSimSpeed } from '../api.js';
 // v0.5.0 Award race types
 interface AwardRaceEntry {
   award_type: string;
-  conference: string; // "American" or "National"
+  league: string; // "AL" or "NL"
   last_updated_game: number;
   leader: { player_id: number; name: string; team_id: number | null; value: number | null } | null;
   second: { player_id: number; name: string; team_id: number | null; value: number | null } | null;
@@ -17,6 +17,7 @@ interface RecordWatchNews {
   event_type: string;
   headline_text: string | null;
   game_number: number;
+  player_id: number | null;
 }
 
 // v0.5.0 Team streak (from standings, via teams endpoint)
@@ -81,10 +82,11 @@ export default function League() {
       .then((data: AwardRaceEntry[]) => setAwardRaces(data))
       .catch(() => {});
 
-    // v0.5.0: load record watch news
-    fetch('/api/news?event_type=record_watch&limit=10')
+    // v0.5.0: load record watch news (filter client-side since /api/news ignores event_type param)
+    fetch('/api/news?limit=50')
       .then(r => r.ok ? r.json() : [])
-      .then((data: RecordWatchNews[]) => setRecordWatchers(data))
+      .then((data: RecordWatchNews[]) =>
+        setRecordWatchers(data.filter(n => n.event_type === 'record_watch')))
       .catch(() => {});
 
     // v0.5.0: load team streaks
@@ -239,7 +241,7 @@ export default function League() {
             {recordWatchers.slice(0, 3).map(n => (
               <div
                 key={n.id}
-                data-testid={`record-watch-${n.id}`}
+                data-testid={`record-watch-${n.player_id ?? n.id}`}
                 style={{ fontSize: '12px', color: '#e2e8f0', marginBottom: '4px' }}
               >
                 {n.headline_text ?? n.event_type}
@@ -252,19 +254,19 @@ export default function League() {
         {awardRaces.length > 0 && (
           <div data-testid="award-races-panel" style={{ background: '#1e293b', borderRadius: '8px', padding: '12px', marginBottom: '16px' }}>
             <div style={{ fontSize: '12px', color: '#94a3b8', fontWeight: 'bold', marginBottom: '8px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Award Races</div>
-            {['American', 'National'].map(conf => {
-              const confRaces = awardRaces.filter(r => r.conference === conf);
+            {['AL', 'NL'].map(conf => {
+              const confRaces = awardRaces.filter(r => r.league === conf);
               if (confRaces.length === 0) return null;
               return (
                 <div key={conf} style={{ marginBottom: '10px' }}>
-                  <div style={{ fontSize: '12px', color: '#60a5fa', marginBottom: '4px' }}>{conf.substring(0, 2)} League</div>
+                  <div style={{ fontSize: '12px', color: '#60a5fa', marginBottom: '4px' }}>{conf} League</div>
                   {confRaces.map(race => (
                     <div
-                      key={`${race.award_type}-${race.conference}`}
+                      key={`${race.award_type}-${race.league}`}
                       data-testid={
-                        race.award_type === 'mvp' ? `mvp-race-${race.conference}`
-                        : race.award_type === 'cy_young' ? `cy-young-race-${race.conference}`
-                        : `roy-race-${race.conference}`
+                        race.award_type === 'mvp' ? `mvp-race-${race.league}`
+                        : race.award_type === 'cy_young' ? `cy-young-race-${race.league}`
+                        : `roy-race-${race.league}`
                       }
                       style={{ fontSize: '12px', marginBottom: '6px' }}
                     >

@@ -38,14 +38,22 @@ function computeAttendance(
   // Is playoff race? — approximate: within 5 games of top 4 in conference
   const isPlayoffRace = false; // simplified for per-game view
 
+  // Look up the opponent for the most recent game involving this team
+  const oppRow = prepared(
+    `SELECT CASE WHEN home_team_id = ? THEN away_team_id ELSE home_team_id END AS opp
+     FROM game_log
+     WHERE league_id = ? AND (home_team_id = ? OR away_team_id = ?)
+     ORDER BY game_number DESC LIMIT 1`
+  ).get(homeTeamId, leagueId, homeTeamId, homeTeamId) as { opp: number } | undefined;
+  const opponentTeamId = oppRow?.opp;
+
+  // Determine if this is a rivalry game based on the opponent
+  const isRivalry = opponentTeamId !== undefined && rivalOpponentIds.includes(opponentTeamId);
+
   // Use the shared function
   const rate = computeAttendanceRate(
-    team,
-    rivalOpponentIds,
-    isPlayoffRace,
-    false, // per-game honeymoon handled by the column in TeamRow
-    hasStarPlayer,
-    false // specific rivalry game detection would need the opponent ID
+    team, rivalOpponentIds, isPlayoffRace, false, hasStarPlayer,
+    isRivalry, opponentTeamId
   );
 
   // Add jitter for per-game variation

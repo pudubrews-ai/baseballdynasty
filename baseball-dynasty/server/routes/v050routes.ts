@@ -137,8 +137,8 @@ v050Router.get('/international/prospects', (_req: Request, res: Response, next: 
     if (!league) { res.json([]); return; }
 
     const rows = prepared(
-      `SELECT ip.id, ip.name, ip.age, ip.position, ip.origin_country,
-              ip.scouted_overall, ip.potential, ip.signing_bonus_ask,
+      `SELECT ip.id, ip.name, ip.age, ip.origin_country,
+              ip.scouted_overall, ip.potential,
               ip.signed, ip.signing_team_id,
               t.name AS signing_team_name, t.city AS signing_team_city
        FROM international_prospects ip
@@ -146,8 +146,8 @@ v050Router.get('/international/prospects', (_req: Request, res: Response, next: 
        WHERE ip.league_id = ? AND ip.season_number = ?
        ORDER BY ip.scouted_overall DESC`
     ).all(league.id, league.season_number) as Array<{
-      id: number; name: string; age: number; position: string; origin_country: string;
-      scouted_overall: number; potential: string | null; signing_bonus_ask: number;
+      id: number; name: string; age: number; origin_country: string;
+      scouted_overall: number; potential: string | null;
       signed: number; signing_team_id: number | null;
       signing_team_name: string | null; signing_team_city: string | null;
     }>;
@@ -157,12 +157,10 @@ v050Router.get('/international/prospects', (_req: Request, res: Response, next: 
       id: r.id,
       name: r.name,
       age: r.age,
-      position: r.position,
       origin_country: r.origin_country,
       scouted_overall: r.scouted_overall,
       // potential visible only if signed (revealed on signing)
       potential: r.signed === 1 ? r.potential : null,
-      signing_bonus_ask: r.signing_bonus_ask,
       signed: r.signed === 1,
       signing_team: r.signing_team_id ? {
         id: r.signing_team_id,
@@ -186,16 +184,16 @@ v050Router.get('/international/signings', (_req: Request, res: Response, next: N
     if (!league) { res.json([]); return; }
 
     const rows = prepared(
-      `SELECT ip.id, ip.name, ip.age, ip.position, ip.origin_country,
-              ip.scouted_overall, ip.signing_bonus_ask, ip.signing_team_id,
+      `SELECT ip.id, ip.name, ip.age, ip.origin_country,
+              ip.scouted_overall, ip.signing_team_id,
               t.name AS team_name, t.city AS team_city
        FROM international_prospects ip
        JOIN teams t ON t.id = ip.signing_team_id
        WHERE ip.league_id = ? AND ip.season_number = ? AND ip.signed = 1
-       ORDER BY ip.signing_bonus_ask DESC`
+       ORDER BY ip.scouted_overall DESC`
     ).all(league.id, league.season_number) as Array<{
-      id: number; name: string; age: number; position: string; origin_country: string;
-      scouted_overall: number; signing_bonus_ask: number; signing_team_id: number;
+      id: number; name: string; age: number; origin_country: string;
+      scouted_overall: number; signing_team_id: number;
       team_name: string; team_city: string;
     }>;
 
@@ -204,10 +202,8 @@ v050Router.get('/international/signings', (_req: Request, res: Response, next: N
       id: r.id,
       name: r.name,
       age: r.age,
-      position: r.position,
       origin_country: r.origin_country,
       scouted_overall: r.scouted_overall,
-      signing_bonus: r.signing_bonus_ask,
       team: { id: r.signing_team_id, name: r.team_name, city: r.team_city },
     }));
 
@@ -318,7 +314,7 @@ v050Router.get('/awards/current', (_req: Request, res: Response, next: NextFunct
     if (!league) { res.json([]); return; }
 
     const rows = prepared(
-      `SELECT ar.award_type, ar.league AS conference, ar.leader_player_id,
+      `SELECT ar.award_type, ar.league AS league, ar.leader_player_id,
               ar.leader_value, ar.second_player_id, ar.second_value, ar.last_updated_game,
               lp.first_name AS leader_first, lp.last_name AS leader_last,
               lp.team_id AS leader_team_id, lp.position AS leader_position,
@@ -330,7 +326,7 @@ v050Router.get('/awards/current', (_req: Request, res: Response, next: NextFunct
        WHERE ar.league_id = ? AND ar.season_number = ?
        ORDER BY ar.award_type ASC, ar.league ASC`
     ).all(league.id, league.season_number) as Array<{
-      award_type: string; conference: string;
+      award_type: string; league: string;
       leader_player_id: number | null; leader_value: number | null;
       second_player_id: number | null; second_value: number | null;
       last_updated_game: number;
@@ -341,7 +337,7 @@ v050Router.get('/awards/current', (_req: Request, res: Response, next: NextFunct
 
     res.json(rows.map(r => ({
       award_type: r.award_type,
-      conference: r.conference, // "American" or "National" (Orchestrator Decision 2)
+      league: r.league === 'American' ? 'AL' : r.league === 'National' ? 'NL' : r.league,
       last_updated_game: r.last_updated_game,
       leader: r.leader_player_id ? {
         player_id: r.leader_player_id,
@@ -370,7 +366,7 @@ v050Router.get('/awards/history', (_req: Request, res: Response, next: NextFunct
     if (!league) { res.json([]); return; }
 
     const rows = prepared(
-      `SELECT aw.id, aw.season_number, aw.award_type, aw.league AS conference,
+      `SELECT aw.id, aw.season_number, aw.award_type, aw.league AS league,
               aw.player_id, aw.vote_share,
               p.first_name, p.last_name, p.team_id, p.position,
               t.name AS team_name, t.city AS team_city
@@ -380,7 +376,7 @@ v050Router.get('/awards/history', (_req: Request, res: Response, next: NextFunct
        WHERE aw.league_id = ?
        ORDER BY aw.season_number DESC, aw.award_type ASC, aw.league ASC`
     ).all(league.id) as Array<{
-      id: number; season_number: number; award_type: string; conference: string;
+      id: number; season_number: number; award_type: string; league: string;
       player_id: number; vote_share: number;
       first_name: string | null; last_name: string | null;
       team_id: number | null; position: string | null;
@@ -392,7 +388,7 @@ v050Router.get('/awards/history', (_req: Request, res: Response, next: NextFunct
       id: r.id,
       season_number: r.season_number,
       award_type: r.award_type,
-      conference: r.conference,
+      league: r.league === 'American' ? 'AL' : r.league === 'National' ? 'NL' : r.league,
       vote_share: r.vote_share,
       player: {
         id: r.player_id,
@@ -418,13 +414,13 @@ v050Router.get('/teams/:id/stadium', (req: Request, res: Response, next: NextFun
     if (!league) { res.status(400).json({ error: 'no active league' }); return; }
 
     const team = prepared(
-      `SELECT id, name, city, market_size, stadium_name, stadium_capacity,
+      `SELECT id, name, city, market_size, stadium_capacity,
               stadium_upgrade_in_progress, stadium_upgrade_complete_season,
               stadium_upgrade_type, new_stadium_honeymoon_seasons_remaining
        FROM teams WHERE id = ? AND league_id = ?`
     ).get(teamId, league.id) as {
       id: number; name: string; city: string; market_size: string;
-      stadium_name: string | null; stadium_capacity: number;
+      stadium_capacity: number;
       stadium_upgrade_in_progress: number; stadium_upgrade_complete_season: number | null;
       stadium_upgrade_type: string | null; new_stadium_honeymoon_seasons_remaining: number;
     } | undefined;
@@ -445,7 +441,7 @@ v050Router.get('/teams/:id/stadium', (req: Request, res: Response, next: NextFun
     res.json({
       team_id: team.id,
       team_name: `${team.city} ${team.name}`,
-      stadium_name: team.stadium_name,
+      stadium_name: `${team.city} ${team.name} Park`,
       stadium_capacity: team.stadium_capacity,
       upgrade_in_progress: team.stadium_upgrade_in_progress === 1,
       upgrade_complete_season: team.stadium_upgrade_complete_season,

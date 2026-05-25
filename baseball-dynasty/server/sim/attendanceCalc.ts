@@ -14,6 +14,7 @@ import type { TeamRow } from '../db.js';
  * @param isNewStadiumHoneymoon - True if team is in new stadium honeymoon (overrides the column check)
  * @param hasStarPlayer - True if team has any player with overall_rating >= 85
  * @param isRivalryGame - True for a specific game that is a rivalry matchup (not season average)
+ * @param opponentTeamId - Optional opponent team ID; when provided, checked against rivalOpponentIds
  */
 export function computeAttendanceRate(
   team: TeamRow,
@@ -21,7 +22,8 @@ export function computeAttendanceRate(
   isPlayoffRace: boolean,
   isNewStadiumHoneymoon: boolean,
   hasStarPlayer: boolean,
-  isRivalryGame: boolean = false
+  isRivalryGame: boolean = false,
+  opponentTeamId?: number
 ): number {
   // Base attendance rate from market size
   const baseRates: Record<string, number> = {
@@ -37,7 +39,9 @@ export function computeAttendanceRate(
   else if (winPct < 0.45) winningModifier = 0.92;
 
   // Rivalry modifier: +15% for rivalry matchups
-  const rivalryModifier = isRivalryGame ? 1.15 : 1.0;
+  const rivalryActive = isRivalryGame ||
+    (opponentTeamId !== undefined && rivalOpponentIds.includes(opponentTeamId));
+  const rivalryModifier = rivalryActive ? 1.15 : 1.0;
 
   // Playoff race modifier: +10% when within 5 games of a playoff spot
   const playoffRaceModifier = isPlayoffRace ? 1.10 : 1.0;

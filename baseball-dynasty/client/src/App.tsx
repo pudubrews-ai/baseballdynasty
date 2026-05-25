@@ -235,7 +235,7 @@ function AppContent() {
                 : tab.id === 'timeline' ? 'timeline-tab'
                 : tab.id === 'halloffame' ? 'halloffame-tab'
                 : tab.id === 'minors' ? 'minors-tab'
-                : tab.id === 'yourfranchise' ? 'your-franchise-tab-nav'
+                : tab.id === 'yourfranchise' ? 'your-franchise-tab'
                 : `nav-${tab.id}`
               }
               onClick={() => {
