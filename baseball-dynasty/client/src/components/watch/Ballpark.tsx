@@ -137,7 +137,16 @@ export default function Ballpark({
         </g>
       )}
 
-      {/* Outfield wall */}
+      {/* Crowd sections — rendered BEFORE outfield wall so the wall paints over
+          their lower edge, making them appear as bleachers behind the wall.
+          fillPct=0 during offseason shows dark empty seats; fills during games. */}
+      <g data-testid="watch-crowd">
+        <CrowdSection cx={W * 0.22} cy={H * 0.52} width={120} height={60} fillPct={isGameActive ? attendancePct : 0} color={crowdColor} />
+        <CrowdSection cx={W * 0.5}  cy={H * 0.44} width={160} height={55} fillPct={isGameActive ? attendancePct : 0} color={crowdColor} />
+        <CrowdSection cx={W * 0.78} cy={H * 0.52} width={120} height={60} fillPct={isGameActive ? attendancePct : 0} color={crowdColor} />
+      </g>
+
+      {/* Outfield wall — paints over the lower portion of crowd sections */}
       <path d={`M 30 ${H * 0.6} Q ${W / 2} ${H * 0.35} ${W - 30} ${H * 0.6}`} fill="#264d1a" stroke="#1a3410" strokeWidth={3} />
 
       {/* Field surface */}
@@ -164,13 +173,6 @@ export default function Ballpark({
 
       {/* Pitcher's mound */}
       <ellipse cx={W / 2} cy={H * 0.77} rx={14} ry={8} fill="#9a7040" />
-
-      {/* Crowd sections — always visible (empty seats shown in offseason, fills during games) */}
-      <g data-testid="watch-crowd">
-        <CrowdSection cx={W * 0.22} cy={H * 0.52} width={120} height={60} fillPct={isGameActive ? attendancePct : 0} color={crowdColor} />
-        <CrowdSection cx={W * 0.5}  cy={H * 0.44} width={160} height={55} fillPct={isGameActive ? attendancePct : 0} color={crowdColor} />
-        <CrowdSection cx={W * 0.78} cy={H * 0.52} width={120} height={60} fillPct={isGameActive ? attendancePct : 0} color={crowdColor} />
-      </g>
 
       {/* Owned park glow */}
       {isOwnedPark && (
