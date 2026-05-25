@@ -314,6 +314,11 @@ teamsRouter.get('/:id/history', async (req: Request, res: Response, next: NextFu
       season_number: number; created_at: number; interim: number;
     }>;
 
+    // Get current team's manager/GM name for open-tenure entry (P3 residual: include active incumbent)
+    const currentTeamNames = prepared(
+      'SELECT manager_name, gm_name, interim_manager, interim_gm FROM teams WHERE id = ?'
+    ).get(teamId) as { manager_name: string | null; gm_name: string | null; interim_manager: number; interim_gm: number } | undefined;
+
     // Build manager history — each fired manager + aggregated record from franchise_season_history
     // Spec interpretation (documented): tenure_games is approximated from full seasons under that manager.
     // We use manager_name stored in franchise_season_history per season to attribute W/L.
@@ -332,6 +337,27 @@ teamsRouter.get('/:id/history', async (req: Request, res: Response, next: NextFu
         interim: ev.interim === 1,
       };
     });
+
+    // P3 residual: append active incumbent manager if not already in the list
+    if (currentTeamNames?.manager_name) {
+      const incumbentManagerName = currentTeamNames.manager_name
+        .replace(/^\[EJECTED\]\s*/, '').replace(/^\[INTERIM\]\s*/, '');
+      const alreadyListed = managerHistory.some(m => m.name === incumbentManagerName);
+      if (!alreadyListed) {
+        const incumbentSeasons = prepared(
+          `SELECT SUM(wins) as wins, SUM(losses) as losses, COUNT(*) as seasons
+           FROM franchise_season_history WHERE team_id = ? AND manager_name = ?`
+        ).get(teamId, incumbentManagerName) as { wins: number; losses: number; seasons: number } | undefined;
+        managerHistory.push({
+          name: incumbentManagerName,
+          tenure_seasons: incumbentSeasons?.seasons ?? 0,
+          tenure_games: (incumbentSeasons?.wins ?? 0) + (incumbentSeasons?.losses ?? 0),
+          record: { wins: incumbentSeasons?.wins ?? 0, losses: incumbentSeasons?.losses ?? 0 },
+          reason: 'current',
+          interim: currentTeamNames.interim_manager === 1,
+        });
+      }
+    }
 
     // GM history — same pattern
     const gmEvents = prepared(
@@ -360,6 +386,25 @@ teamsRouter.get('/:id/history', async (req: Request, res: Response, next: NextFu
         interim: ev.interim === 1,
       };
     });
+
+    // P3 residual: append active incumbent GM if not already in the list
+    if (currentTeamNames?.gm_name) {
+      const alreadyListedGm = gmHistory.some(g => g.name === currentTeamNames.gm_name);
+      if (!alreadyListedGm) {
+        const incumbentGmSeasons = prepared(
+          `SELECT SUM(wins) as wins, SUM(losses) as losses, COUNT(*) as seasons
+           FROM franchise_season_history WHERE team_id = ? AND gm_name = ?`
+        ).get(teamId, currentTeamNames.gm_name) as { wins: number; losses: number; seasons: number } | undefined;
+        gmHistory.push({
+          name: currentTeamNames.gm_name,
+          tenure_seasons: incumbentGmSeasons?.seasons ?? 0,
+          tenure_games: (incumbentGmSeasons?.wins ?? 0) + (incumbentGmSeasons?.losses ?? 0),
+          record: { wins: incumbentGmSeasons?.wins ?? 0, losses: incumbentGmSeasons?.losses ?? 0 },
+          reason: 'current',
+          interim: currentTeamNames.interim_gm === 1,
+        });
+      }
+    }
 
     // Owner history
     const ownerEvents = prepared(

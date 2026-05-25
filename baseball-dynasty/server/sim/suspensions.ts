@@ -426,7 +426,8 @@ function triggerBrawl(
 
   // Manager suspended 5-7 games (mark in team name as interim flag)
   const managerSusp = 5 + Math.floor(rng() * 3);
-  db.prepare("UPDATE teams SET manager_name = '[EJECTED] ' || COALESCE(manager_name, 'Manager') WHERE id = ?")
+  // N1: strip any existing [EJECTED]/[INTERIM] prefix before prepending to avoid accretion
+  db.prepare("UPDATE teams SET manager_name = '[EJECTED] ' || REPLACE(REPLACE(COALESCE(manager_name, 'Manager'), '[EJECTED] ', ''), '[INTERIM] ', '') WHERE id = ?")
     .run(teamId);
 
   insertNewsItem({

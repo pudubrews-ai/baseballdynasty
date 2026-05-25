@@ -58,6 +58,7 @@ directivesRouter.get('/status', async (_req: Request, res: Response, next: NextF
         targetPlayer: { available: false, reason: 'no_franchise' },
         fireManager: { available: false, reason: 'no_franchise' },
         trustProcess: { available: false, reason: 'no_franchise' },
+        addressClubhouse: { available: false, reason: 'no_franchise', suggested: false },
       });
       return;
     }
@@ -70,6 +71,13 @@ directivesRouter.get('/status', async (_req: Request, res: Response, next: NextF
     const fireManagerIssued = hasDirectiveThisSeason(lid, season, 'fire_manager');
     const trustProcessIssued = hasDirectiveThisSeason(lid, season, 'trust_process');
     const targetPlayerCount = countDirectiveThisSeason(lid, season, 'target_player');
+
+    // NF-4: Address the Clubhouse — available when owned-team chemistry < 25, one-time use, no cooldown cost
+    const addressClubhouseIssued = hasDirectiveThisSeason(lid, season, 'address_clubhouse');
+    const ownedTeamChemistry = (prepared(
+      'SELECT chemistry_score FROM teams WHERE id = ?'
+    ).get(fs.owned_team_id) as { chemistry_score: number } | undefined)?.chemistry_score ?? 50;
+    const clubhouseSuggested = ownedTeamChemistry < 25;
 
     res.json({
       goForIt: {
@@ -91,6 +99,12 @@ directivesRouter.get('/status', async (_req: Request, res: Response, next: NextF
       trustProcess: {
         available: !trustProcessIssued && fs.fire_manager_season !== season,
         reason: trustProcessIssued ? 'cooldown' : fs.fire_manager_season === season ? 'fire_manager_issued' : null,
+      },
+      // NF-4: Address the Clubhouse — suggested when chemistry < 25, available once per season
+      addressClubhouse: {
+        available: !addressClubhouseIssued,
+        reason: addressClubhouseIssued ? 'cooldown' : null,
+        suggested: clubhouseSuggested,
       },
     });
   } catch (err) { next(err); }
@@ -342,6 +356,70 @@ directivesRouter.post('/trust-process', async (req: Request, res: Response, next
 
     const newConf = getFranchiseState(lid)?.gm_confidence ?? 100;
     res.json({ ok: true, gmConfidence: newConf });
+  } catch (err) {
+    if (isUniqueConstraintError(err)) { res.status(409).json({ error: 'cooldown' }); return; }
+    next(err);
+  }
+});
+
+// POST /api/directive/address-clubhouse — NF-4
+// One-time use, no cooldown cost. Clears all active trade demands on the owned team
+// (accelerates resolution per spec line 360 + edge case spec line 504).
+// CB-1: team derived from franchise_state, NOT the body.
+directivesRouter.post('/address-clubhouse', (req: Request, res: Response, next: NextFunction): void => {
+  try {
+    const bodyResult = emptyBody().safeParse(req.body ?? {});
+    if (!bodyResult.success) { res.status(400).json({ error: 'invalid_body' }); return; }
+
+    const ctx = getLeagueAndFranchise(res);
+    if (!ctx) return;
+    const { league, ownedTeamId } = ctx;
+    const season = league.season_number;
+    const lid = league.id;
+    const currentGameNumber = league.current_game_number;
+
+    if (hasDirectiveThisSeason(lid, season, 'address_clubhouse')) {
+      res.status(409).json({ error: 'cooldown' }); return;
+    }
+
+    const chemRow = prepared('SELECT chemistry_score FROM teams WHERE id = ?').get(ownedTeamId) as { chemistry_score: number } | undefined;
+    const chemistry = chemRow?.chemistry_score ?? 50;
+
+    recordDirective(lid, season, 'address_clubhouse', currentGameNumber);
+
+    // Effect: accelerate trade demand resolution — immediately clear all active trade demands
+    // on the owned team's 25-man roster, restoring any applied penalties (spec line 360)
+    const demandingPlayers = prepared(
+      `SELECT id, trade_demand_penalty_applied FROM players
+       WHERE league_id = ? AND team_id = ? AND trade_demand_active = 1 AND is_on_25man = 1`
+    ).all(lid, ownedTeamId) as Array<{ id: number; trade_demand_penalty_applied: number }>;
+
+    for (const p of demandingPlayers) {
+      prepared(
+        `UPDATE players
+         SET contact = MIN(99, contact + CASE WHEN trade_demand_penalty_applied = 1 THEN 3 ELSE 0 END),
+             power   = MIN(99, power   + CASE WHEN trade_demand_penalty_applied = 1 THEN 3 ELSE 0 END),
+             speed   = MIN(99, speed   + CASE WHEN trade_demand_penalty_applied = 1 THEN 3 ELSE 0 END),
+             fielding = MIN(99, fielding + CASE WHEN trade_demand_penalty_applied = 1 THEN 3 ELSE 0 END),
+             overall_rating = MIN(99, overall_rating + CASE WHEN trade_demand_penalty_applied = 1 THEN 3 ELSE 0 END),
+             trade_demand_active = 0,
+             trade_demand_since_game = NULL,
+             trade_demand_penalty_applied = 0
+         WHERE id = ?`
+      ).run(p.id);
+    }
+
+    const ownedTeamRow = prepared('SELECT id, city, name FROM teams WHERE id = ?').get(ownedTeamId) as { id: number; city: string; name: string } | undefined;
+
+    insertNewsItem({
+      leagueId: lid, seasonNumber: season, gameNumber: currentGameNumber,
+      eventType: 'milestone', teamId: ownedTeamId,
+      headlineText: `Owner addresses the clubhouse — ${ownedTeamRow ? `${ownedTeamRow.city} ${ownedTeamRow.name}` : 'team'} trade demands resolved.`,
+      detailsJson: JSON.stringify({ kind: 'address_clubhouse', chemistry, demands_cleared: demandingPlayers.length }),
+    });
+
+    const newConf = getFranchiseState(lid)?.gm_confidence ?? 100;
+    res.json({ ok: true, gmConfidence: newConf, demandsClearedCount: demandingPlayers.length });
   } catch (err) {
     if (isUniqueConstraintError(err)) { res.status(409).json({ error: 'cooldown' }); return; }
     next(err);

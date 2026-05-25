@@ -283,14 +283,14 @@ async function runSeasonArchiveStep(leagueId: number, seasonNumber: number, worl
 }
 
 // =========================================================
-// Step 7 stub: HOF Voting — filled in by Step 7 implementation
+// Step 7: HOF Voting — fully implemented below
 // =========================================================
 async function runHofVotingStep(leagueId: number, seasonNumber: number, worldgenSeed: number): Promise<void> {
   await runHofVoting(leagueId, seasonNumber, worldgenSeed);
 }
 
 // =========================================================
-// Step 5 stub: Financial Update — filled in by Step 5 implementation
+// Step 5: Financial Update — fully implemented below
 // =========================================================
 async function runFinancialUpdateStep(leagueId: number, seasonNumber: number, seed: number): Promise<void> {
   await runFinancialUpdate(leagueId, seasonNumber, seed);
@@ -622,6 +622,8 @@ function runBallotVoting(db: ReturnType<typeof getDb>, leagueId: number, seasonN
   });
 
   const toInduct = inductionCandidates.slice(0, 3);
+  const inductedPlayerIds = new Set(toInduct.map(c => c.player_id));
+
   for (const c of toInduct) {
     const stats = computeCareerStats(db, leagueId, c.player_id);
     const pedFlag = ballotPlayers.find(b => b.player_id === c.player_id)?.ped_flag ?? 0;
@@ -637,6 +639,13 @@ function runBallotVoting(db: ReturnType<typeof getDb>, leagueId: number, seasonN
     // Remove from ballot
     db.prepare('DELETE FROM hof_ballot WHERE league_id = ? AND player_id = ?').run(leagueId, c.player_id);
   }
+
+  // E-2: unconditionally remove any ballot player at years_on_ballot >= 10 who was NOT inducted
+  // (covers the case where a year-10 player cleared 75% but was cut by the max-3 cap)
+  // Query the post-update values since the DB was already updated above.
+  db.prepare(
+    'DELETE FROM hof_ballot WHERE league_id = ? AND years_on_ballot >= 10'
+  ).run(leagueId);
 }
 
 function runVeteransCommittee(db: ReturnType<typeof getDb>, leagueId: number, seasonNumber: number, worldgenSeed: number): void {
@@ -670,6 +679,40 @@ function runVeteransCommittee(db: ReturnType<typeof getDb>, leagueId: number, se
     );
     console.log(`[offseason] Veterans committee inducted tragedy victim player ${pick.id} for season ${seasonNumber}`);
   }
+}
+
+// NF-7: Try to hire a franchise legend (coaching candidate with 10+ seasons on this team) as manager.
+// Returns the candidate's name if hired (and updates coaching_candidates), or null if none found.
+function tryHireFranchiseLegendManager(
+  db: ReturnType<typeof getDb>,
+  leagueId: number,
+  teamId: number,
+  seasonNumber: number
+): string | null {
+  // Find coaching candidates who played 10+ seasons for this team (franchise legend)
+  // Use franchise_player_season to count seasons as a member of this franchise.
+  const legend = db.prepare(
+    `SELECT cc.id, cc.player_id, p.first_name, p.last_name, cc.coaching_rating
+     FROM coaching_candidates cc
+     JOIN players p ON p.id = cc.player_id
+     WHERE cc.league_id = ? AND cc.available = 1
+       AND (
+         SELECT COUNT(DISTINCT fps.season_number)
+         FROM franchise_player_season fps
+         WHERE fps.player_id = cc.player_id AND fps.team_id = ?
+       ) >= 10
+     ORDER BY cc.coaching_rating DESC
+     LIMIT 1`
+  ).get(leagueId, teamId) as { id: number; player_id: number; first_name: string; last_name: string; coaching_rating: number } | undefined;
+
+  if (!legend) return null;
+
+  // Mark as hired
+  db.prepare(
+    'UPDATE coaching_candidates SET available = 0, hired_team_id = ?, hired_season = ? WHERE id = ?'
+  ).run(teamId, seasonNumber, legend.id);
+
+  return `${legend.first_name} ${legend.last_name}`;
 }
 
 // Step 1: Retirement — players age 40+ retire
@@ -1124,8 +1167,24 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
 
     // Manager fired if job_security < 3 (60% chance)
     if (team.job_security < 3 && rng() < 0.6) {
-      const newFirst = ['Bob', 'Tom', 'Mike', 'Dave', 'Jim'][Math.floor(rng() * 5)] ?? 'Bob';
-      const newLast = ['Johnson', 'Smith', 'Williams', 'Brown', 'Jones'][Math.floor(rng() * 5)] ?? 'Johnson';
+      // NF-7: First check if a franchise legend (10+ seasons) is available in coaching pool
+      const legendName = tryHireFranchiseLegendManager(db, leagueId, team.id, seasonNumber);
+      let newFirst: string;
+      let newLast: string;
+      let hiredContext: string;
+      let isReturningHero = false;
+
+      if (legendName) {
+        const parts = legendName.split(' ');
+        newFirst = parts[0] ?? 'Legend';
+        newLast = parts.slice(1).join(' ') || 'Manager';
+        hiredContext = 'Returning franchise legend';
+        isReturningHero = true;
+      } else {
+        newFirst = ['Bob', 'Tom', 'Mike', 'Dave', 'Jim'][Math.floor(rng() * 5)] ?? 'Bob';
+        newLast = ['Johnson', 'Smith', 'Williams', 'Brown', 'Jones'][Math.floor(rng() * 5)] ?? 'Johnson';
+        hiredContext = 'Hired in offseason';
+      }
       const newStyle = MANAGER_STYLES[Math.floor(rng() * 3)] ?? 'balanced';
 
       const mgrReason = `Fired after going ${team.wins}-${team.losses} through ${team.games_played} games (Season ${seasonNumber})`;
@@ -1137,7 +1196,7 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
         team.manager_name,
         `${newFirst} ${newLast}`,
         `${team.manager_name} fired after poor performance. ${newFirst} ${newLast} hired as new manager.`,
-        mgrReason, 'Hired in offseason', Date.now()
+        mgrReason, hiredContext, Date.now()
       );
 
       // §1.1(e): Insert offseason manager firing news item
@@ -1161,6 +1220,15 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
       db.prepare(
         'UPDATE teams SET manager_name = ?, manager_style = ?, job_security = 5, interim_manager = 0 WHERE id = ?'
       ).run(`${newFirst} ${newLast}`, newStyle, team.id);
+
+      // NF-7: "returning hero" news item for franchise legend hired as manager
+      if (isReturningHero) {
+        insertFrontOfficeNewsItem({
+          leagueId, seasonNumber, gameNumber: 0, eventType: 'manager_fired', teamId: team.id,
+          headlineText: `${newFirst} ${newLast} returns home — franchise legend hired as manager of ${team.city} ${team.name}.`,
+          detailsJson: JSON.stringify({ kind: 'returning_hero_hire', managerName: `${newFirst} ${newLast}`, teamId: team.id }),
+        });
+      }
     } else {
       // Reduce job security by win rate; clear interim_manager flag at offseason
       const winPct = team.wins / Math.max(1, team.wins + team.losses);

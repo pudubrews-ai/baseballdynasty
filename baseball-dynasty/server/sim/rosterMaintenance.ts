@@ -31,6 +31,7 @@ import { runCascadeEval, updateMinorStandings } from './cascade.js';
 import { seedFor as _seedFor } from './prng.js';
 import { decrementSuspensions } from './suspensions.js';
 import { recalcChemistry, checkMalcontentPressure, applyTradeDemandPenalties } from './personality.js';
+import { reaggravationRisk } from './injury.js';
 
 // AB-NULL §4.3: One-time self-heal for carried-over DBs with stale is_on_25man on null-team players.
 // Called once per runRosterMaintenance invocation — cheap (no-op if already clean).
@@ -125,11 +126,15 @@ export function runRosterMaintenance(
     }
 
     // Step 13: Chemistry recalc (per-team clock gated inside recalcChemistry)
-    // and trade demand penalty check
+    // malcontent pressure check, and trade demand penalty check
     try {
       const allTeamsForChem = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
+      const leagueForPersonality = prepared('SELECT season_number FROM leagues WHERE id = ?').get(leagueId) as { season_number: number } | undefined;
+      const seasonForPersonality = leagueForPersonality?.season_number ?? 1;
       for (const t of allTeamsForChem) {
         recalcChemistry(leagueId, t.id, gameNumber);
+        // NF-2: call checkMalcontentPressure every 10 games (GM confidence -5 if malcontent not moved)
+        checkMalcontentPressure(leagueId, seasonForPersonality, gameNumber, t);
       }
       applyTradeDemandPenalties(leagueId, gameNumber);
     } catch (err) {
@@ -316,12 +321,15 @@ export function runRosterMaintenance(
     //    Decrement rehab_games_remaining each tick.
     //    Reaggravation check (seeded, skip for tier='day_to_day' or 'season_ending').
     const inRehab = prepared(
-      `SELECT id, injury_tier, rehab_games_remaining, injury_return_game
-       FROM players
-       WHERE league_id = ? AND is_injured = 1 AND minor_level = 'AAA'
-         AND rehab_games_remaining > 0`
+      `SELECT p.id, p.injury_tier, p.rehab_games_remaining, p.injury_return_game,
+              COALESCE(t.medical_staff_rating, 5) as medical_staff_rating
+       FROM players p
+       LEFT JOIN teams t ON t.id = p.team_id
+       WHERE p.league_id = ? AND p.is_injured = 1 AND p.minor_level = 'AAA'
+         AND p.rehab_games_remaining > 0`
     ).all(leagueId) as Array<{
       id: number; injury_tier: string | null; rehab_games_remaining: number; injury_return_game: number | null;
+      medical_staff_rating: number;
     }>;
 
     for (const p of inRehab) {
@@ -333,9 +341,9 @@ export function runRosterMaintenance(
       let newReturn = p.injury_return_game;
 
       if (!skipReaggrav) {
-        // 15% reaggravation (seeded by playerId + gameNumber)
+        // NF-3-rehab: use medical-staff-modified reaggravation risk (spec line 254)
         const rng = _seedFor('reaggrav', p.id ^ (gameNumber * 997));
-        const risk = 0.15; // base; medical staff modifier applied at injury time (not here)
+        const risk = reaggravationRisk(p.medical_staff_rating);
         if (rng() < risk) {
           // Extend IL by 50% (apply to return_game, NOT to rehab_games past 15)
           const currentReturn = newReturn ?? gameNumber;

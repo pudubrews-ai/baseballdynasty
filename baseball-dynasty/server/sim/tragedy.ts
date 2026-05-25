@@ -211,7 +211,8 @@ function resolveTragedy(
       // Manager death: +2% "play for him" for 15 games
       applyTeamMoraleEffect(db, subject.teamId, 200, 15, gameNumber);
       // Set bench-coach interim flag (mark manager_name as 'Interim' + bench coach)
-      prepared("UPDATE teams SET manager_name = '[INTERIM] ' || COALESCE(manager_name, 'Unknown') WHERE id = ?")
+      // N1: strip any existing [EJECTED]/[INTERIM] prefix before prepending to avoid accretion
+      prepared("UPDATE teams SET manager_name = '[INTERIM] ' || REPLACE(REPLACE(COALESCE(manager_name, 'Unknown'), '[EJECTED] ', ''), '[INTERIM] ', '') WHERE id = ?")
         .run(subject.teamId);
     } else {
       // Player death: -3% win prob for 10 games
@@ -220,16 +221,18 @@ function resolveTragedy(
   }
 
   // 4. Insert pinned news item with fallback (badge = 'FRONT OFFICE', never empty — J-3)
+  // NF-1: set pinned_until_game = gameNumber + 5 so tragedy item stays top of /api/news for 5 ticks
   const newsResult = db.prepare(
     `INSERT INTO news_items
        (league_id, season_number, game_number, created_at, event_type, badge,
-        team_id, player_id, headline_text, is_headline_pending, details_json)
-     VALUES (?, ?, ?, ?, 'manager_resigned', 'FRONT OFFICE', ?, ?, ?, 0, ?)`
+        team_id, player_id, headline_text, is_headline_pending, details_json, pinned_until_game)
+     VALUES (?, ?, ?, ?, 'manager_resigned', 'FRONT OFFICE', ?, ?, ?, 0, ?, ?)`
   ).run(
     leagueId, seasonNumber, gameNumber, Date.now(),
     subject.teamId, subject.playerId,
     obituary,
-    JSON.stringify({ tragedy: true, subject_name: subject.playerName, team_name: teamName })
+    JSON.stringify({ tragedy: true, subject_name: subject.playerName, team_name: teamName }),
+    gameNumber + 5
   );
   const newsItemId = newsResult.lastInsertRowid as number;
 

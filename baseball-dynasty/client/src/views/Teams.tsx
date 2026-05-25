@@ -88,6 +88,8 @@ interface TeamDetail extends TeamSummary {
     hired_person_context: string | null;
     season_number: number;
   }>;
+  // Step 13: chemistry (server-only)
+  chemistry_score?: number;
 }
 
 type TeamTab = 'roster' | 'minors' | 'financials' | 'history';
@@ -182,6 +184,13 @@ export default function Teams() {
             <div data-testid="owner-personality">Personality: {teamDetail.owner_personality}</div>
             <div data-testid="owner-patience">Patience: {teamDetail.owner_patience}/10</div>
             <div data-testid="owner-net-worth-tier">Net Worth: {teamDetail.owner_net_worth_tier}</div>
+            {/* P5: team-chemistry-score testid (spec §9 / dev-instructions-2 P5) */}
+            <div
+              data-testid="team-chemistry-score"
+              style={{ color: (teamDetail.chemistry_score ?? 50) < 25 ? '#ef4444' : (teamDetail.chemistry_score ?? 50) >= 75 ? '#10b981' : '#94a3b8' }}
+            >
+              Chemistry: {teamDetail.chemistry_score ?? 50}/100
+            </div>
             {teamDetail.gm_hired_context && (
               <div data-testid="gm-hire-context" style={{ color: '#94a3b8' }}>GM: {teamDetail.gm_name} — {teamDetail.gm_hired_context}</div>
             )}

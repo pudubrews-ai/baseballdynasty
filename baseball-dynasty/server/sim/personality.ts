@@ -62,7 +62,12 @@ export function recalcChemistry(
   const winMod = winStreakModifier(team.wins, team.losses);
   const vetBonus = veteranCoreBonus(leagueId, teamId, gameNumber);
 
-  const rawScore = avgLead * 0.4 + avgCoach * 0.3 + winMod * 0.2 + vetBonus * 0.1;
+  // NF-2: count malcontents on 25-man and subtract 15 per malcontent (spec line 355)
+  const malcontentCount = (prepared(
+    'SELECT COUNT(*) as cnt FROM players WHERE league_id = ? AND team_id = ? AND is_on_25man = 1 AND is_malcontent = 1'
+  ).get(leagueId, teamId) as { cnt: number } | undefined)?.cnt ?? 0;
+
+  const rawScore = avgLead * 0.4 + avgCoach * 0.3 + winMod * 0.2 + vetBonus * 0.1 - (malcontentCount * 15);
   const chemistry = Math.max(0, Math.min(100, Math.round(rawScore)));
 
   db.prepare('UPDATE teams SET chemistry_score = ?, last_chemistry_calc_game = ? WHERE id = ?')
@@ -180,7 +185,8 @@ export function rollTradeDemand(
   for (const player of stars) {
     const rng = seedFor(`trade_demand_${seasonNumber}_${player.id}`, worldgenSeed);
     if (rng() < 0.15) {
-      db.prepare('UPDATE players SET trade_demand_active = 1 WHERE id = ?').run(player.id);
+      // NF-3: store the game number when demand was set for exact 15-game window tracking
+      db.prepare('UPDATE players SET trade_demand_active = 1, trade_demand_since_game = ?, trade_demand_penalty_applied = 0 WHERE id = ?').run(gameNumber, player.id);
 
       insertNewsItem({
         leagueId,
@@ -196,31 +202,49 @@ export function rollTradeDemand(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Trade demand penalty: if not traded within 15 games, all ratings -3
+// Trade demand penalty: if not traded within 15 games, all ratings -3 (ONCE)
+// NF-3: use trade_demand_since_game for exact window; gate with trade_demand_penalty_applied
 // ─────────────────────────────────────────────────────────────────────────────
 
 export function applyTradeDemandPenalties(leagueId: number, gameNumber: number): void {
-  // Find malcontent players still on same team after 15 games — heuristic:
-  // all active trade_demand players who have been demanding for a full 15-game window
-  // (simplified: apply penalty if trade_demand_active=1 and games_played mod 15 = 0)
   const db = getDb();
+  // Only players with unresolved demand AND penalty not yet applied AND 15+ games since demand set
   const demanders = prepared(
-    `SELECT p.id, t.games_played FROM players p
-     JOIN teams t ON t.id = p.team_id
-     WHERE p.league_id = ? AND p.trade_demand_active = 1`
-  ).all(leagueId) as Array<{ id: number; games_played: number }>;
+    `SELECT id, trade_demand_since_game
+     FROM players
+     WHERE league_id = ? AND trade_demand_active = 1
+       AND trade_demand_penalty_applied = 0
+       AND trade_demand_since_game IS NOT NULL
+       AND ? - trade_demand_since_game >= 15`
+  ).all(leagueId, gameNumber) as Array<{ id: number; trade_demand_since_game: number }>;
 
   for (const p of demanders) {
-    if (p.games_played > 0 && p.games_played % 15 === 0) {
-      db.prepare(
-        `UPDATE players
-         SET contact = MAX(20, contact - 3), power = MAX(20, power - 3),
-             speed = MAX(20, speed - 3), fielding = MAX(20, fielding - 3),
-             overall_rating = MAX(20, overall_rating - 3)
-         WHERE id = ? AND trade_demand_active = 1`
-      ).run(p.id);
-    }
+    db.prepare(
+      `UPDATE players
+       SET contact = MAX(20, contact - 3), power = MAX(20, power - 3),
+           speed = MAX(20, speed - 3), fielding = MAX(20, fielding - 3),
+           overall_rating = MAX(20, overall_rating - 3),
+           trade_demand_penalty_applied = 1
+       WHERE id = ? AND trade_demand_active = 1`
+    ).run(p.id);
   }
+}
+
+// NF-3: Called when a player changes teams via trade — clears demand and restores the -3 penalty
+export function resolveTradeDemandOnTrade(db: ReturnType<typeof import('../db.js').getDb>, playerId: number): void {
+  // Restore +3 to all ratings if penalty was applied, then clear demand flags
+  db.prepare(
+    `UPDATE players
+     SET contact = MIN(99, contact + CASE WHEN trade_demand_penalty_applied = 1 THEN 3 ELSE 0 END),
+         power   = MIN(99, power   + CASE WHEN trade_demand_penalty_applied = 1 THEN 3 ELSE 0 END),
+         speed   = MIN(99, speed   + CASE WHEN trade_demand_penalty_applied = 1 THEN 3 ELSE 0 END),
+         fielding = MIN(99, fielding + CASE WHEN trade_demand_penalty_applied = 1 THEN 3 ELSE 0 END),
+         overall_rating = MIN(99, overall_rating + CASE WHEN trade_demand_penalty_applied = 1 THEN 3 ELSE 0 END),
+         trade_demand_active = 0,
+         trade_demand_since_game = NULL,
+         trade_demand_penalty_applied = 0
+     WHERE id = ?`
+  ).run(playerId);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

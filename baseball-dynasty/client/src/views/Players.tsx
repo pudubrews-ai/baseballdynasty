@@ -36,6 +36,12 @@ interface PlayerCard {
   career_ip: number;
   career_k: number;
   career_wins: number;
+  // P5: personality / v0.4.0 fields
+  trade_demand_active?: boolean;
+  memorial?: boolean;
+  gambling_ban?: boolean;
+  ped_offenses?: number;
+  retired_number?: number | null;
 }
 
 // §2.6: Updated Leaders interface to match {hitting: [...], pitching: [...]}
@@ -179,12 +185,50 @@ export default function Players() {
             style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '16px' }}
           >
             <h3 style={{ marginTop: 0, marginBottom: '4px' }}>
+              {selectedPlayer.memorial && <span style={{ color: '#9ca3af', fontSize: '14px', marginRight: '6px' }}>✝</span>}
               {selectedPlayer.first_name} {selectedPlayer.last_name}
+              {selectedPlayer.retired_number != null && (
+                <span style={{ color: '#f59e0b', fontSize: '12px', marginLeft: '6px' }}>#{selectedPlayer.retired_number} (Retired)</span>
+              )}
             </h3>
             <div style={{ color: '#94a3b8', fontSize: '13px', marginBottom: '12px' }}>
               {selectedPlayer.position} · Age {selectedPlayer.age}
               {selectedPlayer.team_name && <span> · {selectedPlayer.team_name}</span>}
             </div>
+            {/* P5: trade demand badge (spec §9) */}
+            {selectedPlayer.trade_demand_active && (
+              <div
+                data-testid="player-trade-demand-badge"
+                style={{
+                  display: 'inline-block',
+                  background: '#7c3aed22', border: '1px solid #7c3aed',
+                  color: '#a78bfa', fontSize: '11px', fontWeight: 700,
+                  padding: '2px 8px', borderRadius: '4px', marginBottom: '8px',
+                }}
+              >
+                TRADE DEMAND
+              </div>
+            )}
+            {/* NF-5: gambling ban overlay marker */}
+            {selectedPlayer.gambling_ban && (
+              <div style={{
+                display: 'inline-block', background: '#dc262622', border: '1px solid #dc2626',
+                color: '#f87171', fontSize: '11px', fontWeight: 700,
+                padding: '2px 8px', borderRadius: '4px', marginBottom: '8px', marginLeft: '4px',
+              }}>
+                [GAMBLING BAN]
+              </div>
+            )}
+            {/* NF-5: PED flag */}
+            {(selectedPlayer.ped_offenses ?? 0) > 0 && (
+              <div style={{
+                display: 'inline-block', background: '#d9770622', border: '1px solid #d97706',
+                color: '#fbbf24', fontSize: '11px', fontWeight: 700,
+                padding: '2px 8px', borderRadius: '4px', marginBottom: '8px', marginLeft: '4px',
+              }}>
+                [PED ×{selectedPlayer.ped_offenses}]
+              </div>
+            )}
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '13px', marginBottom: '12px' }}>
               <div style={{ background: '#0f172a', borderRadius: '6px', padding: '8px' }}>

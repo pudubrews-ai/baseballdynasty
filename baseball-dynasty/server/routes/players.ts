@@ -215,7 +215,9 @@ playersRouter.get('/:id', async (req: Request, res: Response, next: NextFunction
               is_drafted, career_hits, career_hr, career_rbi, career_ip, career_k, career_wins,
               is_on_25man, options_remaining, service_time_days, first_mlb_call_up_game, free_agent_eligible,
               manipulation_delay_until_game, prospect_visible, waiver_state, dfa_team_id, claim_game_window_end,
-              injury_type, injury_tier, rehab_games_remaining, career_injuries, is_injured, injury_return_game
+              injury_type, injury_tier, rehab_games_remaining, career_injuries, is_injured, injury_return_game,
+              trade_demand_active, memorial, gambling_ban, ped_offenses, retired_number,
+              suspension_games_remaining, suspension_type, is_malcontent, loyalty_discount_eligible
        FROM players WHERE id = ?`
     ).get(idResult.data) as PlayerRow | undefined;
     if (!player) { res.status(404).json({ error: 'Player not found' }); return; } // §2.16.2
@@ -269,6 +271,16 @@ playersRouter.get('/:id', async (req: Request, res: Response, next: NextFunction
       rehab_games_remaining: player.rehab_games_remaining ?? 0,
       career_injuries: player.career_injuries ?? 0,
       injury_return_game: player.injury_return_game ?? null,
+      // Step 13 + 8: personality + suspension + memorial fields (NF-5, P5)
+      trade_demand_active: (player as any).trade_demand_active === 1,
+      is_malcontent: (player as any).is_malcontent === 1,
+      loyalty_discount_eligible: (player as any).loyalty_discount_eligible === 1,
+      suspension_games_remaining: (player as any).suspension_games_remaining ?? 0,
+      suspension_type: (player as any).suspension_type ?? null,
+      ped_offenses: (player as any).ped_offenses ?? 0,
+      gambling_ban: (player as any).gambling_ban === 1,
+      memorial: (player as any).memorial === 1,
+      retired_number: (player as any).retired_number ?? null,
       // injury_history derived from transactions (notable_events type=injury)
       injury_history: league
         ? (prepared(

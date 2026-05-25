@@ -462,6 +462,7 @@ function proceduralTransactionNarrative(
 }
 
 // Get news feed with optional filter and limit.
+// NF-1: tragedy items with pinned_until_game >= currentGame sort to top.
 export function getNewsFeed(params: {
   leagueId: number;
   filter?: NewsFilter;
@@ -483,6 +484,12 @@ export function getNewsFeed(params: {
 }> {
   const { leagueId, filter = 'all', teamId, limit = 50 } = params;
 
+  // Get the league's current game number for pinning comparison
+  const leagueRow = prepared(
+    'SELECT current_game_number FROM leagues WHERE id = ?'
+  ).get(leagueId) as { current_game_number: number } | undefined;
+  const currentGame = leagueRow?.current_game_number ?? 0;
+
   let sql = `SELECT id, season_number, game_number, event_type, badge, team_id, secondary_team_id,
                player_id, headline_text, is_headline_pending, details_json, created_at
              FROM news_items
@@ -501,8 +508,9 @@ export function getNewsFeed(params: {
     args.push(teamId, teamId);
   }
 
-  sql += ` ORDER BY id DESC LIMIT ?`;
-  args.push(limit);
+  // Pinned tragedy items (pinned_until_game >= currentGame) sort before all others
+  sql += ` ORDER BY CASE WHEN pinned_until_game IS NOT NULL AND pinned_until_game >= ? THEN 0 ELSE 1 END ASC, id DESC LIMIT ?`;
+  args.push(currentGame, limit);
 
   return prepared(sql).all(...args) as any[];
 }

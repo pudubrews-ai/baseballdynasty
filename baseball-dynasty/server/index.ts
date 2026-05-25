@@ -266,6 +266,11 @@ app.get('/api/transactions', async (_req: Request, res: Response, next: NextFunc
 import { scrubError } from './util/scrub.js';
 
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction): void => {
+  // P6: body-parse SyntaxError → 400, never 500
+  if (err instanceof SyntaxError && 'status' in err && (err as { status: number }).status === 400 && 'body' in err) {
+    res.status(400).json({ error: 'invalid_json' });
+    return;
+  }
   console.error('[server]', scrubError(err));
   res.status(500).json({ error: 'internal_error' });
 });

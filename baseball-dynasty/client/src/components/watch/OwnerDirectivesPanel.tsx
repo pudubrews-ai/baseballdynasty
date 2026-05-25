@@ -15,6 +15,8 @@ interface DirectiveStatus {
   targetPlayer: DirectiveAvailability;
   fireManager: DirectiveAvailability;
   trustProcess: DirectiveAvailability;
+  // NF-4
+  addressClubhouse?: DirectiveAvailability & { suggested?: boolean };
 }
 
 interface OwnerDirectivesPanelProps {
@@ -64,6 +66,14 @@ const DIRECTIVE_INFO = [
     confirmText: 'Issue "Trust The Process"? Locks out firings and signals patience to the org.',
     accentColor: '#3b82f6',
   },
+  {
+    id: 'address_clubhouse' as const,
+    label: 'Address the Clubhouse',
+    desc: 'Resolve active trade demands immediately when chemistry < 25 (one-time use)',
+    testId: 'directive-address-clubhouse',
+    confirmText: 'Address the Clubhouse? Owner intervenes to resolve trade demands and improve chemistry.',
+    accentColor: '#8b5cf6',
+  },
 ] as const;
 
 type DirectiveId = typeof DIRECTIVE_INFO[number]['id'];
@@ -75,6 +85,7 @@ async function issueDirective(directiveId: DirectiveId, body?: Record<string, un
     target_player: '/api/directive/target-player',
     fire_manager: '/api/directive/fire-manager',
     trust_process: '/api/directive/trust-process',
+    address_clubhouse: '/api/directive/address-clubhouse',
   };
   const res = await fetch(endpointMap[directiveId], {
     method: 'POST',
@@ -93,6 +104,7 @@ function isDirectiveAvailable(status: DirectiveStatus | null, id: DirectiveId): 
     target_player: 'targetPlayer',
     fire_manager: 'fireManager',
     trust_process: 'trustProcess',
+    address_clubhouse: 'addressClubhouse',
   };
   return status[keyMap[id]]?.available ?? false;
 }
@@ -102,6 +114,7 @@ function DirectiveCooldownText({ status, id }: { status: DirectiveStatus | null;
   const keyMap: Record<DirectiveId, keyof DirectiveStatus> = {
     go_for_it: 'goForIt', rebuild: 'rebuild', target_player: 'targetPlayer',
     fire_manager: 'fireManager', trust_process: 'trustProcess',
+    address_clubhouse: 'addressClubhouse',
   };
   const s = status[keyMap[id]];
   if (!s) return null;
@@ -175,6 +188,8 @@ export default function OwnerDirectivesPanel({ directiveStatus, gmConfidence, on
       <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
         {DIRECTIVE_INFO.map(d => {
           const available = isDirectiveAvailable(directiveStatus, d.id);
+          // NF-4: Address the Clubhouse shows a suggestion nudge when chemistry < 25
+          const isSuggested = d.id === 'address_clubhouse' && (directiveStatus?.addressClubhouse as { suggested?: boolean } | undefined)?.suggested === true;
           return (
             <div key={d.id}>
               <button
@@ -188,7 +203,7 @@ export default function OwnerDirectivesPanel({ directiveStatus, gmConfidence, on
                 style={{
                   width: '100%',
                   background: available ? `${d.accentColor}22` : '#1e293b',
-                  border: `1px solid ${available ? d.accentColor : '#334155'}`,
+                  border: `1px solid ${isSuggested ? d.accentColor : available ? d.accentColor : '#334155'}`,
                   color: available ? d.accentColor : '#4b5563',
                   padding: '6px 8px',
                   borderRadius: '4px',
@@ -198,9 +213,11 @@ export default function OwnerDirectivesPanel({ directiveStatus, gmConfidence, on
                   textAlign: 'left',
                   display: 'block',
                   fontFamily: 'Inter, sans-serif',
+                  outline: isSuggested ? `2px solid ${d.accentColor}` : undefined,
                 }}
               >
                 {d.label}
+                {isSuggested && <span style={{ fontSize: '10px', marginLeft: '4px', color: '#f59e0b' }}>⚠ Suggested</span>}
               </button>
               <div style={{ paddingLeft: '4px', marginTop: '1px' }}>
                 <DirectiveCooldownText status={directiveStatus} id={d.id} />

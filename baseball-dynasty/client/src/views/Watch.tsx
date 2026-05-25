@@ -72,6 +72,8 @@ interface DirectiveStatus {
   targetPlayer: DirectiveAvailability;
   fireManager: DirectiveAvailability;
   trustProcess: DirectiveAvailability;
+  // NF-4: Address the Clubhouse
+  addressClubhouse?: DirectiveAvailability & { suggested?: boolean };
 }
 
 interface TickerItem {
