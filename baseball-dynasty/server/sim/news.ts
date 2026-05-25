@@ -290,7 +290,7 @@ function proceduralHeadline(
     case 'owner_sold_team': return 'Franchise ownership changes hands.';
     case 'owner_died': return 'Owner passes away; heir takes control.';
     case 'injury':     return `${p}${t} placed on the injured list.`;
-    case 'milestone': return 'Player reaches a career milestone.';
+    case 'milestone': return playerName ? `${playerName} reaches a career milestone.` : 'A player reaches a career milestone.';
     default: return `${badge} event occurred.`;
   }
 }

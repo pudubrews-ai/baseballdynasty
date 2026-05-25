@@ -516,6 +516,7 @@ async function runGameTick(league: LeagueRow): Promise<void> {
                 gameNumber: nextGame.gameNumber,
                 playerId: ev.playerId,
                 teamId: teamId ?? nextGame.homeTeamId,
+                ...(ev.description ? { headlineText: ev.description } : {}),
                 sourceTable: 'game_log',
                 sourceId: gameRow.id,
               });
