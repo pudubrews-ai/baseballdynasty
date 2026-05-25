@@ -1,5 +1,5 @@
 // Offseason module — stepwise with checkpointing via D26
-// Steps: retirement → development → free_agency → front_office → annual_draft → done
+// Steps: season_archive → retirement → development → non_tender → free_agency → hof_voting → financial_update → front_office → annual_draft → done
 
 import { getDb, prepared, type LeagueRow, type TeamRow, type PlayerRow } from '../db.js';
 import { seedFor, randInt, randNormal } from './prng.js';
@@ -17,11 +17,11 @@ const OWNER_PERSONALITIES: Array<'meddling' | 'hands-off' | 'moderate' | 'win-no
 
 export async function runOffseason(league: LeagueRow, isTurbo: boolean): Promise<void> {
   const leagueId = league.id;
-  const currentStep = league.offseason_step ?? 'retirement';
+  const currentStep = league.offseason_step ?? 'season_archive';
 
   console.log(`[offseason] Starting from step: ${currentStep}`);
 
-  const steps = ['retirement', 'development', 'non_tender', 'free_agency', 'front_office', 'annual_draft', 'done'];
+  const steps = ['season_archive', 'retirement', 'development', 'non_tender', 'free_agency', 'hof_voting', 'financial_update', 'front_office', 'annual_draft', 'done'];
   const startIdx = steps.indexOf(currentStep);
 
   // §1.2 Iter-5: Import pause-check for cooperative offseason cancellation
@@ -32,6 +32,9 @@ export async function runOffseason(league: LeagueRow, isTurbo: boolean): Promise
     console.log(`[offseason] Running step: ${step}`);
 
     switch (step) {
+      case 'season_archive':
+        await runSeasonArchiveStep(leagueId, league.season_number, league.worldgen_seed);
+        break;
       case 'retirement':
         await runRetirementStep(leagueId, league.season_number);
         break;
@@ -43,6 +46,12 @@ export async function runOffseason(league: LeagueRow, isTurbo: boolean): Promise
         break;
       case 'free_agency':
         await runFreeAgencyStep(leagueId, league.season_number);
+        break;
+      case 'hof_voting':
+        await runHofVotingStep(leagueId, league.season_number, league.worldgen_seed);
+        break;
+      case 'financial_update':
+        await runFinancialUpdateStep(leagueId, league.season_number, league.worldgen_seed ^ league.season_number);
         break;
       case 'front_office':
         await runFrontOfficeStep(leagueId, league.season_number, league.worldgen_seed ^ league.season_number);
@@ -69,6 +78,231 @@ export async function runOffseason(league: LeagueRow, isTurbo: boolean): Promise
       prepared('UPDATE leagues SET offseason_step = ? WHERE id = ?').run(steps[i + 1] ?? 'done', leagueId);
     }
   }
+}
+
+// =========================================================
+// Step 0: Season Archive — capture franchise history BEFORE W/L reset and BEFORE retirement
+// =========================================================
+
+// Compute division finish rank for a team within its division (1=first)
+function computeDivisionFinish(leagueId: number, teamId: number): number {
+  const teams = prepared(
+    'SELECT id, wins, losses, runs_scored, runs_allowed, conference, division FROM teams WHERE league_id = ?'
+  ).all(leagueId) as Array<{
+    id: number; wins: number; losses: number; runs_scored: number; runs_allowed: number;
+    conference: string; division: string;
+  }>;
+
+  const thisTeam = teams.find(t => t.id === teamId);
+  if (!thisTeam) return 1;
+
+  const divTeams = teams.filter(t => t.division === thisTeam.division);
+  // Sort by win pct desc, then run differential, then wins
+  divTeams.sort((a, b) => {
+    const pctA = (a.wins + a.losses) > 0 ? a.wins / (a.wins + a.losses) : 0;
+    const pctB = (b.wins + b.losses) > 0 ? b.wins / (b.wins + b.losses) : 0;
+    if (pctB !== pctA) return pctB - pctA;
+    const rdA = a.runs_scored - a.runs_allowed;
+    const rdB = b.runs_scored - b.runs_allowed;
+    if (rdB !== rdA) return rdB - rdA;
+    return b.wins - a.wins;
+  });
+
+  const rank = divTeams.findIndex(t => t.id === teamId) + 1;
+  return rank > 0 ? rank : 1;
+}
+
+// Determine how deep a team went in the playoffs this season
+function computePlayoffRound(leagueId: number, teamId: number, seasonNumber: number): string {
+  // Check if this team won the championship
+  const champRow = prepared(
+    'SELECT champion_team_id FROM season_narratives WHERE league_id = ? AND season_number = ?'
+  ).get(leagueId, seasonNumber) as { champion_team_id: number | null } | undefined;
+
+  if (champRow?.champion_team_id === teamId) return 'champion';
+
+  // Check playoff series (uses team1_id/team2_id/winner_team_id/round_name columns from migration 002)
+  const seriesRows = prepared(
+    `SELECT team1_id, team2_id, winner_team_id, team1_wins, team2_wins, round_name
+     FROM playoff_series
+     WHERE league_id = ? AND season_number = ?
+       AND (team1_id = ? OR team2_id = ?)`
+  ).all(leagueId, seasonNumber, teamId, teamId) as Array<{
+    team1_id: number; team2_id: number; winner_team_id: number;
+    team1_wins: number; team2_wins: number; round_name: string;
+  }>;
+
+  if (seriesRows.length === 0) return 'missed';
+
+  // Find the deepest round this team participated in
+  let deepest = 'missed';
+  const roundOrder = ['DS', 'CS', 'WS'];
+
+  for (const series of seriesRows) {
+    const wonSeries = series.winner_team_id === teamId;
+    const round = series.round_name ?? 'DS';
+    const currentIdx = roundOrder.indexOf(round);
+    const deepestIdx = roundOrder.indexOf(deepest);
+
+    if (wonSeries) {
+      // Won this round — at minimum they appeared in the NEXT round
+      const nextRound = roundOrder[currentIdx + 1] ?? round;
+      if (roundOrder.indexOf(nextRound) > deepestIdx) {
+        deepest = nextRound;
+      }
+    } else {
+      // Lost this round
+      if (currentIdx > deepestIdx) {
+        deepest = round;
+      }
+    }
+  }
+
+  return deepest;
+}
+
+// Compute attendance average using the same formula as watch.ts
+function computeAttendanceAvg(marketSize: string, wins: number, losses: number, teamId: number): number {
+  const baseRates: Record<string, number> = {
+    mega: 0.85, large: 0.75, medium: 0.65, small: 0.55,
+  };
+  const capacities: Record<string, number> = {
+    mega: 48000, large: 42000, medium: 36000, small: 30000,
+  };
+  const baseRate = baseRates[marketSize] ?? 0.65;
+  const capacity = capacities[marketSize] ?? 35000;
+  const winPct = (wins + losses) > 0 ? wins / (wins + losses) : 0.5;
+  const winPctBonus = (winPct - 0.5) * 0.4;
+  // Use team ID as stable jitter (no game number — season average)
+  const jitter = ((teamId * 31) % 11 - 5) / 100;
+  const attendancePct = Math.max(0.35, Math.min(1.0, baseRate + winPctBonus + jitter));
+  return Math.round(attendancePct * capacity);
+}
+
+async function runSeasonArchiveStep(leagueId: number, seasonNumber: number, worldgenSeed: number): Promise<void> {
+  const db = getDb();
+
+  const teams = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
+
+  const archiveTx = db.transaction(() => {
+    for (const team of teams) {
+      const divisionFinish = computeDivisionFinish(leagueId, team.id);
+      const playoffRound = computePlayoffRound(leagueId, team.id, seasonNumber);
+      const madePlayoffs = playoffRound !== 'missed' ? 1 : 0;
+      const wonChampionship = playoffRound === 'champion' ? 1 : 0;
+      const attendanceAvg = computeAttendanceAvg(team.market_size, team.wins, team.losses, team.id);
+
+      // Insert/upsert franchise_season_history (idempotent via INSERT OR REPLACE)
+      db.prepare(
+        `INSERT OR REPLACE INTO franchise_season_history
+           (league_id, team_id, season_number, wins, losses, division_finish, playoff_round,
+            made_playoffs, won_championship, attendance_avg, revenue, payroll_actual, payroll_budget,
+            luxury_tax_paid, manager_name, gm_name, city_label)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        leagueId, team.id, seasonNumber,
+        team.wins, team.losses, divisionFinish, playoffRound,
+        madePlayoffs, wonChampionship, attendanceAvg,
+        team.revenue ?? 0, team.current_payroll ?? 0, team.payroll_budget ?? 0,
+        team.luxury_tax_paid ?? 0,
+        team.manager_name ?? null,
+        team.gm_name ?? null,
+        team.city ?? null
+      );
+    }
+
+    // Snapshot franchise_player_season for all players with season_stats this season
+    // Spec interpretation (documented): we key by player's CURRENT team_id at season end.
+    // Mid-season traded players' full season stats go to their end-of-season team.
+    // This is an approximation; per-trade attribution is not available from season_stats schema.
+    const statsRows = prepared(
+      `SELECT ss.player_id, ss.team_id, ss.games_played, ss.at_bats, ss.hits, ss.home_runs,
+              ss.rbi, ss.walks, ss.innings_pitched, ss.earned_runs, ss.strikeouts_pitching,
+              ss.wins, ss.losses,
+              p.team_id AS current_team_id, p.seasons_with_current_team
+       FROM season_stats ss
+       JOIN players p ON p.id = ss.player_id
+       WHERE ss.league_id = ? AND ss.season_number = ? AND p.team_id IS NOT NULL`
+    ).all(leagueId, seasonNumber) as Array<{
+      player_id: number; team_id: number; games_played: number; at_bats: number;
+      hits: number; home_runs: number; rbi: number; walks: number;
+      innings_pitched: number; earned_runs: number; strikeouts_pitching: number;
+      wins: number; losses: number; current_team_id: number | null; seasons_with_current_team: number;
+    }>;
+
+    for (const row of statsRows) {
+      const effectiveTeamId = row.current_team_id ?? row.team_id;
+      if (!effectiveTeamId) continue;
+
+      db.prepare(
+        `INSERT OR REPLACE INTO franchise_player_season
+           (league_id, team_id, player_id, season_number, games_played, at_bats, hits, home_runs,
+            rbi, walks, innings_pitched, earned_runs, strikeouts_pitching, wins, losses)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        leagueId, effectiveTeamId, row.player_id, seasonNumber,
+        row.games_played ?? 0, row.at_bats ?? 0, row.hits ?? 0, row.home_runs ?? 0,
+        row.rbi ?? 0, row.walks ?? 0, row.innings_pitched ?? 0, row.earned_runs ?? 0,
+        row.strikeouts_pitching ?? 0, row.wins ?? 0, row.losses ?? 0
+      );
+    }
+
+    // Increment seasons_with_current_team for players who stayed with their team.
+    // Check against prior franchise_player_season row — if team_id matches the prior season, increment.
+    // New players or those with no prior record start at 1.
+    const allTeamPlayers = prepared(
+      `SELECT p.id, p.team_id, p.seasons_with_current_team,
+              (SELECT fps.team_id FROM franchise_player_season fps
+               WHERE fps.player_id = p.id AND fps.season_number = ? - 1
+               ORDER BY fps.id DESC LIMIT 1) AS prior_team_id
+       FROM players p
+       WHERE p.league_id = ? AND p.team_id IS NOT NULL`
+    ).all(seasonNumber, leagueId) as Array<{
+      id: number; team_id: number; seasons_with_current_team: number; prior_team_id: number | null;
+    }>;
+
+    for (const p of allTeamPlayers) {
+      let newCount: number;
+      if (p.prior_team_id === null) {
+        newCount = 1; // First season on record
+      } else if (p.prior_team_id === p.team_id) {
+        newCount = (p.seasons_with_current_team ?? 0) + 1; // Stayed
+      } else {
+        newCount = 1; // Changed teams
+      }
+      db.prepare('UPDATE players SET seasons_with_current_team = ? WHERE id = ?').run(newCount, p.id);
+    }
+  });
+
+  archiveTx();
+  console.log(`[offseason] Season archive: captured franchise history for season ${seasonNumber}`);
+}
+
+// =========================================================
+// Step 7 stub: HOF Voting — filled in by Step 7 implementation
+// =========================================================
+async function runHofVotingStep(leagueId: number, seasonNumber: number, worldgenSeed: number): Promise<void> {
+  await runHofVoting(leagueId, seasonNumber, worldgenSeed);
+}
+
+// =========================================================
+// Step 5 stub: Financial Update — filled in by Step 5 implementation
+// =========================================================
+async function runFinancialUpdateStep(leagueId: number, seasonNumber: number, seed: number): Promise<void> {
+  await runFinancialUpdate(leagueId, seasonNumber, seed);
+}
+
+// =========================================================
+// Forward declarations (implemented below in Steps 5 and 7)
+// =========================================================
+async function runHofVoting(leagueId: number, seasonNumber: number, worldgenSeed: number): Promise<void> {
+  // Stub — implementation in Step 7 below
+  console.log(`[offseason] HOF voting step (stub) for season ${seasonNumber}`);
+}
+
+async function runFinancialUpdate(leagueId: number, seasonNumber: number, seed: number): Promise<void> {
+  // Stub — implementation in Step 5 below
+  console.log(`[offseason] Financial update step (stub) for season ${seasonNumber}`);
 }
 
 // Step 1: Retirement — players age 40+ retire
