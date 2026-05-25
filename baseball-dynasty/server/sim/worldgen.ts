@@ -2,7 +2,7 @@
 // Uses direct tier sampling per §5.2 (NOT normal distribution)
 
 import { getDb, prepared, type TeamRow } from '../db.js';
-import { CITIES, type CityData } from '../data/cities.js';
+import { CITIES, REAL_CITIES, type CityData } from '../data/cities.js';
 import { NICKNAMES } from '../data/nicknames.js';
 import { NAME_POOLS, ORIGIN_DISTRIBUTION, type OriginKey } from '../data/names.js';
 import { mulberry32, seedFor, resolveSeed, randInt, randNormal, shuffle } from './prng.js';
@@ -166,7 +166,9 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
   shuffle(rng, potentialArray);
 
   // Pick 20 cities with market-size quota: exactly 2 mega + 4 large + 8 medium + 6 small (§2.11)
-  const selectedCities = selectCitiesWithMarketQuota(rng, [...CITIES]);
+  // USE_REAL_CITIES=true → draw from real US/Canada/Mexico city pool instead of fictional pool.
+  const cityPool = process.env['USE_REAL_CITIES'] === 'true' ? REAL_CITIES : CITIES;
+  const selectedCities = selectCitiesWithMarketQuota(rng, [...cityPool]);
 
   // Pick 20 nicknames (no duplicates)
   const shuffledNicknames = [...NICKNAMES];
