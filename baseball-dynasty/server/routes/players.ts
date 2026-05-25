@@ -194,6 +194,7 @@ playersRouter.get('/:id', async (req: Request, res: Response, next: NextFunction
       team_id: player.team_id,
       team_name: team ? `${team.city} ${team.name}` : null,
       is_on_mlb_roster: player.is_on_mlb_roster === 1,
+      is_on_25man: player.is_on_25man === 1,
       minor_level: player.minor_level,
       contact: player.contact,
       power: player.power,

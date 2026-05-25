@@ -182,10 +182,16 @@ teamsRouter.get('/:id', async (req: Request, res: Response, next: NextFunction):
       hired_person_context: string | null; season_number: number; created_at: number;
     }>;
 
-    // Hire context for current GM/manager
+    // Hire context for current GM/manager — M3: fall back to derived default for carried rows
     const gmHireEvent = frontOfficeHistory.find(e => e.event_type === 'gm_fired');
+    const gmHiredContext = gmHireEvent
+      ? (gmHireEvent.hired_person_context ?? (team.interim_gm === 1 ? 'Interim appointment' : 'Hired in offseason'))
+      : null;
     const managerHireEvent = frontOfficeHistory.find(e =>
       e.event_type === 'manager_fired' || e.event_type === 'manager_resigned');
+    const managerHiredContext = managerHireEvent
+      ? (managerHireEvent.hired_person_context ?? (team.interim_manager === 1 ? 'Interim appointment' : 'Hired in offseason'))
+      : null;
 
     res.json({
       id: team.id,
@@ -225,8 +231,8 @@ teamsRouter.get('/:id', async (req: Request, res: Response, next: NextFunction):
       revenue: team.revenue,
       minors,                              // §3.3
       roster,                              // §2.1
-      gm_hired_context: gmHireEvent?.hired_person_context ?? null,
-      manager_hired_context: managerHireEvent?.hired_person_context ?? null,
+      gm_hired_context: gmHiredContext,
+      manager_hired_context: managerHiredContext,
       front_office_history: frontOfficeHistory,
     });
   } catch (err) { next(err); }

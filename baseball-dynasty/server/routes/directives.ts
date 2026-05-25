@@ -24,6 +24,15 @@ function emptyBody() {
   return z.object({}).strict();
 }
 
+// L2: Detect SQLite UNIQUE constraint errors (race backstop for once/season directives)
+function isUniqueConstraintError(err: unknown): boolean {
+  if (err instanceof Error && 'code' in err) {
+    return (err as { code: string }).code === 'SQLITE_CONSTRAINT_UNIQUE'
+      || err.message.includes('UNIQUE constraint failed');
+  }
+  return false;
+}
+
 function getLeagueAndFranchise(res: Response): {
   league: LeagueRow;
   fs: FranchiseStateRow;
@@ -152,7 +161,10 @@ directivesRouter.post('/go-for-it', async (req: Request, res: Response, next: Ne
 
     const newConf = getFranchiseState(lid)?.gm_confidence ?? 100;
     res.json({ ok: true, gmConfidence: newConf });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (isUniqueConstraintError(err)) { res.status(409).json({ error: 'cooldown' }); return; }
+    next(err);
+  }
 });
 
 // POST /api/directive/rebuild
@@ -192,7 +204,10 @@ directivesRouter.post('/rebuild', async (req: Request, res: Response, next: Next
 
     const newConf = getFranchiseState(lid)?.gm_confidence ?? 100;
     res.json({ ok: true, gmConfidence: newConf });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (isUniqueConstraintError(err)) { res.status(409).json({ error: 'cooldown' }); return; }
+    next(err);
+  }
 });
 
 // POST /api/directive/target-player
@@ -282,7 +297,10 @@ directivesRouter.post('/fire-manager', async (req: Request, res: Response, next:
     }
 
     res.json({ ok: true, gmConfidence: newConf });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (isUniqueConstraintError(err)) { res.status(409).json({ error: 'cooldown' }); return; }
+    next(err);
+  }
 });
 
 // POST /api/directive/trust-process
@@ -324,7 +342,10 @@ directivesRouter.post('/trust-process', async (req: Request, res: Response, next
 
     const newConf = getFranchiseState(lid)?.gm_confidence ?? 100;
     res.json({ ok: true, gmConfidence: newConf });
-  } catch (err) { next(err); }
+  } catch (err) {
+    if (isUniqueConstraintError(err)) { res.status(409).json({ error: 'cooldown' }); return; }
+    next(err);
+  }
 });
 
 function triggerGmResignation(

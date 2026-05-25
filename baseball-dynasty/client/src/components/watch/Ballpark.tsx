@@ -80,11 +80,13 @@ function CrowdSection({ cx, cy, width, height, fillPct, color }: {
   );
 }
 
+const NIGHT_SKY = { top: '#0d1117', bottom: '#1a2744' };
+
 export default function Ballpark({
   daypart, weather, attendancePct, scoreboard,
   baseRunners, isOwnedPark, isGameActive, isTurboMode,
 }: BallparkProps) {
-  const sky = SKY_COLORS[daypart] ?? SKY_COLORS.night;
+  const sky = SKY_COLORS[daypart] ?? NIGHT_SKY;
   const cloudOpacity = CLOUD_OPACITY[weather] ?? 0;
   const crowdColor = isOwnedPark ? '#3b82f6' : '#6b7280';
 
@@ -172,6 +174,14 @@ export default function Ballpark({
         </>
       )}
 
+      {/* watch-crowd testid: contains crowd fill proportional to attendancePct */}
+      <g data-testid="watch-crowd">
+        <CrowdSection
+          cx={W * 0.5} cy={H * 0.5} width={W * 0.7} height={40}
+          fillPct={attendancePct} color={crowdColor}
+        />
+      </g>
+
       {/* Owned park glow */}
       {isOwnedPark && (
         <motion.rect
@@ -232,9 +242,6 @@ export default function Ballpark({
             animate={{ opacity: [1, 0.6, 1] }} transition={{ duration: 1.2, repeat: Infinity, delay: 0.4 }} />
         )}
       </g>
-
-      {/* Crowd overlay testid */}
-      <g data-testid="watch-crowd" />
 
       {/* Turbo: blur overlay + calendar flash */}
       {isTurboMode && (

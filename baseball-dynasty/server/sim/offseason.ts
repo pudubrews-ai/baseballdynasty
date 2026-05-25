@@ -406,6 +406,9 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
   const fs = getFranchiseState(leagueId);
 
   for (const team of teams) {
+    // L5: Track whether this team had its GM replaced via resign path (to skip meddling-owner re-fire)
+    let gmJustReplaced = false;
+
     // Handle GM resignation pending (low-confidence, owned team)
     if (fs && fs.owned_team_id === team.id && fs.gm_resign_pending_season === seasonNumber) {
       const newFirst = ['Alex', 'Chris', 'Pat', 'Sam', 'Terry'][Math.floor(rng() * 5)] ?? 'Alex';
@@ -439,6 +442,7 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
       ).run(`${newFirst} ${newLast}`, newPhilosophy, newRisk, newFocus, team.id);
       resetGmConfidence(leagueId);
       db.prepare('UPDATE franchise_state SET gm_resign_pending_season = NULL WHERE league_id = ?').run(leagueId);
+      gmJustReplaced = true; // L5: skip meddling-owner re-fire for this team this pass
     }
 
     // Manager fired if job_security < 3 (60% chance)
@@ -502,8 +506,9 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
     }
 
     // GM fired if owner meddling (40% if win_pct < 0.45)
+    // L5: Skip if GM was just replaced via resign path this same offseason pass
     const winPct = team.wins / Math.max(1, team.wins + team.losses);
-    if (team.owner_personality === 'meddling' && winPct < 0.45 && rng() < 0.4) {
+    if (!gmJustReplaced && team.owner_personality === 'meddling' && winPct < 0.45 && rng() < 0.4) {
       const newFirst = ['Alex', 'Chris', 'Pat', 'Sam', 'Terry'][Math.floor(rng() * 5)] ?? 'Alex';
       const newLast = ['Martinez', 'Garcia', 'Wilson', 'Davis', 'Miller'][Math.floor(rng() * 5)] ?? 'Garcia';
       const newPhilosophy = GM_PHILOSOPHIES[Math.floor(rng() * 3)] ?? 'balanced';

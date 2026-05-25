@@ -5,17 +5,21 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
+interface DirectiveAvailability {
+  available: boolean;
+  reason: string | null;
+}
 interface DirectiveStatus {
-  go_for_it: { available: boolean; last_used_season: number | null };
-  rebuild: { available: boolean; last_used_season: number | null };
-  target_player: { available: boolean; uses_this_season: number };
-  fire_manager: { available: boolean; last_used_season: number | null };
-  trust_process: { available: boolean; last_used_season: number | null };
-  gm_confidence: number;
+  goForIt: DirectiveAvailability;
+  rebuild: DirectiveAvailability;
+  targetPlayer: DirectiveAvailability;
+  fireManager: DirectiveAvailability;
+  trustProcess: DirectiveAvailability;
 }
 
 interface OwnerDirectivesPanelProps {
   directiveStatus: DirectiveStatus | null;
+  gmConfidence: number | null;
   onDirectiveIssued: () => void;
 }
 
@@ -83,29 +87,34 @@ async function issueDirective(directiveId: DirectiveId, body?: Record<string, un
 
 function isDirectiveAvailable(status: DirectiveStatus | null, id: DirectiveId): boolean {
   if (!status) return false;
-  if (id === 'go_for_it') return status.go_for_it.available;
-  if (id === 'rebuild') return status.rebuild.available;
-  if (id === 'target_player') return status.target_player.available;
-  if (id === 'fire_manager') return status.fire_manager.available;
-  if (id === 'trust_process') return status.trust_process.available;
-  return false;
+  const keyMap: Record<DirectiveId, keyof DirectiveStatus> = {
+    go_for_it: 'goForIt',
+    rebuild: 'rebuild',
+    target_player: 'targetPlayer',
+    fire_manager: 'fireManager',
+    trust_process: 'trustProcess',
+  };
+  return status[keyMap[id]]?.available ?? false;
 }
 
 function DirectiveCooldownText({ status, id }: { status: DirectiveStatus | null; id: DirectiveId }) {
   if (!status) return null;
-  if (id === 'target_player') {
-    const uses = status.target_player.uses_this_season;
-    if (uses >= 2) return <span style={{ color: '#ef4444', fontSize: '10px' }}>Cooldown: 2/2 used</span>;
-    return <span style={{ color: '#10b981', fontSize: '10px' }}>{2 - uses} use{2 - uses === 1 ? '' : 's'} remaining</span>;
-  }
-  const s = status[id as Exclude<DirectiveId, 'target_player'>];
-  if ('last_used_season' in s && s.last_used_season !== null) {
-    return <span style={{ color: '#6b7280', fontSize: '10px' }}>Used S{s.last_used_season}</span>;
-  }
-  return <span style={{ color: '#10b981', fontSize: '10px' }}>Available</span>;
+  const keyMap: Record<DirectiveId, keyof DirectiveStatus> = {
+    go_for_it: 'goForIt', rebuild: 'rebuild', target_player: 'targetPlayer',
+    fire_manager: 'fireManager', trust_process: 'trustProcess',
+  };
+  const s = status[keyMap[id]];
+  if (!s) return null;
+  if (s.available) return <span style={{ color: '#10b981', fontSize: '10px' }}>Available</span>;
+  const label = s.reason === 'cooldown' ? 'On cooldown'
+    : s.reason === 'mutual_exclusion' ? 'Excluded this season'
+    : s.reason === 'firings_locked' ? 'Firings locked'
+    : s.reason === 'fire_manager_issued' ? 'Manager already fired'
+    : 'Unavailable';
+  return <span style={{ color: '#6b7280', fontSize: '10px' }}>{label}</span>;
 }
 
-export default function OwnerDirectivesPanel({ directiveStatus, onDirectiveIssued }: OwnerDirectivesPanelProps) {
+export default function OwnerDirectivesPanel({ directiveStatus, gmConfidence, onDirectiveIssued }: OwnerDirectivesPanelProps) {
   const [pendingDirective, setPendingDirective] = useState<DirectiveId | null>(null);
   const [issuing, setIssuing] = useState(false);
   const [lastMessage, setLastMessage] = useState<string | null>(null);
@@ -127,7 +136,7 @@ export default function OwnerDirectivesPanel({ directiveStatus, onDirectiveIssue
     }
   };
 
-  const confidence = directiveStatus?.gm_confidence ?? 100;
+  const confidence = gmConfidence ?? 100;
   const confidenceColor = confidence >= 70 ? '#10b981' : confidence >= 40 ? '#f59e0b' : '#ef4444';
 
   return (

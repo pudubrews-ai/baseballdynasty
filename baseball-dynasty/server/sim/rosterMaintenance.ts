@@ -38,7 +38,7 @@ function cleanupPhantom25man(leagueId: number): void {
 
 // Roster invariant: each team should have exactly 25 on is_on_25man=1 (hard cap after cuts).
 // During regular season, log warnings for violations. Auto-trim >25, auto-promote <25.
-function checkRosterInvariant(leagueId: number): void {
+function checkRosterInvariant(leagueId: number, currentGameNumber: number = 0): void {
   const league = prepared('SELECT season_number FROM leagues WHERE id = ?').get(leagueId) as { season_number: number } | undefined;
   if (!league) return;
 
@@ -79,8 +79,9 @@ function checkRosterInvariant(leagueId: number): void {
       while (deficit > 0) {
         const fromMinors = prepared(
           `SELECT * FROM players WHERE team_id = ? AND is_on_mlb_roster = 1 AND is_on_25man = 0 AND minor_level IS NOT NULL
+           AND (last_send_down_game IS NULL OR ? - last_send_down_game >= 5)
            ORDER BY overall_rating DESC LIMIT 1`
-        ).get(v.team_id) as { id: number } | undefined;
+        ).get(v.team_id, currentGameNumber) as { id: number } | undefined;
         if (fromMinors) {
           prepared('UPDATE players SET is_on_25man = 1, minor_level = NULL WHERE id = ?').run(fromMinors.id);
           deficit--;
@@ -213,8 +214,8 @@ export function runRosterMaintenance(
             const fsUpdated = getFranchiseState(leagueId);
             const conf = fsUpdated?.gm_confidence ?? 100;
 
-            // Resign trigger
-            if (conf <= 0) {
+            // Resign trigger — L3: only emit once per season (dedupe across 10-game checkpoints)
+            if (conf <= 0 && fsUpdated?.gm_resign_pending_season !== league.season_number) {
               const gmName = ownedTeam.gm_name ?? 'GM';
               insertNewsItem({
                 leagueId, seasonNumber: league.season_number, gameNumber,
@@ -266,7 +267,7 @@ export function runRosterMaintenance(
 
   // Step 4: Roster invariant check
   try {
-    checkRosterInvariant(leagueId);
+    checkRosterInvariant(leagueId, gameNumber);
   } catch (err) {
     console.warn('[rosterMaintenance] Invariant check error:', err);
   }

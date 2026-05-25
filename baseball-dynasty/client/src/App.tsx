@@ -123,13 +123,17 @@ function AppContent() {
       .then(r => r.ok ? r.json() : null)
       .then((data: FranchiseStateResponse | null) => {
         setFranchiseState(data);
-        // Show franchise selection on first expansion_draft phase if not yet resolved
-        if (data && !data.selectionResolved && state?.phase === 'expansion_draft') {
+        // Show franchise selection during the draft phase until selection is resolved.
+        // mapPhase collapses expansion_draft/annual_draft -> 'draft', so gate on 'draft' +
+        // the snapshot's selectionResolved flag (engine.ts exposes state.selectionResolved).
+        if (data && !data.selectionResolved && state?.phase === 'draft' && state?.selectionResolved === false) {
           setShowFranchiseSelection(true);
+        } else if (data?.selectionResolved) {
+          setShowFranchiseSelection(false);
         }
       })
       .catch(() => {});
-  }, [noLeague, state?.phase]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [noLeague, state?.phase, state?.selectionResolved]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleFranchiseSelectionComplete = () => {
     setShowFranchiseSelection(false);
@@ -219,7 +223,12 @@ function AppContent() {
           {tabs.map(tab => (
             <button
               key={tab.id}
-              data-testid={tab.id === 'news' ? 'news-tab' : `nav-${tab.id}`}
+              data-testid={
+                tab.id === 'news' ? 'news-tab'
+                : tab.id === 'watch' ? 'watch-tab'
+                : tab.id === 'timeline' ? 'timeline-tab'
+                : `nav-${tab.id}`
+              }
               onClick={() => {
                 hasUserNavigatedRef.current = true;
                 setActiveTab(tab.id);

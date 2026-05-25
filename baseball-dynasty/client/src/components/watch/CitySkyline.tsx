@@ -85,7 +85,7 @@ function Fireworks() {
 }
 
 export default function CitySkyline({ marketSize, winningRecord, playoffClinch, isOffseason }: CitySkylineProps) {
-  const buildings = BUILDING_SETS[marketSize] ?? BUILDING_SETS.small;
+  const buildings = BUILDING_SETS[marketSize] ?? BUILDING_SETS['small'] ?? [];
   const viewBoxW = marketSize === 'mega' ? 460 : marketSize === 'large' ? 360 : marketSize === 'medium' ? 280 : 210;
   const H = 320;
   const groundY = H - 20;

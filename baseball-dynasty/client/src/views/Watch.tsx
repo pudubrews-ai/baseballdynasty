@@ -12,6 +12,12 @@ import FrontOfficeSprite from '../components/watch/FrontOfficeSprite.js';
 import OwnerDirectivesPanel from '../components/watch/OwnerDirectivesPanel.js';
 
 // ---- Types ----
+interface NewspaperLike {
+  masthead: string;
+  headline: string;
+  lede: string;
+}
+
 interface WatchOwnedTeam {
   id: number;
   name: string;
@@ -59,13 +65,13 @@ interface WatchState {
   fireworks: boolean;
 }
 
+interface DirectiveAvailability { available: boolean; reason: string | null; }
 interface DirectiveStatus {
-  go_for_it: { available: boolean; last_used_season: number | null };
-  rebuild: { available: boolean; last_used_season: number | null };
-  target_player: { available: boolean; uses_this_season: number };
-  fire_manager: { available: boolean; last_used_season: number | null };
-  trust_process: { available: boolean; last_used_season: number | null };
-  gm_confidence: number;
+  goForIt: DirectiveAvailability;
+  rebuild: DirectiveAvailability;
+  targetPlayer: DirectiveAvailability;
+  fireManager: DirectiveAvailability;
+  trustProcess: DirectiveAvailability;
 }
 
 interface TickerItem {
@@ -155,11 +161,13 @@ function deriveEmotion(team: WatchOwnedTeam | null, fireworks: boolean): Emotion
   if (fireworks) return 'celebrating';
   const gp = team.wins + team.losses;
   if (gp === 0) return 'neutral';
+  const streak = team.streak ?? '';
+  const streakN = parseInt(streak.slice(1), 10) || 0;
+  if (streak.startsWith('W') && streakN >= 5) return 'happy';   // 5+ win streak
+  if (streak.startsWith('L') && streakN >= 5) return 'anxious'; // 5+ loss streak
   const winPct = team.wins / gp;
   if (winPct >= 0.6) return 'happy';
   if (winPct <= 0.35) return 'angry';
-  const streak = team.streak;
-  if (streak.startsWith('L') && parseInt(streak.slice(1) ?? '0') >= 5) return 'anxious';
   return 'neutral';
 }
 
@@ -214,6 +222,8 @@ export default function Watch() {
   const [tickerItems, setTickerItems] = useState<TickerItem[]>([]);
   const [tickerPaused, setTickerPaused] = useState(false);
   const lastNewsIdRef = useRef<number>(0);
+  const prevPhaseRef = useRef<string | null>(null);
+  const [seasonEndPaper, setSeasonEndPaper] = useState<NewspaperLike | null>(null);
 
   const isTurbo = state?.simSpeed === 'turbo';
 
@@ -244,6 +254,23 @@ export default function Watch() {
     fetchTicker().then(setTickerItems).catch(() => {});
   }, []);
 
+  // M6: Season-end newspaper drop — hold ≥1.5s on phase transition into playoffs/offseason
+  useEffect(() => {
+    const p = watchState?.phase ?? state?.phase ?? null;
+    const prev = prevPhaseRef.current;
+    if (prev && prev !== p && (p === 'playoffs' || p === 'offseason')) {
+      fetch('/api/timeline').then(r => r.ok ? r.json() : []).then((arr: unknown[]) => {
+        const firstEntry = arr?.[0] as { newspaper?: NewspaperLike } | undefined;
+        const latest = firstEntry?.newspaper ?? null;
+        if (latest) {
+          setSeasonEndPaper(latest);
+          setTimeout(() => setSeasonEndPaper(null), 1500); // non-skippable, even in turbo
+        }
+      }).catch(() => {});
+    }
+    prevPhaseRef.current = p ?? null;
+  }, [watchState?.phase, state?.phase]);
+
   const team = watchState?.ownedTeam ?? null;
   const latestGame = watchState?.latestGame ?? null;
   const phase = watchState?.phase ?? 'offseason';
@@ -258,7 +285,20 @@ export default function Watch() {
     .toLowerCase()
     .replace(/[^a-z-]/g, '') as 'meddling' | 'hands-off' | 'win-now' | 'patient';
 
-  const baseRunners = { first: false, second: false, third: false };
+  // D1: cosmetic, deterministic base state — NOT real sim state.
+  const BASE_PATTERNS: Array<{ first: boolean; second: boolean; third: boolean }> = [
+    { first: false, second: false, third: false }, // 0 — empty
+    { first: true,  second: false, third: false }, // 1
+    { first: false, second: true,  third: false }, // 2
+    { first: true,  second: true,  third: false }, // 3
+    { first: false, second: false, third: true  }, // 4
+    { first: true,  second: false, third: true  }, // 5
+    { first: false, second: true,  third: true  }, // 6
+    { first: true,  second: true,  third: true  }, // 7 — bases loaded
+  ];
+  const baseRunners = (isGameActive && latestGame)
+    ? (BASE_PATTERNS[latestGame.gameId % 8] ?? BASE_PATTERNS[0]!)
+    : { first: false, second: false, third: false };
 
   const scoreboard = latestGame ? {
     homeTeamName: latestGame.homeTeamName,
@@ -275,7 +315,7 @@ export default function Watch() {
 
   return (
     <div
-      data-testid="watch-tab"
+      data-testid="watch-content"
       style={{
         background: '#0d1117',
         minHeight: 'calc(100vh - 130px)',
@@ -389,6 +429,7 @@ export default function Watch() {
             }}>
               <OwnerDirectivesPanel
                 directiveStatus={directiveStatus}
+                gmConfidence={watchState?.gmConfidence ?? null}
                 onDirectiveIssued={handleDirectiveIssued}
               />
             </div>
@@ -423,6 +464,40 @@ export default function Watch() {
       >
         <WatchNewsTicker items={tickerItems} paused={tickerPaused} />
       </div>
+
+      {/* M6: Season-end newspaper drop overlay (held ≥1.5s, non-skippable even in turbo) */}
+      {seasonEndPaper && (
+        <div
+          data-testid="watch-season-end-newspaper"
+          style={{
+            position: 'absolute', inset: 0,
+            background: 'rgba(13,17,23,0.92)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            zIndex: 50,
+          }}
+        >
+          <div style={{
+            background: '#fef9f0',
+            border: '4px double #c8a86a',
+            borderRadius: '4px',
+            padding: '32px 40px',
+            maxWidth: '500px',
+            width: '90%',
+            textAlign: 'center',
+            fontFamily: "'Bebas Neue', sans-serif",
+          }}>
+            <div style={{ fontSize: '14px', color: '#8b7355', letterSpacing: '0.1em', marginBottom: '8px' }}>
+              {seasonEndPaper.masthead}
+            </div>
+            <div style={{ fontSize: '32px', color: '#1a1a1a', letterSpacing: '0.05em', lineHeight: 1.1 }}>
+              {seasonEndPaper.headline}
+            </div>
+            <div style={{ marginTop: '12px', fontFamily: 'Inter, sans-serif', fontSize: '13px', color: '#4a3f30', lineHeight: 1.5 }}>
+              {seasonEndPaper.lede}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Phase badge */}
       <AnimatePresence>
