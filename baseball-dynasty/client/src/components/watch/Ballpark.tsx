@@ -88,7 +88,7 @@ export default function Ballpark({
 }: BallparkProps) {
   const sky = SKY_COLORS[daypart] ?? NIGHT_SKY;
   const cloudOpacity = CLOUD_OPACITY[weather] ?? 0;
-  const crowdColor = isOwnedPark ? '#3b82f6' : '#6b7280';
+  const crowdColor = isOwnedPark ? '#4b5563' : '#374151';
 
   // Field dimensions (viewBox 600×380)
   const W = 600;
