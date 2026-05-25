@@ -17,6 +17,7 @@ import { forceMinimumTrades } from './tradeDeadline.js';
 import { getLlmStatus, resetNewsCallsThisSeason } from '../services/llm.js';
 import { insertGameNewsItem, insertNewsItem, insertMilestoneNewsItem, fillPendingHeadlines, fillPendingTransactionFlavors } from './news.js';
 import { scrubError } from '../util/scrub.js';
+import { rollAndResolveTragedy } from './tragedy.js';
 import type { LeagueStateSnapshot, SimSpeed } from '../../shared/types.js';
 import type { NewLeagueBodyType } from '../../shared/schemas.js';
 
@@ -402,6 +403,21 @@ async function runGameTick(league: LeagueRow): Promise<void> {
     prepared('UPDATE leagues SET phase = ? WHERE id = ?').run('playoffs', league.id);
     console.log('[engine] Regular season complete, transitioning to playoffs');
     return;
+  }
+
+  // Step 11: Tragedy roll — between game ticks, regular season only (L1 — not during playoffs)
+  // At most one tragedy per tick (B-2). If resolved, pause sim and return (game deferred).
+  try {
+    const hadTragedy = rollAndResolveTragedy(
+      league.id, league.season_number, nextGame.gameNumber, league.worldgen_seed
+    );
+    if (hadTragedy) {
+      // Pause synchronously (setSimSpeed called here to avoid circular import with tragedy.ts)
+      await setSimSpeed('paused');
+      return;
+    }
+  } catch (err) {
+    console.warn('[engine] Tragedy roll error:', scrubError(err).message);
   }
 
   // Check trade deadline

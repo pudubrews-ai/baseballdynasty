@@ -147,6 +147,27 @@ function winProbability(homeTeam: TeamRow, awayTeam: TeamRow, gameId: number): n
     + (homeBullpenAvg - awayBullpenAvg) * 0.002
     + 0.04; // home field advantage
 
+  // Step 11/13 (O-7): morale_effect_bp — sum of active unexpired morale effects for each team
+  // morale_effect_bp is in basis points; morale_effect_bp / 10000 = fractional probability
+  // Expired when current_game_number > morale_effect_until_game
+  const homeMorale = prepared(
+    `SELECT COALESCE(AVG(morale_effect_bp), 0) as avg_bp
+     FROM players
+     WHERE team_id = ? AND is_on_25man = 1
+       AND morale_effect_bp != 0
+       AND (morale_effect_until_game IS NULL OR morale_effect_until_game >= ?)`
+  ).get(homeTeam.id, gameId) as { avg_bp: number } | undefined;
+  const awayMorale = prepared(
+    `SELECT COALESCE(AVG(morale_effect_bp), 0) as avg_bp
+     FROM players
+     WHERE team_id = ? AND is_on_25man = 1
+       AND morale_effect_bp != 0
+       AND (morale_effect_until_game IS NULL OR morale_effect_until_game >= ?)`
+  ).get(awayTeam.id, gameId) as { avg_bp: number } | undefined;
+
+  prob += (homeMorale?.avg_bp ?? 0) / 10000;
+  prob -= (awayMorale?.avg_bp ?? 0) / 10000; // away morale hurts home team
+
   // Clamp to [0.15, 0.85]
   return Math.max(0.15, Math.min(0.85, prob));
 }
