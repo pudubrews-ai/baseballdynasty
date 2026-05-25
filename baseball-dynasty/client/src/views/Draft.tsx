@@ -1,6 +1,70 @@
 import { useState, useEffect, useRef } from 'react';
 import { useLeagueState } from '../hooks/useLeagueState.js';
 
+// v0.5.0: Rule 5 draft board types
+interface Rule5EligibleGroup {
+  team_id: number;
+  team_name: string;
+  team_city: string;
+  players: Array<{
+    id: number; first_name: string; last_name: string; age: number; position: string;
+    overall_rating: number; years_in_org: number; minor_level: string | null;
+  }>;
+}
+
+// Rule 5 Draft Board component
+function Rule5DraftBoard() {
+  const [groups, setGroups] = useState<Rule5EligibleGroup[]>([]);
+  const [loading, setLoading] = useState(false);
+
+  useEffect(() => {
+    setLoading(true);
+    fetch('/api/draft/rule5')
+      .then(r => r.ok ? r.json() : [])
+      .then((data: Rule5EligibleGroup[]) => { setGroups(data); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  if (loading) return <div style={{ color: '#94a3b8', fontSize: '13px' }}>Loading Rule 5 eligible players...</div>;
+  if (groups.length === 0) return (
+    <div data-testid="rule5-draft-board" style={{ color: '#64748b', fontSize: '13px' }}>
+      No Rule 5 eligible players at this time.
+    </div>
+  );
+
+  let pickCounter = 0;
+  return (
+    <div data-testid="rule5-draft-board" style={{ marginTop: '16px' }}>
+      <h3 style={{ fontSize: '15px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+        Rule 5 Draft Eligible
+      </h3>
+      {groups.map(group => {
+        pickCounter++;
+        return (
+          <div
+            key={group.team_id}
+            data-testid={`rule5-eligible-${group.team_id}`}
+            style={{ background: '#1e293b', borderRadius: '6px', padding: '10px', marginBottom: '8px' }}
+          >
+            <div style={{ fontSize: '13px', color: '#60a5fa', marginBottom: '6px', fontWeight: 'bold' }}>
+              {group.team_city} {group.team_name}
+            </div>
+            {group.players.map((p, idx) => (
+              <div
+                key={p.id}
+                data-testid={`rule5-pick-${pickCounter + idx}`}
+                style={{ fontSize: '12px', color: '#e2e8f0', paddingLeft: '8px', marginBottom: '2px' }}
+              >
+                {p.first_name} {p.last_name} — {p.position}, Age {p.age}, OVR {p.overall_rating} ({p.minor_level ?? 'Unknown'})
+              </div>
+            ))}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 interface DraftPick {
   id: number;
   round: number;
@@ -127,6 +191,8 @@ export default function Draft() {
         {allPicks.length > 0 && (
           <p style={{ color: '#94a3b8' }}>{allPicks.length} picks made in the last draft.</p>
         )}
+        {/* v0.5.0: Rule 5 draft board — visible during offseason */}
+        <Rule5DraftBoard />
       </div>
     );
   }

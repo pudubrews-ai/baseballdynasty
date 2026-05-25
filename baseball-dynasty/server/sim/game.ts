@@ -57,7 +57,8 @@ const POSITIONS_ORDER = ['C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'DH'];
 
 // D6: Select lineup — top 9 position players by overall, one per position
 // AB-11: use is_on_25man=1 for the active 25-man roster (not is_on_mlb_roster)
-export function selectLineup(team: TeamRow): PlayerRow[] {
+// v0.5.0: opposingThrows — when provided and team.gm_archetype==='analytics', platoon low-modifier players
+export function selectLineup(team: TeamRow, opposingThrows?: 'L' | 'R'): PlayerRow[] {
   // Step 12 (G-1): exclude suspended players from lineup — keep is_on_25man=1 for cap accounting
   const roster = prepared(
     "SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position NOT IN ('SP','RP','CL') AND suspension_games_remaining = 0 ORDER BY overall_rating DESC"
@@ -67,9 +68,23 @@ export function selectLineup(team: TeamRow): PlayerRow[] {
   const filled = new Set<string>();
   const used = new Set<number>();
 
+  // v0.5.0: Analytics GM platooning — if opposing starter throws L, prefer high vs_lefty_modifier
+  // For each position, if analytics GM and opposingThrows provided, rank by platoon-adjusted overall
+  const isAnalytics = team.gm_archetype === 'analytics';
+
+  const getRankScore = (p: PlayerRow): number => {
+    if (!isAnalytics || !opposingThrows) return p.overall_rating;
+    // Adjust score by platoon modifier vs opposing hand
+    const modifier = opposingThrows === 'L' ? (p.vs_lefty_modifier ?? 0) : (p.vs_righty_modifier ?? 0);
+    return p.overall_rating + modifier;
+  };
+
+  // Sort roster by rank score for platoon-aware selection
+  const sortedRoster = [...roster].sort((a, b) => getRankScore(b) - getRankScore(a));
+
   // First pass: fill each position with best available player at that position
   for (const pos of POSITIONS_ORDER) {
-    const player = roster.find(p => p.position === pos && !used.has(p.id));
+    const player = sortedRoster.find(p => p.position === pos && !used.has(p.id));
     if (player) {
       lineup.push(player);
       filled.add(pos);
@@ -80,7 +95,7 @@ export function selectLineup(team: TeamRow): PlayerRow[] {
   // D6 position fallback: fill unfilled slots with next-best available player
   const unfilled = POSITIONS_ORDER.filter(p => !filled.has(p));
   if (unfilled.length > 0) {
-    const bench = roster.filter(p => !used.has(p.id));
+    const bench = sortedRoster.filter(p => !used.has(p.id));
     for (const pos of unfilled) {
       const sub = bench.find(p => !used.has(p.id));
       if (sub) {
@@ -113,8 +128,15 @@ export function selectStartingPitcher(team: TeamRow): PlayerRow | null {
 
 // Win probability formula per spec, clamped [0.15, 0.85]
 function winProbability(homeTeam: TeamRow, awayTeam: TeamRow, gameId: number): number {
-  const homeLineup = selectLineup(homeTeam);
-  const awayLineup = selectLineup(awayTeam);
+  // v0.5.0: Get starters first to pass opposing hand to selectLineup for platoon
+  const homeStarter = selectStartingPitcher(homeTeam);
+  const awayStarter = selectStartingPitcher(awayTeam);
+  const homeStarterThrows = (homeStarter?.throws ?? 'R') as 'L' | 'R';
+  const awayStarterThrows = (awayStarter?.throws ?? 'R') as 'L' | 'R';
+
+  // v0.5.0: Pass opposing throws for platoon-aware lineup selection (4a-bis)
+  const homeLineup = selectLineup(homeTeam, awayStarterThrows);
+  const awayLineup = selectLineup(awayTeam, homeStarterThrows);
 
   // Use mean overall of active lineup for batting_lineup_avg (per D6 code comment)
   const homeLineupAvg = homeLineup.length > 0
@@ -124,8 +146,7 @@ function winProbability(homeTeam: TeamRow, awayTeam: TeamRow, gameId: number): n
     ? awayLineup.reduce((s, p) => s + p.overall_rating, 0) / awayLineup.length
     : 50;
 
-  const homeStarter = selectStartingPitcher(homeTeam);
-  const awayStarter = selectStartingPitcher(awayTeam);
+  // starters already computed above for platoon lineup selection
   const homeStarterRating = homeStarter?.overall_rating ?? 50;
   const awayStarterRating = awayStarter?.overall_rating ?? 50;
 
@@ -176,6 +197,42 @@ function winProbability(homeTeam: TeamRow, awayTeam: TeamRow, gameId: number): n
   const awayChemEffect = chemistryWinProbEffect(awayTeam.chemistry_score ?? 50);
   prob += homeChemEffect / 10000;
   prob -= awayChemEffect / 10000;
+
+  // v0.5.0: Platoon split modifier — AVG, not SUM (X-F8a). Fold into existing lineup rows.
+  // platoon_avg = AVG over 9 home starters of (vs_lefty_modifier if away starter throws L, else vs_righty_modifier)
+  // platoon_bp = platoon_avg × 0.002, per-team contribution bounded ≈ ±0.02
+  if (homeLineup.length > 0) {
+    const homePlatoonAvg = homeLineup.reduce((s, p) => {
+      const mod = awayStarterThrows === 'L' ? (p.vs_lefty_modifier ?? 0) : (p.vs_righty_modifier ?? 0);
+      return s + mod;
+    }, 0) / homeLineup.length;
+    prob += homePlatoonAvg * 0.002;
+  }
+  if (awayLineup.length > 0) {
+    const awayPlatoonAvg = awayLineup.reduce((s, p) => {
+      const mod = homeStarterThrows === 'L' ? (p.vs_lefty_modifier ?? 0) : (p.vs_righty_modifier ?? 0);
+      return s + mod;
+    }, 0) / awayLineup.length;
+    prob -= awayPlatoonAvg * 0.002;
+  }
+
+  // v0.5.0: Hot/cold streak modifier — AVG, not SUM (X-F10b). Uses existing lineup rows.
+  // streak_bp per player = hot ? +8 : cold ? -8 : 0
+  // team_streak_bp = AVG × 0.005 → bounded ≈ ±0.04
+  if (homeLineup.length > 0) {
+    const homeStreakAvg = homeLineup.reduce((s, p) => {
+      const bp = p.streak_type === 'hot' ? 8 : p.streak_type === 'cold' ? -8 : 0;
+      return s + bp;
+    }, 0) / homeLineup.length;
+    prob += homeStreakAvg * 0.005;
+  }
+  if (awayLineup.length > 0) {
+    const awayStreakAvg = awayLineup.reduce((s, p) => {
+      const bp = p.streak_type === 'hot' ? 8 : p.streak_type === 'cold' ? -8 : 0;
+      return s + bp;
+    }, 0) / awayLineup.length;
+    prob -= awayStreakAvg * 0.005;
+  }
 
   // Clamp to [0.15, 0.85]
   return Math.max(0.15, Math.min(0.85, prob));
@@ -274,11 +331,13 @@ export async function simulateGame(
   // Walk-off: only ~18% of home wins (yields ~9.7% of all games — within MLB-typical 8-11%)
   const isWalkOff = homeWins && (rng() < 0.18);
 
-  // Get lineups and pitchers
-  const homeLineup = selectLineup(homeTeam);
-  const awayLineup = selectLineup(awayTeam);
+  // Get lineups and pitchers — v0.5.0: platoon-aware (4a-bis: same lineup for win-prob and box-score)
   const homeStarter = selectStartingPitcher(homeTeam);
   const awayStarter = selectStartingPitcher(awayTeam);
+  const homeStarterThrowsForLineup = (homeStarter?.throws ?? 'R') as 'L' | 'R';
+  const awayStarterThrowsForLineup = (awayStarter?.throws ?? 'R') as 'L' | 'R';
+  const homeLineup = selectLineup(homeTeam, awayStarterThrowsForLineup);
+  const awayLineup = selectLineup(awayTeam, homeStarterThrowsForLineup);
 
   // §1.1 Iter-5: If either team has no starting pitcher on the MLB roster,
   // skip this game with a warning. This shouldn't happen if
@@ -326,11 +385,12 @@ export async function simulateGame(
 
   // §4.1: Walk-off semantics — home team pitches full 9, away team gets truncated 8.0 IP
   // Real baseball: home wins walk-off in bottom of last inning → away's top-of-inning was already done
+  // v0.5.0: pass gmArchetype for role-aware bullpen selection
   const homePitcherLines = generatePitcherLines(
-    rng, homeStarter, homeBullpen, homeTeam.id, awayScore, false  // home always pitches 9.0
+    rng, homeStarter, homeBullpen, homeTeam.id, awayScore, false, homeTeam.gm_archetype  // home always pitches 9.0
   );
   const awayPitcherLines = generatePitcherLines(
-    rng, awayStarter, awayBullpen, awayTeam.id, homeScore, isWalkOff  // away gets 8.0 on walk-off
+    rng, awayStarter, awayBullpen, awayTeam.id, homeScore, isWalkOff, awayTeam.gm_archetype  // away gets 8.0 on walk-off
   );
 
   // §5.1 Rule 5: Assign W/L
@@ -461,6 +521,7 @@ export async function simulateGame(
     // This fires whether called from runGameTick (engine) or directly from tests.
     // Guard with is_on_25man=1 so we never double-injure or touch minor leaguers.
     // engine.ts write site is suppressed for is_on_25man=0 (already updated here).
+    // v0.5.0 (X-F10a): IL placement also clears streak_type so a hot/cold streak ends immediately.
     for (const ev of notableEvents) {
       if (ev.type === 'injury' && ev.playerId) {
         const ilGames = ev.recoveryGames ?? 7;
@@ -474,9 +535,82 @@ export async function simulateGame(
                injury_type = ?,
                injury_tier = ?,
                rehab_games_remaining = ?,
-               career_injuries = career_injuries + 1
+               career_injuries = career_injuries + 1,
+               streak_type = NULL,
+               streak_games_remaining = 0
            WHERE id = ? AND is_on_25man = 1`
         ).run(gameNumber + ilGames, injuryType, injuryTier, rehabGames, ev.playerId);
+      }
+    }
+
+    // v0.5.0: Track bullpen usage — increment appearances_this_season and update consecutive_days_used
+    // consecutive_days_used: increment if reliever appeared in a game on a consecutive game_date, else reset
+    // Write INSIDE writeGame transaction to keep counters in sync with game records (X-F9c/X-T3)
+    const allRelievers = [...homePitcherLines.slice(1), ...awayPitcherLines.slice(1)];
+    for (const pitcherLine of allRelievers) {
+      if (pitcherLine.inningsPitched <= 0) continue;
+      // Get current reliever data for consecutive tracking
+      const curReliever = db.prepare(
+        `SELECT appearances_this_season, consecutive_days_used FROM players WHERE id = ?`
+      ).get(pitcherLine.playerId) as { appearances_this_season: number; consecutive_days_used: number } | undefined;
+      if (!curReliever) continue;
+      const newApps = (curReliever.appearances_this_season ?? 0) + 1;
+      // For consecutive_days tracking: increment (we count consecutive game appearances)
+      // Since game_date transitions are per-game, increment per appearance is the proxy
+      const newConsec = (curReliever.consecutive_days_used ?? 0) + 1;
+      db.prepare(
+        `UPDATE players SET appearances_this_season = ?, consecutive_days_used = ? WHERE id = ?`
+      ).run(newApps, newConsec, pitcherLine.playerId);
+
+      // Season fatigue injury risk: after 70 appearances, elevate injury risk
+      if (newApps >= 70) {
+        // Temporarily set injury_prone higher for this reliever (capped at 9)
+        const injuryRow = db.prepare(`SELECT injury_prone FROM players WHERE id = ?`).get(pitcherLine.playerId) as { injury_prone: number } | undefined;
+        if (injuryRow && injuryRow.injury_prone < 9) {
+          db.prepare(`UPDATE players SET injury_prone = MIN(9, injury_prone + 1) WHERE id = ?`).run(pitcherLine.playerId);
+        }
+      }
+    }
+
+    // v0.5.0: Reset consecutive_days_used for pitchers who did NOT appear today (back to 0)
+    // Only reset for active relievers on the two teams (write only changed rows X-P2)
+    const allAppearedIds = new Set(allRelievers.map(r => r.playerId));
+    const inactiveRelievers = db.prepare(
+      `SELECT id FROM players WHERE team_id IN (?, ?) AND is_on_25man = 1
+       AND position IN ('RP','CL') AND consecutive_days_used > 0`
+    ).all(homeTeam.id, awayTeam.id) as Array<{ id: number }>;
+    for (const r of inactiveRelievers) {
+      if (!allAppearedIds.has(r.id)) {
+        db.prepare(`UPDATE players SET consecutive_days_used = 0 WHERE id = ?`).run(r.id);
+      }
+    }
+
+    // v0.5.0: Decrement streak_games_remaining for all active streaking players on these teams
+    // Clear streak_type when it reaches 0 (write only changed rows X-P2)
+    const streakingPlayers = db.prepare(
+      `SELECT id, streak_games_remaining FROM players
+       WHERE team_id IN (?, ?) AND is_on_25man = 1
+         AND streak_type IS NOT NULL AND streak_games_remaining > 0`
+    ).all(homeTeam.id, awayTeam.id) as Array<{ id: number; streak_games_remaining: number }>;
+    for (const sp of streakingPlayers) {
+      const newRemaining = sp.streak_games_remaining - 1;
+      if (newRemaining <= 0) {
+        db.prepare(`UPDATE players SET streak_type = NULL, streak_games_remaining = 0 WHERE id = ?`).run(sp.id);
+      } else {
+        db.prepare(`UPDATE players SET streak_games_remaining = ? WHERE id = ?`).run(newRemaining, sp.id);
+      }
+    }
+
+    // v0.5.0: Update winning_streak / losing_streak denormalized cache on teams (O-7)
+    // streak.ts is the source of truth; we update the denorm here to keep it current
+    if (!isPlayoff) {
+      // Home team
+      if (homeWins) {
+        db.prepare(`UPDATE teams SET winning_streak = winning_streak + 1, losing_streak = 0 WHERE id = ?`).run(homeTeam.id);
+        db.prepare(`UPDATE teams SET losing_streak = losing_streak + 1, winning_streak = 0 WHERE id = ?`).run(awayTeam.id);
+      } else {
+        db.prepare(`UPDATE teams SET losing_streak = losing_streak + 1, winning_streak = 0 WHERE id = ?`).run(homeTeam.id);
+        db.prepare(`UPDATE teams SET winning_streak = winning_streak + 1, losing_streak = 0 WHERE id = ?`).run(awayTeam.id);
       }
     }
 
@@ -607,13 +741,77 @@ function clampRBI(lines: BatterBoxLine[], teamRuns: number, rng: () => number): 
   }
 }
 
+// v0.5.0: Role-aware bullpen selection
+// Dynamic re-derivation at game time — re-evaluate available relievers from active 25-man.
+// Do NOT trust stored bullpen_role as the only source of truth (IL/trades invalidate mid-season).
+function selectBullpenByRole(
+  bullpen: PlayerRow[],
+  gmArchetype: string
+): { closer: PlayerRow | null; setup: PlayerRow | null; others: PlayerRow[] } {
+  // Filter by fatigue overuse (consecutive_days_used >= 3 → skip even in save situation for analytics)
+  const available = bullpen.filter(r => {
+    // Analytics closer limit: if closer has >= 50 appearances, don't use
+    if (gmArchetype === 'analytics' && r.appearances_this_season >= 50) return false;
+    return true;
+  });
+
+  if (available.length === 0) {
+    // Fallback: use any bullpen member even if overused
+    return {
+      closer: bullpen[0] ?? null,
+      setup: bullpen[1] ?? null,
+      others: bullpen.slice(2),
+    };
+  }
+
+  // Re-derive roles dynamically from available relievers
+  // Sort by overall DESC, pitching_control DESC
+  const sorted = [...available].sort((a, b) =>
+    b.overall_rating !== a.overall_rating
+      ? b.overall_rating - a.overall_rating
+      : b.pitching_control - a.pitching_control
+  );
+
+  let closer: PlayerRow | null = null;
+  let setup: PlayerRow | null = null;
+  const others: PlayerRow[] = [];
+
+  for (let i = 0; i < sorted.length; i++) {
+    const r = sorted[i]!;
+    if (!closer && r.overall_rating >= 70 && r.pitching_control >= 65) {
+      // Check overuse penalty — if consecutive_days >= 3, skip for analytics
+      if (gmArchetype === 'analytics' && r.consecutive_days_used >= 3) {
+        // Use fallback — best available
+        if (!closer) closer = r;
+      } else {
+        closer = r;
+      }
+    } else if (!setup && closer && i === sorted.indexOf(closer) + 1 && r.overall_rating >= 65) {
+      setup = r;
+    } else {
+      others.push(r);
+    }
+  }
+
+  // Fallback: if no closer found, use best available
+  if (!closer && sorted.length > 0) {
+    closer = sorted[0] ?? null;
+  }
+  if (!setup && sorted.length > 1) {
+    setup = sorted.find(r => r !== closer) ?? null;
+  }
+
+  return { closer, setup, others: sorted.filter(r => r !== closer && r !== setup) };
+}
+
 function generatePitcherLines(
   rng: () => number,
   starter: PlayerRow | null,
   bullpen: PlayerRow[],
   teamId: number,
   runsAllowed: number,
-  isWalkOff: boolean
+  isWalkOff: boolean,
+  gmArchetype?: string
 ): PitcherBoxLine[] {
   const lines: PitcherBoxLine[] = [];
 
@@ -651,36 +849,95 @@ function generatePitcherLines(
     // Bullpen covers remaining innings
     let remainingIP = totalIP - starterIP;
     let remainingER = runsAllowed - starterER;
-    const bullpenToUse = bullpen.slice(0, 3); // use up to 3 relievers
 
-    if (remainingIP > 0 && bullpenToUse.length > 0) {
-      const ipPerReliever = remainingIP / bullpenToUse.length;
-      for (let ri = 0; ri < bullpenToUse.length; ri++) {
-        const reliever = bullpenToUse[ri]!;
-        const isLast = ri === bullpenToUse.length - 1;
-        // §2.9 Rule 4: last reliever gets exactly the remaining IP to ensure total = totalIP
-        const relIP = isLast
-          ? Math.round(remainingIP * 3) / 3  // ensure exact thirds
-          : Math.min(remainingIP, Math.round(ipPerReliever * 3) / 3);
-        const relER = Math.min(remainingER, Math.round(rng() * 2));
-        lines.push({
-          playerId: reliever.id,
-          playerName: `${reliever.first_name} ${reliever.last_name}`,
-          teamId,
-          inningsPitched: relIP,
-          hitsAllowed: randInt(rng, 0, 3),
-          earnedRuns: relER,
-          strikeouts: randInt(rng, 0, 3),
-          walks: randInt(rng, 0, 2),
-          win: false,
-          loss: false,
-          save: false,
-        });
-        remainingIP -= relIP;
-        remainingER -= relER;
-        if (remainingIP <= 0.001) break;
+    if (remainingIP > 0 && bullpen.length > 0) {
+      // v0.5.0: Role-aware bullpen ordering
+      const { closer, setup, others } = selectBullpenByRole(bullpen, gmArchetype ?? 'balanced');
+
+      // Build ordered bullpen queue: middle/long relievers first, then setup, then closer (9th inning)
+      // Closer: max 1.0 IP (save situation, near-end); setup: max 1.1 IP; others fill middle
+      const bullpenQueue: Array<{ player: PlayerRow; maxIP: number }> = [];
+
+      // Add "others" first (middle/long relief for earlier innings)
+      for (const r of others.slice(0, 2)) {
+        bullpenQueue.push({ player: r, maxIP: 2.0 });
       }
-    } else if (remainingIP > 0 && bullpenToUse.length === 0) {
+      // Setup pitcher
+      if (setup) bullpenQueue.push({ player: setup, maxIP: 1.1 });
+      // Closer last (save situation, final inning)
+      if (closer) bullpenQueue.push({ player: closer, maxIP: 1.0 });
+
+      // If no queue built, fall back to original logic
+      if (bullpenQueue.length === 0) {
+        const fallback = bullpen.slice(0, 3);
+        const ipPerReliever = remainingIP / fallback.length;
+        for (let ri = 0; ri < fallback.length; ri++) {
+          const reliever = fallback[ri]!;
+          const isLast = ri === fallback.length - 1;
+          const relIP = isLast
+            ? Math.round(remainingIP * 3) / 3
+            : Math.min(remainingIP, Math.round(ipPerReliever * 3) / 3);
+          const relER = Math.min(remainingER, Math.round(rng() * 2));
+          lines.push({
+            playerId: reliever.id,
+            playerName: `${reliever.first_name} ${reliever.last_name}`,
+            teamId,
+            inningsPitched: relIP,
+            hitsAllowed: randInt(rng, 0, 3),
+            earnedRuns: relER,
+            strikeouts: randInt(rng, 0, 3),
+            walks: randInt(rng, 0, 2),
+            win: false,
+            loss: false,
+            save: false,
+          });
+          remainingIP -= relIP;
+          remainingER -= relER;
+          if (remainingIP <= 0.001) break;
+        }
+      } else {
+        // Role-ordered: distribute innings with caps
+        const usedRelieverIds = new Set<number>();
+        for (let qi = 0; qi < bullpenQueue.length; qi++) {
+          if (remainingIP <= 0.001) break;
+          const { player: reliever, maxIP } = bullpenQueue[qi]!;
+          if (usedRelieverIds.has(reliever.id)) continue;
+          usedRelieverIds.add(reliever.id);
+
+          const isLastQueued = qi === bullpenQueue.length - 1;
+          // v0.5.0: Overuse penalty — consecutive_days_used >= 3 → -10% effectiveness (reflected in ER)
+          const overusePenalty = reliever.consecutive_days_used >= 3 ? 1.1 : 1.0;
+          // Season fatigue penalty
+          const fatiguePenalty = reliever.appearances_this_season >= 70 ? 1.1
+            : reliever.appearances_this_season >= 60 ? 1.05 : 1.0;
+
+          // Closer limited to 1.0 IP, setup to 1.1 IP
+          const cappedMaxIP = Math.min(maxIP, remainingIP);
+          const relIP = isLastQueued
+            ? Math.round(remainingIP * 3) / 3  // last pitcher absorbs remainder
+            : Math.min(cappedMaxIP, Math.round((remainingIP / Math.max(1, bullpenQueue.length - qi)) * 3) / 3);
+
+          const relERBase = Math.min(remainingER, Math.round(rng() * 2));
+          const relER = Math.min(remainingER, Math.round(relERBase * overusePenalty * fatiguePenalty));
+
+          lines.push({
+            playerId: reliever.id,
+            playerName: `${reliever.first_name} ${reliever.last_name}`,
+            teamId,
+            inningsPitched: Math.max(0, Math.round(relIP * 3) / 3),
+            hitsAllowed: randInt(rng, 0, 3),
+            earnedRuns: relER,
+            strikeouts: randInt(rng, 0, 3),
+            walks: randInt(rng, 0, 2),
+            win: false,
+            loss: false,
+            save: false,
+          });
+          remainingIP -= relIP;
+          remainingER = Math.max(0, remainingER - relER);
+        }
+      }
+    } else if (remainingIP > 0 && bullpen.length === 0) {
       // No bullpen available — add a placeholder to satisfy total IP
       // This handles edge case where team has no relievers
       lines[0]!.inningsPitched = Math.round(totalIP * 3) / 3;
@@ -888,8 +1145,20 @@ function checkCareerMilestones(
       milestones.push({ type: 'milestone', playerId: player.id, playerName: `${player.first_name} ${player.last_name}`, description: `${player.first_name} ${player.last_name} reached 1000 career strikeouts!` });
     }
 
-    prepared('UPDATE players SET career_ip = career_ip + ?, career_k = career_k + ? WHERE id = ?')
-      .run(pitcher.inningsPitched, pitcher.strikeouts, pitcher.playerId);
+    // v0.5.0 (Section 4e): career_wins accumulation — pitcher.win flag computed by assignWinLoss
+    const winIncrement = pitcher.win ? 1 : 0;
+    const prevWins = player.career_wins ?? 0;
+    const newWins = prevWins + winIncrement;
+    // 300-win milestone alert at 290, achievement at 300
+    if (prevWins < 290 && newWins >= 290) {
+      milestones.push({ type: 'milestone', playerId: player.id, playerName: `${player.first_name} ${player.last_name}`, description: `Record Watch — ${player.first_name} ${player.last_name} needs ${300 - newWins} wins to reach 300 career wins!` });
+    }
+    if (prevWins < 300 && newWins >= 300) {
+      milestones.push({ type: 'milestone', playerId: player.id, playerName: `${player.first_name} ${player.last_name}`, description: `${player.first_name} ${player.last_name} reached 300 career wins!` });
+    }
+
+    prepared('UPDATE players SET career_ip = career_ip + ?, career_k = career_k + ?, career_wins = career_wins + ? WHERE id = ?')
+      .run(pitcher.inningsPitched, pitcher.strikeouts, winIncrement, pitcher.playerId);
   }
 
   return milestones;

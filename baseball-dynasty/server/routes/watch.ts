@@ -2,30 +2,63 @@
 // Returns owned-team-aware derived watch state. All derived fields deterministic (no Math.random).
 
 import { Router, Request, Response, NextFunction } from 'express';
-import { getActiveLeague, prepared } from '../db.js';
+import { getActiveLeague, prepared, type TeamRow } from '../db.js';
 import { getFranchiseState } from '../sim/franchise.js';
 import { computeTeamStreak } from '../sim/streak.js';
+import { computeAttendanceRate } from '../sim/attendanceCalc.js';
 
 export const watchRouter = Router();
 
-// Derived attendance — D2
+// Derived attendance — D2 / v0.5.0: now delegates to shared computeAttendanceRate
 function computeAttendance(
-  marketSize: string,
-  winPct: number,
+  team: TeamRow,
   homeTeamId: number,
-  gameNumber: number
+  gameNumber: number,
+  leagueId: number
 ): { attendancePct: number; stadiumCapacity: number } {
-  const baseRates: Record<string, number> = {
-    mega: 0.85, large: 0.75, medium: 0.65, small: 0.55,
-  };
   const capacities: Record<string, number> = {
     mega: 50000, large: 42000, medium: 35000, small: 28000,
   };
-  const baseRate = baseRates[marketSize] ?? 0.65;
-  const capacity = capacities[marketSize] ?? 35000;
-  const winPctBonus = (winPct - 0.5) * 0.4;
+  const capacity = team.stadium_capacity > 0 ? team.stadium_capacity : (capacities[team.market_size] ?? 35000);
+
+  // Check for rivalries for this game
+  const rivalries = prepared(
+    `SELECT team_a_id, team_b_id FROM rivalries WHERE league_id = ? AND rivalry_score > 0`
+  ).all(leagueId) as Array<{ team_a_id: number; team_b_id: number }>;
+  const rivalOpponentIds = rivalries
+    .filter(r => r.team_a_id === homeTeamId || r.team_b_id === homeTeamId)
+    .map(r => r.team_a_id === homeTeamId ? r.team_b_id : r.team_a_id);
+
+  // Check for star player
+  const starCheck = prepared(
+    `SELECT 1 FROM players WHERE team_id = ? AND is_on_25man = 1 AND overall_rating >= 85 LIMIT 1`
+  ).get(homeTeamId) as unknown | undefined;
+  const hasStarPlayer = !!starCheck;
+
+  // Is playoff race? — approximate: within 5 games of top 4 in conference
+  const isPlayoffRace = false; // simplified for per-game view
+
+  // Look up the opponent for the most recent game involving this team
+  const oppRow = prepared(
+    `SELECT CASE WHEN home_team_id = ? THEN away_team_id ELSE home_team_id END AS opp
+     FROM game_log
+     WHERE league_id = ? AND (home_team_id = ? OR away_team_id = ?)
+     ORDER BY game_number DESC LIMIT 1`
+  ).get(homeTeamId, leagueId, homeTeamId, homeTeamId) as { opp: number } | undefined;
+  const opponentTeamId = oppRow?.opp;
+
+  // Determine if this is a rivalry game based on the opponent
+  const isRivalry = opponentTeamId !== undefined && rivalOpponentIds.includes(opponentTeamId);
+
+  // Use the shared function
+  const rate = computeAttendanceRate(
+    team, rivalOpponentIds, isPlayoffRace, false, hasStarPlayer,
+    isRivalry, opponentTeamId
+  );
+
+  // Add jitter for per-game variation
   const jitter = (((homeTeamId * 31 + gameNumber * 17) % 11) - 5) / 100;
-  const attendancePct = Math.max(0.35, Math.min(1.0, baseRate + winPctBonus + jitter));
+  const attendancePct = Math.max(0.35, Math.min(1.0, rate + jitter));
   return { attendancePct: Math.round(attendancePct * 1000) / 1000, stadiumCapacity: capacity };
 }
 
@@ -162,9 +195,11 @@ watchRouter.get('/', async (_req: Request, res: Response, next: NextFunction): P
 
         const gameNumber = latestGame?.gameNumber ?? 0;
         const homeTeamIdForDerived = latestGame?.homeTeamId ?? ownedTeamId;
-        const { attendancePct, stadiumCapacity } = computeAttendance(
-          teamRow.market_size, winPct, homeTeamIdForDerived, gameNumber
-        );
+        // Need full TeamRow for shared attendance calculation
+        const fullTeamRow = prepared('SELECT * FROM teams WHERE id = ?').get(ownedTeamId) as TeamRow | undefined;
+        const { attendancePct, stadiumCapacity } = fullTeamRow
+          ? computeAttendance(fullTeamRow, homeTeamIdForDerived, gameNumber, league.id)
+          : { attendancePct: 0.65, stadiumCapacity: 35000 };
 
         const seedTeamId = ownedTeamId;
         const { weather, daypart } = latestGame

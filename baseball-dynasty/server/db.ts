@@ -184,6 +184,15 @@ export interface TeamRow {
   last_cascade_check_game: number;
   last_chemistry_calc_game: number;
   personality_rolls_done_season: number | null;
+  // v0.5.0 new columns
+  international_bonus_pool: number;
+  scouting_rating: number;
+  stadium_upgrade_in_progress: number;
+  stadium_upgrade_complete_season: number | null;
+  stadium_upgrade_type: string | null;
+  new_stadium_honeymoon_seasons_remaining: number;
+  winning_streak: number;
+  losing_streak: number;
 }
 
 export interface PlayerRow {
@@ -260,6 +269,29 @@ export interface PlayerRow {
   morale_effect_until_game: number | null;
   // migration 013: career peak rating (nullable — may be null for pre-013 rows until dev step runs)
   career_overall: number | null;
+  // v0.5.0 new columns
+  bats: string;
+  throws: string;
+  arb_year: number | null;
+  has_opt_out: number;
+  opt_out_after_year: number | null;
+  opted_out: number;
+  is_international_signee: number;
+  signing_bonus: number;
+  true_overall: number | null;
+  is_on_40man: number;
+  signed_age: number | null;
+  years_in_org: number;
+  rule5_drafted: number;
+  rule5_from_team_id: number | null;
+  rule5_return_checked: number;
+  vs_lefty_modifier: number;
+  vs_righty_modifier: number;
+  bullpen_role: string | null;
+  appearances_this_season: number;
+  consecutive_days_used: number;
+  streak_type: string | null;
+  streak_games_remaining: number;
 }
 
 export interface GameLogRow {
@@ -373,6 +405,67 @@ export interface MinorLeagueStandingsRow {
   wins: number;
   losses: number;
   last_updated_game: number;
+}
+
+export interface RivalryRow {
+  id: number;
+  league_id: number;
+  team_a_id: number;
+  team_b_id: number;
+  rivalry_score: number;
+  formed_season: number;
+  last_updated_season: number;
+  origin_type: string;
+}
+
+export interface AwardRaceRow {
+  id: number;
+  league_id: number;
+  season_number: number;
+  award_type: string;
+  league: string;
+  leader_player_id: number | null;
+  leader_value: number | null;
+  second_player_id: number | null;
+  second_value: number | null;
+  last_updated_game: number;
+}
+
+export interface AwardWinnerRow {
+  id: number;
+  league_id: number;
+  season_number: number;
+  award_type: string;
+  league: string;
+  player_id: number;
+  vote_share: number;
+}
+
+export interface StadiumUpgradeRow {
+  id: number;
+  league_id: number;
+  team_id: number;
+  upgrade_type: string;
+  cost: number;
+  season_started: number;
+  season_completed: number | null;
+  capacity_delta: number;
+  revenue_delta: number;
+}
+
+export interface InternationalProspectRow {
+  id: number;
+  league_id: number;
+  season_number: number;
+  name: string;
+  age: number;
+  origin_country: string;
+  scouted_overall: number;
+  true_overall: number;
+  potential: string;
+  signing_team_id: number | null;
+  signed: number;
+  created_at: number;
 }
 
 export function closeDb(): void {

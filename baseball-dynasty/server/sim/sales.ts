@@ -236,6 +236,28 @@ export function resolveRelocation(
       `BREAKING: ${team.city} ${team.name} relocates to ${newCity.name} — renamed the ${newCity.name} ${newNickname}`
     );
 
+    // Spec line 216/244: relocating cancels any in-progress stadium upgrade; forfeit costs.
+    if (team.stadium_upgrade_in_progress === 1) {
+      db.prepare(
+        `UPDATE teams
+           SET stadium_upgrade_in_progress = 0,
+               stadium_upgrade_complete_season = NULL,
+               stadium_upgrade_type = NULL
+         WHERE id = ?`
+      ).run(team.id);
+
+      db.prepare(
+        `INSERT INTO transactions
+           (league_id, season_number, transaction_type, team_id, player_id, narrative, details_json, created_at)
+         VALUES (?, ?, 'stadium_upgrade_forfeit', ?, NULL, ?, ?, ?)`
+      ).run(
+        leagueId, seasonNumber, team.id,
+        `${team.city} ${team.name} forfeit in-progress stadium upgrade (${team.stadium_upgrade_type ?? 'unknown'}) on relocation`,
+        JSON.stringify({ forfeited_upgrade_type: team.stadium_upgrade_type ?? null }),
+        Date.now()
+      );
+    }
+
     console.log(`[sales] Relocation: team ${team.id} ${team.city} ${team.name} → ${newCity.name} ${newNickname}`);
   }
 }

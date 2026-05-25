@@ -113,9 +113,10 @@ async function skipFranchise(): Promise<{ ok: boolean }> {
 
 interface FranchiseSelectionProps {
   onComplete: () => void;
+  onNewDynasty?: () => void;
 }
 
-export default function FranchiseSelection({ onComplete }: FranchiseSelectionProps) {
+export default function FranchiseSelection({ onComplete, onNewDynasty }: FranchiseSelectionProps) {
   const [teams, setTeams] = useState<TeamCard[]>([]);
   const [hoveredTeam, setHoveredTeam] = useState<number | null>(null);
   const [pendingTeam, setPendingTeam] = useState<TeamCard | null>(null);
@@ -176,7 +177,21 @@ export default function FranchiseSelection({ onComplete }: FranchiseSelectionPro
       }}
     >
       {/* Header */}
-      <div style={{ textAlign: 'center', marginBottom: '32px' }}>
+      <div style={{ textAlign: 'center', marginBottom: '32px', position: 'relative' }}>
+        {onNewDynasty && (
+          <button
+            data-testid="franchise-selection-new-dynasty"
+            onClick={onNewDynasty}
+            style={{
+              position: 'absolute', top: 0, right: 0,
+              background: '#1e293b', border: '1px solid #334155',
+              color: '#94a3b8', padding: '6px 14px', borderRadius: '6px',
+              cursor: 'pointer', fontSize: '13px',
+            }}
+          >
+            New Dynasty
+          </button>
+        )}
         <h1 style={{
           fontFamily: "'Bebas Neue', sans-serif",
           fontSize: '52px',

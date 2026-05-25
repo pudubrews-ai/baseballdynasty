@@ -1,3 +1,3 @@
 You are the Orchestrator. Read build-rules.md before doing anything else.
-Then orchestrate the build of Baseball Dynasty Simulator v0.4.0 using
-v0.4.0-app-spec-section.md and v0.4.0-test-spec.md.
+Then orchestrate the build of Baseball Dynasty Simulator v0.5.0 using
+v0.5.0-app-spec-section.md and v0.5.0-test-spec.md.

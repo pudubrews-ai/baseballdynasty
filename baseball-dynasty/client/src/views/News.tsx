@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useLeagueState } from '../hooks/useLeagueState.js';
 
-type NewsBadge = 'ROSTER' | 'TRANSACTION' | 'FRONT OFFICE' | 'INJURY' | 'MILESTONE' | 'GAME';
+type NewsBadge = 'ROSTER' | 'TRANSACTION' | 'FRONT OFFICE' | 'INJURY' | 'MILESTONE' | 'GAME' | 'RIVALRY';
 type NewsFilter = 'all' | 'roster' | 'transactions' | 'frontoffice' | 'injuries' | 'milestones';
 
 interface NewsItem {
@@ -13,6 +13,7 @@ interface NewsItem {
   team_id: number | null;
   secondary_team_id: number | null;
   player_id: number | null;
+  source_id: number | null;
   headline_text: string | null;
   is_headline_pending: number;
   details_json: string | null;
@@ -26,6 +27,7 @@ const BADGE_COLORS: Record<NewsBadge, { bg: string; text: string }> = {
   'INJURY': { bg: '#ef4444', text: '#fff' },
   'MILESTONE': { bg: '#10b981', text: '#fff' },
   'GAME': { bg: '#475569', text: '#fff' },
+  'RIVALRY': { bg: '#dc2626', text: '#fff' }, // v0.5.0: rivalry badge
 };
 
 const FILTER_LABELS: Record<NewsFilter, string> = {
@@ -117,6 +119,12 @@ export default function News() {
               {/* Compact row */}
               <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                 <span data-testid="news-badge"><BadgePill badge={item.badge} /></span>
+                {/* v0.5.0: Rivalry badge — exactly once per rivalry_game item (wrap in div per Universal Lesson 1) */}
+                {item.event_type === 'rivalry_game' && (
+                  <div data-testid={`rivalry-badge-${item.source_id ?? item.id}`}>
+                    <BadgePill badge="RIVALRY" />
+                  </div>
+                )}
                 <span data-testid="news-game-number" style={{ color: '#64748b', fontSize: '12px', whiteSpace: 'nowrap' }}>
                   G{item.game_number}
                 </span>

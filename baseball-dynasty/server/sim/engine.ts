@@ -6,7 +6,7 @@
 import { getDb, prepared, getActiveLeague, updateCache, getCachedState, type LeagueRow, type TeamRow } from '../db.js';
 import { generateWorld } from './worldgen.js';
 import { runExpansionDraft } from './draft.js';
-import { validatePostDraftRosters } from './worldgen.js';
+import { validatePostDraftRosters, backfillV050PlayerFields } from './worldgen.js';
 import { generateSchedule, saveSchedule, getNextGame, isSeasonComplete, shouldFireTradeDeadline, fireTradeDeadline } from './season.js';
 import { simulateGame } from './game.js';
 import { runPlayoffs } from './playoffs.js';
@@ -189,9 +189,10 @@ export async function startNewLeague(options: NewLeagueBodyType): Promise<{ leag
     throw new Error('LEAGUE_EXISTS');
   }
 
-  const wgOptions: { seed?: number; leagueName?: string } = {};
+  const wgOptions: { seed?: number; leagueName?: string; useRealCities?: boolean } = {};
   if (options.seed !== undefined) wgOptions.seed = options.seed;
   if (options.leagueName !== undefined) wgOptions.leagueName = options.leagueName;
+  if (options.useRealCities !== undefined) wgOptions.useRealCities = options.useRealCities;
   const { leagueId, worldgenSeed } = await generateWorld(wgOptions);
 
   currentLeagueId = leagueId;
@@ -355,6 +356,7 @@ async function runDraftTick(league: LeagueRow, isTurbo: boolean): Promise<void> 
         }
       });
       validatePostDraftRosters(league.id);
+      backfillV050PlayerFields(league.id); // v0.5.0: assign 40-man + bullpen roles after expansion draft
 
       // §2.4: After turbo draft, refresh cache once
       await refreshCache(league.id);
@@ -483,6 +485,21 @@ async function runGameTick(league: LeagueRow): Promise<void> {
       id: number; home_score: number; away_score: number; notable_events_json: string | null;
     } | undefined;
     if (gameRow) {
+      // §5: Tag rivalry matchups so the news feed renders the RIVALRY badge.
+      // rivalries stores pairs canonically (team_a_id < team_b_id); match both orderings.
+      const rivalryRow = prepared(
+        `SELECT id FROM rivalries
+         WHERE league_id = ?
+           AND rivalry_score > 0
+           AND ((team_a_id = ? AND team_b_id = ?) OR (team_a_id = ? AND team_b_id = ?))
+         LIMIT 1`
+      ).get(
+        league.id,
+        nextGame.homeTeamId, nextGame.awayTeamId,
+        nextGame.awayTeamId, nextGame.homeTeamId
+      ) as { id: number } | undefined;
+      const isRivalryGame = rivalryRow !== undefined;
+
       insertGameNewsItem({
         leagueId: league.id,
         seasonNumber: league.season_number,
@@ -493,6 +510,9 @@ async function runGameTick(league: LeagueRow): Promise<void> {
         awayScore: gameRow.away_score,
         homeTeamName: `${homeTeam.city} ${homeTeam.name}`,
         awayTeamName: `${awayTeam.city} ${awayTeam.name}`,
+        isRivalry: isRivalryGame,         // §5: set rivalry event type when applicable
+        sourceTable: 'game_log',          // §5: so source_id resolves to gameId for testid
+        sourceId: gameRow.id,             // §5: game_log row id for rivalry-badge-{gameId}
       });
 
       // §1.2(a): Surface injury + milestone NotableEvents into the news feed

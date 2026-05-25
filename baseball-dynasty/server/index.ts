@@ -211,6 +211,8 @@ import { directivesRouter } from './routes/directives.js';
 import { hallOfFameRouter } from './routes/halloffame.js';
 import { coachesRouter } from './routes/coaches.js';
 import { minorsRouter } from './routes/minors.js';
+// v0.5.0: new routes
+import { v050Router } from './routes/v050routes.js';
 
 app.use('/api/teams', teamsRouter);
 app.use('/api/players', playersRouter);
@@ -228,6 +230,8 @@ app.use('/api/directive', directivesRouter);
 app.use('/api/halloffame', hallOfFameRouter);
 app.use('/api/coaches', coachesRouter);
 app.use('/api/minors', minorsRouter);
+// v0.5.0: new routes (Rule 5, international, arbitration, rivalries, awards, stadium, franchise dashboard)
+app.use('/api', v050Router);
 
 // §2.9 / §3.2: Draft order endpoint — branches on phase (expansion vs annual)
 app.get('/api/draft/order', async (_req: Request, res: Response, next: NextFunction): Promise<void> => {

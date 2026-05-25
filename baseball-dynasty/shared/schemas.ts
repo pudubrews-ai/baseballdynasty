@@ -3,6 +3,7 @@ import { z } from 'zod';
 export const NewLeagueBody = z.object({
   seed: z.number().int().min(0).max(2 ** 32 - 1).optional(),
   leagueName: z.string().min(1).max(80).regex(/^[\w\s\-'.]+$/).optional(),
+  useRealCities: z.boolean().optional(),
 });
 
 export const SimSpeedBody = z.object({

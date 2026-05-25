@@ -29,7 +29,7 @@ export function getState(params?: { sincePickId?: number; sinceGameId?: number }
   return apiFetch(`/api/state${query}`);
 }
 
-export function createLeague(options?: { seed?: number; leagueName?: string }): Promise<{ leagueId: number; worldgenSeed: number }> {
+export function createLeague(options?: { seed?: number; leagueName?: string; useRealCities?: boolean }): Promise<{ leagueId: number; worldgenSeed: number }> {
   return apiFetch('/api/league/new', {
     method: 'POST',
     body: JSON.stringify(options ?? {}),
