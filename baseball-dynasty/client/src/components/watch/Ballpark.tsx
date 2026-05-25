@@ -26,59 +26,16 @@ interface BallparkProps {
 }
 
 const SKY_COLORS: Record<string, { top: string; bottom: string }> = {
-  day: { top: '#1e90ff', bottom: '#87ceeb' },
+  day:      { top: '#1e90ff', bottom: '#87ceeb' },
   twilight: { top: '#3b1d6e', bottom: '#f97316' },
-  night: { top: '#0d1117', bottom: '#1a2744' },
+  night:    { top: '#0d1117', bottom: '#1a2744' },
 };
 
 const CLOUD_OPACITY: Record<string, number> = {
-  clear: 0,
-  cloudy: 0.4,
+  clear:    0,
+  cloudy:   0.4,
   overcast: 0.75,
 };
-
-// Split-flap score digit — simple CSS keyframe via framer-motion
-function ScoreDigit({ value, turbo }: { value: number; turbo: boolean }) {
-  return (
-    <motion.span
-      key={value}
-      initial={{ opacity: 0, y: -8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: turbo ? 0.05 : 0.25 }}
-      style={{ display: 'inline-block', minWidth: '20px', textAlign: 'center' }}
-    >
-      {value}
-    </motion.span>
-  );
-}
-
-// Crowd section — SVG path that fills upward based on attendance
-function CrowdSection({ cx, cy, width, height, fillPct, color }: {
-  cx: number; cy: number; width: number; height: number;
-  fillPct: number; color: string;
-}) {
-  const filledHeight = height * Math.min(1, Math.max(0, fillPct));
-  const emptyHeight = height - filledHeight;
-
-  return (
-    <g>
-      {/* Empty seats */}
-      <rect x={cx - width / 2} y={cy - height} width={width} height={height} fill="#2a3040" rx={4} />
-      {/* Filled seats (motion) */}
-      <motion.rect
-        x={cx - width / 2}
-        y={cy - filledHeight}
-        width={width}
-        height={filledHeight}
-        fill={color}
-        rx={4}
-        initial={false}
-        animate={{ height: filledHeight, y: cy - filledHeight }}
-        transition={{ duration: 0.8, ease: 'easeOut' }}
-      />
-    </g>
-  );
-}
 
 const NIGHT_SKY = { top: '#0d1117', bottom: '#1a2744' };
 
@@ -88,11 +45,26 @@ export default function Ballpark({
 }: BallparkProps) {
   const sky = SKY_COLORS[daypart] ?? NIGHT_SKY;
   const cloudOpacity = CLOUD_OPACITY[weather] ?? 0;
-  const crowdColor = isOwnedPark ? '#4b5563' : '#374151';
+  // Owned park = slightly blue tint in the crowd; neutral = slate
+  const crowdColor = isOwnedPark ? '#4a6fa5' : '#3d4f6b';
+  const fillPct = isGameActive ? Math.min(1, Math.max(0, attendancePct)) : 0;
 
-  // Field dimensions (viewBox 600×380)
   const W = 600;
   const H = 380;
+
+  // Outfield fence line (perspective arc)
+  // Left foul pole, center field apex, right foul pole
+  const FL_X = 20,       FL_Y = H * 0.62;   // left
+  const FC_Y = H * 0.50;                     // center field (furthest/highest in perspective)
+  const FR_X = W - 20,   FR_Y = H * 0.62;   // right
+
+  // Stadium bowl: polygon covering the entire upper region above the outfield fence.
+  // The outfield wall + grass will paint on top of the lower edge, creating
+  // the natural look of bleachers receding behind the fence.
+  const bowlPath = `M 0 0 L ${W} 0 L ${FR_X} ${FR_Y} Q ${W / 2} ${FC_Y} ${FL_X} ${FL_Y} L 0 ${FL_Y} Z`;
+
+  // Max bowl height (y at foul poles) — used for crowd fill animation
+  const BOWL_H = FL_Y; // H * 0.62
 
   return (
     <svg
@@ -101,7 +73,6 @@ export default function Ballpark({
       style={{ width: '100%', height: '100%', display: 'block' }}
       aria-label="Ballpark view"
     >
-      {/* Sky gradient */}
       <defs>
         <linearGradient id="skyGrad" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stopColor={sky.top} />
@@ -111,53 +82,124 @@ export default function Ballpark({
           <stop offset="0%" stopColor="#2d5a1e" />
           <stop offset="100%" stopColor="#1a3a12" />
         </radialGradient>
+        {/* Bowl clip — crowd fill rect is clipped to bowl shape */}
+        <clipPath id="bowlClip">
+          <path d={bowlPath} />
+        </clipPath>
       </defs>
 
       {/* Sky */}
-      <rect x={0} y={0} width={W} height={H * 0.55} fill="url(#skyGrad)" />
+      <rect x={0} y={0} width={W} height={H} fill="url(#skyGrad)" />
 
       {/* Clouds */}
       {cloudOpacity > 0 && (
         <g opacity={cloudOpacity}>
-          <ellipse cx={120} cy={60} rx={80} ry={28} fill="#c8d8e8" />
-          <ellipse cx={320} cy={40} rx={110} ry={32} fill="#d0dde8" />
-          <ellipse cx={500} cy={70} rx={70} ry={24} fill="#c8d8e8" />
+          <ellipse cx={120} cy={50} rx={80} ry={22} fill="#c8d8e8" />
+          <ellipse cx={320} cy={34} rx={110} ry={26} fill="#d0dde8" />
+          <ellipse cx={500} cy={58} rx={70} ry={20} fill="#c8d8e8" />
         </g>
       )}
 
-      {/* Night lights */}
+      {/* ===== STADIUM BOWL (bleachers + crowd) ===== */}
+      <g data-testid="watch-crowd">
+        {/* Empty seat base — dark stadium interior */}
+        <path d={bowlPath} fill="#111827" />
+
+        {/* Seat-row texture — thin horizontal lines across the bowl */}
+        <g opacity={0.12}>
+          {Array.from({ length: 20 }, (_, i) => {
+            const t = (i + 0.5) / 20;
+            const y = BOWL_H * t;
+            // Rows narrow slightly toward the bottom (perspective foreshortening)
+            const margin = t * 35;
+            return (
+              <line
+                key={i}
+                x1={margin} y1={y}
+                x2={W - margin} y2={y}
+                stroke="#7090b0"
+                strokeWidth={0.8}
+              />
+            );
+          })}
+        </g>
+
+        {/* Section dividers — faint vertical lines splitting LF / CF / RF */}
+        <g opacity={0.06} stroke="#7090b0" strokeWidth={1.5}>
+          <line x1={W * 0.32} y1={0} x2={W * 0.26} y2={BOWL_H} />
+          <line x1={W * 0.68} y1={0} x2={W * 0.74} y2={BOWL_H} />
+        </g>
+
+        {/* Crowd fill — animated rect clipped to bowl shape, rises from bottom */}
+        <motion.rect
+          x={0}
+          width={W}
+          fill={crowdColor}
+          opacity={0.6}
+          clipPath="url(#bowlClip)"
+          initial={false}
+          animate={{
+            y: BOWL_H * (1 - fillPct),
+            height: BOWL_H * fillPct,
+          }}
+          transition={{ duration: 0.8, ease: 'easeOut' }}
+        />
+      </g>
+
+      {/* Night light standards — four poles on the bowl rim */}
       {daypart === 'night' && (
         <g>
-          {[80, 200, 400, 520].map(x => (
+          {[50, 170, 430, 550].map(x => (
             <g key={x}>
-              <rect x={x - 4} y={20} width={8} height={H * 0.35} fill="#3a3a2a" />
-              <ellipse cx={x} cy={20} rx={18} ry={8} fill="#fffbe0" opacity={0.9} />
+              <rect x={x - 3} y={H * 0.04} width={6} height={H * 0.19} fill="#1e2535" />
+              <ellipse cx={x} cy={H * 0.04} rx={12} ry={5} fill="#fffbe0" opacity={0.9} />
+              <ellipse cx={x} cy={H * 0.04} rx={22} ry={9} fill="#fffbe0" opacity={0.07} />
             </g>
           ))}
         </g>
       )}
 
-      {/* Crowd sections — rendered BEFORE outfield wall so the wall paints over
-          their lower edge, making them appear as bleachers behind the wall.
-          fillPct=0 during offseason shows dark empty seats; fills during games. */}
-      <g data-testid="watch-crowd">
-        <CrowdSection cx={W * 0.22} cy={H * 0.52} width={120} height={60} fillPct={isGameActive ? attendancePct : 0} color={crowdColor} />
-        <CrowdSection cx={W * 0.5}  cy={H * 0.44} width={160} height={55} fillPct={isGameActive ? attendancePct : 0} color={crowdColor} />
-        <CrowdSection cx={W * 0.78} cy={H * 0.52} width={120} height={60} fillPct={isGameActive ? attendancePct : 0} color={crowdColor} />
-      </g>
+      {/* ===== OUTFIELD FENCE ===== */}
+      {/* Wall face — painted over lower bowl edge */}
+      <path
+        d={`M ${FL_X} ${FL_Y} Q ${W / 2} ${FC_Y} ${FR_X} ${FR_Y}
+            L ${FR_X} ${FR_Y + 20} Q ${W / 2} ${FC_Y + 20} ${FL_X} ${FL_Y + 20} Z`}
+        fill="#1c4d2e"
+      />
+      {/* Fence cap stripe */}
+      <path
+        d={`M ${FL_X} ${FL_Y} Q ${W / 2} ${FC_Y} ${FR_X} ${FR_Y}`}
+        fill="none"
+        stroke="#2d7a42"
+        strokeWidth={3}
+      />
 
-      {/* Outfield wall — paints over the lower portion of crowd sections */}
-      <path d={`M 30 ${H * 0.6} Q ${W / 2} ${H * 0.35} ${W - 30} ${H * 0.6}`} fill="#264d1a" stroke="#1a3410" strokeWidth={3} />
+      {/* Foul lines (perspective) */}
+      <line x1={W / 2} y1={H * 0.89} x2={FL_X + 8} y2={FL_Y + 16} stroke="white" strokeWidth={1.5} opacity={0.35} />
+      <line x1={W / 2} y1={H * 0.89} x2={FR_X - 8} y2={FR_Y + 16} stroke="white" strokeWidth={1.5} opacity={0.35} />
 
-      {/* Field surface */}
-      <ellipse cx={W / 2} cy={H * 0.78} rx={W * 0.48} ry={H * 0.28} fill="url(#fieldGrad)" />
+      {/* ===== FIELD ===== */}
+      {/* Outfield grass */}
+      <ellipse cx={W / 2} cy={H * 0.76} rx={W * 0.48} ry={H * 0.25} fill="url(#fieldGrad)" />
+
+      {/* Warning track */}
+      <path
+        d={`M ${FL_X + 22} ${FL_Y + 18} Q ${W / 2} ${FC_Y + 18} ${FR_X - 22} ${FR_Y + 18}`}
+        fill="none"
+        stroke="#7a5c30"
+        strokeWidth={28}
+        opacity={0.5}
+      />
 
       {/* Infield dirt */}
-      <ellipse cx={W / 2} cy={H * 0.8} rx={W * 0.18} ry={H * 0.12} fill="#8a6030" />
+      <ellipse cx={W / 2} cy={H * 0.80} rx={W * 0.18} ry={H * 0.11} fill="#8a6030" />
 
       {/* Base paths */}
       {/* Home plate */}
-      <polygon points={`${W / 2},${H * 0.88} ${W / 2 - 8},${H * 0.86} ${W / 2 - 8},${H * 0.83} ${W / 2 + 8},${H * 0.83} ${W / 2 + 8},${H * 0.86}`} fill="#fff" />
+      <polygon
+        points={`${W / 2},${H * 0.88} ${W / 2 - 8},${H * 0.86} ${W / 2 - 8},${H * 0.83} ${W / 2 + 8},${H * 0.83} ${W / 2 + 8},${H * 0.86}`}
+        fill="#fff"
+      />
       {/* 1st base */}
       <rect x={W * 0.62} y={H * 0.76} width={10} height={10} fill={baseRunners.first ? '#f59e0b' : '#fff'} rx={1} />
       {/* 2nd base */}
@@ -185,27 +227,26 @@ export default function Ballpark({
         />
       )}
 
-      {/* Scoreboard (left field area) */}
+      {/* Scoreboard — mounted on the left-field fence face */}
       <g data-testid="watch-scoreboard">
-        <rect x={40} y={H * 0.38} width={160} height={90} fill="#0d1117" rx={4} stroke="#f59e0b" strokeWidth={2} />
-        <rect x={46} y={H * 0.38 + 6} width={148} height={18} fill="#1a2744" rx={2} />
-        {/* Scoreboard text rendered as SVG text nodes (never innerHTML) */}
-        <text x={120} y={H * 0.38 + 19} textAnchor="middle" fill="#f59e0b" fontSize={12} fontFamily="'Bebas Neue', sans-serif" letterSpacing={1}>
+        <rect x={34} y={H * 0.36} width={164} height={90} fill="#0d1117" rx={4} stroke="#f59e0b" strokeWidth={2} />
+        <rect x={40} y={H * 0.36 + 6} width={152} height={18} fill="#1a2744" rx={2} />
+        <text x={116} y={H * 0.36 + 19} textAnchor="middle" fill="#f59e0b" fontSize={12} fontFamily="'Bebas Neue', sans-serif" letterSpacing={1}>
           {isGameActive && scoreboard ? scoreboard.awayTeamName : 'STADIUM'}
         </text>
 
         {isGameActive && scoreboard ? (
           <>
-            <text x={80} y={H * 0.38 + 44} fill="#94a3b8" fontSize={10} fontFamily="Inter, sans-serif">
+            <text x={76} y={H * 0.36 + 44} fill="#94a3b8" fontSize={10} fontFamily="Inter, sans-serif">
               {scoreboard.awayTeamName.substring(0, 8)}
             </text>
-            <text x={80} y={H * 0.38 + 58} fill="#94a3b8" fontSize={10} fontFamily="Inter, sans-serif">
+            <text x={76} y={H * 0.36 + 58} fill="#94a3b8" fontSize={10} fontFamily="Inter, sans-serif">
               {scoreboard.homeTeamName.substring(0, 8)}
             </text>
-            {/* Split-flap score spin in turbo mode — data-testid="watch-scoreboard-spin" */}
+            {/* Split-flap score — spins in turbo mode */}
             <motion.text
               data-testid="watch-scoreboard-spin"
-              x={160} y={H * 0.38 + 44}
+              x={162} y={H * 0.36 + 44}
               textAnchor="end"
               fill="#f9fafb"
               fontSize={16}
@@ -217,7 +258,7 @@ export default function Ballpark({
               {scoreboard.awayScore}
             </motion.text>
             <motion.text
-              x={160} y={H * 0.38 + 58}
+              x={162} y={H * 0.36 + 58}
               textAnchor="end"
               fill="#f9fafb"
               fontSize={16}
@@ -228,18 +269,18 @@ export default function Ballpark({
             >
               {scoreboard.homeScore}
             </motion.text>
-            <text x={120} y={H * 0.38 + 76} textAnchor="middle" fill="#6b7280" fontSize={10} fontFamily="Inter, sans-serif">
+            <text x={116} y={H * 0.36 + 76} textAnchor="middle" fill="#6b7280" fontSize={10} fontFamily="Inter, sans-serif">
               {`INN ${scoreboard.inning}`}
             </text>
           </>
         ) : (
-          <text x={120} y={H * 0.38 + 58} textAnchor="middle" fill="#334155" fontSize={11} fontFamily="Inter, sans-serif">
+          <text x={116} y={H * 0.36 + 58} textAnchor="middle" fill="#334155" fontSize={11} fontFamily="Inter, sans-serif">
             {isGameActive ? 'LOADING' : 'OFFSEASON'}
           </text>
         )}
       </g>
 
-      {/* Diamond base runner overlay — visual highlights */}
+      {/* Diamond base runner overlay */}
       <g data-testid="watch-diamond">
         {baseRunners.first && (
           <motion.circle cx={W * 0.625 + 5} cy={H * 0.765 + 5} r={6} fill="#f59e0b"
@@ -255,7 +296,7 @@ export default function Ballpark({
         )}
       </g>
 
-      {/* Turbo: blur overlay + calendar flash */}
+      {/* Turbo: dark overlay + flashing TURBO text */}
       {isTurboMode && (
         <g>
           <rect x={0} y={0} width={W} height={H} fill="rgba(0,0,0,0.2)" />
