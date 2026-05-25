@@ -267,13 +267,20 @@ const FILTER_BADGE_MAP: Record<Exclude<NewsFilter, 'all'>, NewsBadge[]> = {
 };
 
 // Build a procedural fallback headline for a news item when LLM is unavailable.
-function proceduralHeadline(eventType: string, badge: string): string {
+function proceduralHeadline(
+  eventType: string,
+  badge: string,
+  playerName?: string | null,
+  teamName?: string | null
+): string {
+  const p = playerName ?? 'A player';
+  const t = teamName ? ` (${teamName})` : '';
   switch (eventType) {
-    case 'call_up': return 'Player called up to the MLB roster.';
-    case 'send_down': return 'Player optioned to the minor leagues.';
-    case 'dfa': return 'Player designated for assignment.';
+    case 'call_up':    return `${p}${t} called up to the MLB roster.`;
+    case 'send_down':  return `${p}${t} optioned to the minor leagues.`;
+    case 'dfa':        return `${p}${t} designated for assignment.`;
     case 'waiver_claim': return 'Player claimed off waivers.';
-    case 'trade': return 'Trade completed between two teams.';
+    case 'trade':      return playerName ? `${p} traded.` : 'Trade completed.';
     case 'free_agent_signing': return 'Free agent signs with new team.';
     case 'release': return 'Player released.';
     case 'non_tender': return 'Player non-tendered.';
@@ -282,7 +289,7 @@ function proceduralHeadline(eventType: string, badge: string): string {
     case 'manager_resigned': return 'Manager resigns.';
     case 'owner_sold_team': return 'Franchise ownership changes hands.';
     case 'owner_died': return 'Owner passes away; heir takes control.';
-    case 'injury': return 'Player placed on injured list.';
+    case 'injury':     return `${p}${t} placed on the injured list.`;
     case 'milestone': return 'Player reaches a career milestone.';
     default: return `${badge} event occurred.`;
   }
@@ -355,7 +362,9 @@ export async function fillPendingHeadlines(leagueId: number): Promise<void> {
       if (result.ok && result.headlines.has(row.id)) {
         headline = result.headlines.get(row.id)!;
       } else {
-        headline = sanitizeNarrative(proceduralHeadline(row.event_type, row.badge));
+        const rowPlayerName = row.player_id ? (playerNameMap.get(row.player_id) ?? null) : null;
+        const rowTeamName = row.team_id ? (teamNameMap.get(row.team_id) ?? null) : null;
+        headline = sanitizeNarrative(proceduralHeadline(row.event_type, row.badge, rowPlayerName, rowTeamName));
       }
       updateStmt.run(headline, row.id);
     }
@@ -366,7 +375,9 @@ export async function fillPendingHeadlines(leagueId: number): Promise<void> {
       'UPDATE news_items SET headline_text = ?, is_headline_pending = 0 WHERE id = ?'
     );
     for (const row of pending) {
-      updateStmt.run(sanitizeNarrative(proceduralHeadline(row.event_type, row.badge)), row.id);
+      const rowPlayerName = row.player_id ? (playerNameMap.get(row.player_id) ?? null) : null;
+      const rowTeamName = row.team_id ? (teamNameMap.get(row.team_id) ?? null) : null;
+      updateStmt.run(sanitizeNarrative(proceduralHeadline(row.event_type, row.badge, rowPlayerName, rowTeamName)), row.id);
     }
   }
 }
