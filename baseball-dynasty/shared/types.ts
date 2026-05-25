@@ -155,6 +155,10 @@ export interface NotableEvent {
   playerName?: string;
   description: string;
   recoveryGames?: number; // AB-10 Part A: IL stint length in games
+  // Step 10: expanded injury fields
+  injuryType?: string;   // arm | tommy_john | hamstring | oblique | concussion
+  injuryTier?: string;   // day_to_day | short_il | standard_il | long_il | season_ending
+  rehabGames?: number;   // rehab_games_remaining per tier
 }
 
 export interface PitcherLine {

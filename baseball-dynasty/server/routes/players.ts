@@ -214,7 +214,8 @@ playersRouter.get('/:id', async (req: Request, res: Response, next: NextFunction
               coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country,
               is_drafted, career_hits, career_hr, career_rbi, career_ip, career_k, career_wins,
               is_on_25man, options_remaining, service_time_days, first_mlb_call_up_game, free_agent_eligible,
-              manipulation_delay_until_game, prospect_visible, waiver_state, dfa_team_id, claim_game_window_end
+              manipulation_delay_until_game, prospect_visible, waiver_state, dfa_team_id, claim_game_window_end,
+              injury_type, injury_tier, rehab_games_remaining, career_injuries, is_injured, injury_return_game
        FROM players WHERE id = ?`
     ).get(idResult.data) as PlayerRow | undefined;
     if (!player) { res.status(404).json({ error: 'Player not found' }); return; } // §2.16.2
@@ -261,6 +262,28 @@ playersRouter.get('/:id', async (req: Request, res: Response, next: NextFunction
       career_k: player.career_k,
       career_wins: player.career_wins,
       season_stats: seasonStats,
+      // Step 10: injury fields
+      is_injured: player.is_injured === 1,
+      injury_type: player.injury_type ?? null,
+      injury_tier: player.injury_tier ?? null,
+      rehab_games_remaining: player.rehab_games_remaining ?? 0,
+      career_injuries: player.career_injuries ?? 0,
+      injury_return_game: player.injury_return_game ?? null,
+      // injury_history derived from transactions (notable_events type=injury)
+      injury_history: league
+        ? (prepared(
+            `SELECT t.season_number, t.narrative, t.created_at, t.team_id,
+                    tm.city || ' ' || tm.name AS team_name
+             FROM transactions t
+             LEFT JOIN teams tm ON tm.id = t.team_id
+             WHERE t.league_id = ? AND t.player_id = ? AND t.transaction_type = 'injury_il'
+             ORDER BY t.created_at DESC
+             LIMIT 20`
+          ).all(league.id, player.id) as Array<{
+            season_number: number; narrative: string | null; created_at: number;
+            team_id: number | null; team_name: string | null;
+          }>)
+        : [],
     });
   } catch (err) { next(err); }
 });

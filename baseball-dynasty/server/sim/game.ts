@@ -6,6 +6,7 @@
 import { getDb, prepared, type PlayerRow, type TeamRow } from '../db.js';
 import { seedFor, randInt, randTriangular, shuffle } from './prng.js';
 import type { NotableEvent } from '../../shared/types.js';
+import { assignInjury } from './injury.js';
 
 export interface BatterBoxLine {
   playerId: number;
@@ -324,11 +325,12 @@ export async function simulateGame(
     p.save = p.playerId === savePitcherId;
   }
 
-  // Generate notable events
+  // Generate notable events (gameNumber passed for injury seeding and season-ending duration)
+  const totalSeasonGames = 500; // 20 teams × 50 games / 2
   const notableEvents = generateNotableEvents(
     rng, homeBatterLines, awayBatterLines, homeTeam, awayTeam,
     homeScore, awayScore, homePitcherLines, awayPitcherLines,
-    isWalkOff, leagueId, seasonNumber
+    isWalkOff, leagueId, seasonNumber, gameNumber, totalSeasonGames
   );
 
   // §5.8: In-game injury truncation
@@ -425,16 +427,26 @@ export async function simulateGame(
 
     const actualGameId = gameResult.lastInsertRowid as number;
 
-    // AB-10 Part A: Vacate 25-man slot for injured players immediately on game write.
+    // AB-10 Part A + Step 10: Vacate 25-man slot and set all injury fields atomically.
     // This fires whether called from runGameTick (engine) or directly from tests.
     // Guard with is_on_25man=1 so we never double-injure or touch minor leaguers.
+    // engine.ts write site is suppressed for is_on_25man=0 (already updated here).
     for (const ev of notableEvents) {
       if (ev.type === 'injury' && ev.playerId) {
+        const ilGames = ev.recoveryGames ?? 7;
+        const injuryType = ev.injuryType ?? 'hamstring';
+        const injuryTier = ev.injuryTier ?? 'standard_il';
+        const rehabGames = ev.rehabGames ?? 0;
         db.prepare(
           `UPDATE players
-           SET is_injured = 1, is_on_25man = 0, injury_return_game = ?
+           SET is_injured = 1, is_on_25man = 0,
+               injury_return_game = ?,
+               injury_type = ?,
+               injury_tier = ?,
+               rehab_games_remaining = ?,
+               career_injuries = career_injuries + 1
            WHERE id = ? AND is_on_25man = 1`
-        ).run(gameNumber + (ev.recoveryGames ?? 7), ev.playerId);
+        ).run(gameNumber + ilGames, injuryType, injuryTier, rehabGames, ev.playerId);
       }
     }
 
@@ -721,7 +733,9 @@ function generateNotableEvents(
   awayPitcherLines: PitcherBoxLine[],
   isWalkOff: boolean,
   leagueId: number,
-  seasonNumber: number
+  seasonNumber: number,
+  gameNumber: number,
+  totalSeasonGames: number
 ): NotableEvent[] {
   const events: NotableEvent[] = [];
 
@@ -768,16 +782,27 @@ function generateNotableEvents(
     });
   }
 
-  // In-game injury (based on injury_prone attribute)
+  // In-game injury (based on injury_prone attribute) — Step 10: include tier/type/rehab
   for (const batter of [...homeBatterLines, ...awayBatterLines]) {
-    const player = prepared('SELECT * FROM players WHERE id = ?').get(batter.playerId) as PlayerRow | undefined;
+    const player = prepared('SELECT id, injury_prone, position, team_id FROM players WHERE id = ?').get(batter.playerId) as {
+      id: number; injury_prone: number; position: string; team_id: number | null;
+    } | undefined;
     if (player && player.injury_prone >= 7 && rng() < 0.05) {
+      // Find the team's medical staff rating (home or away)
+      const playerTeam = player.team_id === homeTeam.id ? homeTeam : awayTeam;
+      const medStaff = (playerTeam as TeamRow & { medical_staff_rating?: number }).medical_staff_rating ?? 5;
+      const seasonGamesRemaining = Math.max(1, totalSeasonGames - gameNumber);
+      const injury = assignInjury(player.position, medStaff, gameNumber, player.id, seasonGamesRemaining);
+
       events.push({
         type: 'injury',
         playerId: batter.playerId,
         playerName: batter.playerName,
-        description: `${batter.playerName} left the game with an injury`,
-        recoveryGames: 3 + Math.floor(rng() * 13), // AB-10 Part A: 3-15 game IL stint
+        description: `${batter.playerName} left the game with a ${injury.type} injury (${injury.tier})`,
+        recoveryGames: injury.ilGames, // kept for backward compat (old write sites use this)
+        injuryType: injury.type,
+        injuryTier: injury.tier,
+        rehabGames: injury.rehabGames,
       });
     }
   }

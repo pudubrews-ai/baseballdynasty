@@ -28,6 +28,7 @@ import { getFranchiseState, setGmConfidence } from './franchise.js';
 import { resolveDirectives } from './directives.js';
 import { insertNewsItem } from './news.js';
 import { runCascadeEval, updateMinorStandings } from './cascade.js';
+import { seedFor as _seedFor } from './prng.js';
 
 // AB-NULL §4.3: One-time self-heal for carried-over DBs with stale is_on_25man on null-team players.
 // Called once per runRosterMaintenance invocation — cheap (no-op if already clean).
@@ -266,16 +267,91 @@ export function runRosterMaintenance(
     }
   }
 
-  // AB-10 Part A: Recover players whose IL stint has elapsed.
-  // Recovered players get is_injured=0 but remain is_on_25man=0; they sit on the 40-man
-  // as minors-eligible reserves. The invariant/call-up/send-down passes reintegrate them.
+  // Step 10 + AB-10 Part A: Injury recovery sweep — teach about rehab (F-1, F-3)
   try {
+    const db = getDb();
+
+    // 1. Players whose IL stint has elapsed but who need rehab (rehab_games_remaining > 0):
+    //    Move to AAA rehab (minor_level='AAA', is_injured stays 1 until rehab completes).
+    //    DO NOT activate them yet.
+    const rehabReady = prepared(
+      `SELECT id, team_id, injury_type, injury_tier, rehab_games_remaining
+       FROM players
+       WHERE league_id = ? AND is_injured = 1 AND injury_return_game IS NOT NULL
+         AND injury_return_game <= ? AND rehab_games_remaining > 0`
+    ).all(leagueId, gameNumber) as Array<{
+      id: number; team_id: number | null; injury_type: string | null;
+      injury_tier: string | null; rehab_games_remaining: number;
+    }>;
+
+    for (const p of rehabReady) {
+      // Place at AAA for rehab assignment (distinct from a real demotion)
+      prepared(
+        'UPDATE players SET minor_level = ?, is_on_mlb_roster = 0, is_on_25man = 0 WHERE id = ?'
+      ).run('AAA', p.id);
+    }
+
+    // 2. Players already in rehab (minor_level='AAA', is_injured=1, rehab_games_remaining > 0):
+    //    Decrement rehab_games_remaining each tick.
+    //    Reaggravation check (seeded, skip for tier='day_to_day' or 'season_ending').
+    const inRehab = prepared(
+      `SELECT id, injury_tier, rehab_games_remaining, injury_return_game
+       FROM players
+       WHERE league_id = ? AND is_injured = 1 AND minor_level = 'AAA'
+         AND rehab_games_remaining > 0`
+    ).all(leagueId) as Array<{
+      id: number; injury_tier: string | null; rehab_games_remaining: number; injury_return_game: number | null;
+    }>;
+
+    for (const p of inRehab) {
+      // Skip reaggravation for DTD and season_ending (F-2)
+      const tier = p.injury_tier;
+      const skipReaggrav = tier === 'day_to_day' || tier === 'season_ending';
+
+      let newRehab = p.rehab_games_remaining - 1;
+      let newReturn = p.injury_return_game;
+
+      if (!skipReaggrav) {
+        // 15% reaggravation (seeded by playerId + gameNumber)
+        const rng = _seedFor('reaggrav', p.id ^ (gameNumber * 997));
+        const risk = 0.15; // base; medical staff modifier applied at injury time (not here)
+        if (rng() < risk) {
+          // Extend IL by 50% (apply to return_game, NOT to rehab_games past 15)
+          const currentReturn = newReturn ?? gameNumber;
+          const extension = Math.max(1, Math.floor((currentReturn - gameNumber) * 0.5));
+          newReturn = currentReturn + extension;
+          // Reset rehab timer (clamp to 15 per F-4)
+          const tierRehabGames: Record<string, number> = {
+            short_il: 3, standard_il: 5, long_il: 8
+          };
+          newRehab = Math.min(15, tierRehabGames[tier ?? 'standard_il'] ?? 5);
+        }
+      }
+
+      if (newRehab <= 0) {
+        // Rehab complete: activate to 25-man
+        prepared(
+          `UPDATE players
+           SET rehab_games_remaining = 0, is_injured = 0, injury_return_game = NULL,
+               minor_level = NULL, is_on_mlb_roster = 1, is_on_25man = 1
+           WHERE id = ?`
+        ).run(p.id);
+      } else {
+        // Still in rehab: decrement counter (clamped to 15 per F-4)
+        prepared(
+          'UPDATE players SET rehab_games_remaining = ?, injury_return_game = ? WHERE id = ?'
+        ).run(Math.min(15, newRehab), newReturn, p.id);
+      }
+    }
+
+    // 3. Players whose IL is done and rehab_games_remaining = 0 (no rehab needed):
+    //    Activate directly (original AB-10 behavior).
     prepared(
       `UPDATE players
        SET is_injured = 0, injury_return_game = NULL,
            minor_level = CASE WHEN is_on_mlb_roster = 1 THEN 'AAA' ELSE minor_level END
        WHERE league_id = ? AND is_injured = 1 AND injury_return_game IS NOT NULL
-         AND injury_return_game <= ?`
+         AND injury_return_game <= ? AND rehab_games_remaining = 0`
     ).run(leagueId, gameNumber);
   } catch (err) {
     console.warn('[rosterMaintenance] Injury recovery error:', err);

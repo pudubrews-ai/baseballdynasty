@@ -480,13 +480,10 @@ async function runGameTick(league: LeagueRow): Promise<void> {
                 sourceId: gameRow.id,
               });
             } else if (ev.type === 'injury') {
-              // AB-10 Part A: vacate the 25-man slot so call-up Trigger 1 fires.
-              // Guard with is_on_25man=1 so we never double-injure or touch minor leaguers.
-              prepared(
-                `UPDATE players
-                 SET is_injured = 1, is_on_25man = 0, injury_return_game = ?
-                 WHERE id = ? AND is_on_25man = 1`
-              ).run(nextGame.gameNumber + (ev.recoveryGames ?? 7), ev.playerId);
+              // Step 10 (L6 double-write fix): game.ts already wrote injury fields atomically
+              // inside the game transaction (is_injured, is_on_25man, injury_type, injury_tier,
+              // rehab_games_remaining, career_injuries, injury_return_game). Do NOT write again here.
+              // Only insert the news item.
               insertNewsItem({
                 leagueId: league.id,
                 seasonNumber: league.season_number,
