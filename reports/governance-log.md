@@ -409,4 +409,349 @@ Build gates: 178/178 tests passing, 0 TypeScript errors, 0 ESLint errors, SQL in
 
 **Phase 3 Step 1 COMPLETE:** Developer commit confirmed on feature/v0.1.0-initial-build (commit 2619d4d). PR cannot be created without git remote. Founder action required (see Infrastructure note above and PM Handoff Report below).
 
-**PM Handoff Report:** See stdout output below (as required by build-rules).
+**Developer Phase 3 commit complete.** Branch `feature/v0.1.0-initial-build` finalized at commit `4d481cf`. All 32 report/doc files committed. Working tree clean. Scratch files removed.
+
+**No git remote configured.** Founder must run before PR creation:
+```
+git remote add origin https://github.com/pudubrews-ai/baseballdynasty
+git push -u origin feature/v0.1.0-initial-build
+```
+Then create PR via `gh pr create --base main`.
+
+**PM Handoff Report:** Printed to stdout below per build-rules.
+
+---
+
+## BUILD COMPLETE — v0.1.0 Baseball Dynasty Simulator
+
+**Final status:** COMPLETE — 0 Critical / 0 High / 0 Medium  
+**Branch:** feature/v0.1.0-initial-build  
+**Final commit:** 4d481cf  
+**Build date:** 2026-05-24  
+**Iterations:** 5  
+**Tests:** 178/178 passing
+
+---
+
+---
+
+# Governance Log — Baseball Dynasty Simulator v0.2.0
+
+---
+
+## Build Initialization
+
+**Date:** 2026-05-24  
+**Version:** v0.2.0  
+**Orchestrator model:** claude-sonnet-4-6
+
+**Active agent set:**
+- Architect (Opus)
+- CISO (Opus)
+- Adversary (Opus)
+- Developer (Sonnet)
+- API Tester (Sonnet)
+- UI Tester A (Sonnet)
+- UI Tester B (Sonnet)
+
+**Decision:** All agents active. v0.2.0 introduces new UI (news tab, live ticker), new APIs (/api/waivers, /api/news, player transactions), complex procedural logic (waiver wire, call-ups, send-downs, firings, market dynamics), and a breaking LLM restructure. All agent roles required.
+
+**Documents confirmed present:**
+- `build-rules.md` ✓
+- `app-spec.md` ✓
+- `v0.2.0-app-spec-section.md` ✓
+- `v0.2.0-test-spec.md` ✓
+
+**Branch decision:** No git remote configured. main branch has no production code (PR from v0.1.0 never merged due to missing remote). Branching `feature/v0.2.0-live-org-market-firings-news` from `feature/v0.1.0-initial-build` which contains all production-ready v0.1.0 code. Documented here per Orchestrator authority.
+
+**Report naming decision:** All v0.2.0 reports use `v0.2.0-` prefix (e.g., `reports/v0.2.0-architect-eval-0.md`) to avoid collision with v0.1.0 reports in the same directory. Agents instructed accordingly.
+
+---
+
+## Phase 1 — Pre-Build
+
+**Step 1:** Spawning Architect for `reports/v0.2.0-architect-eval-0.md`
+
+**Infrastructure note:** WorktreeCreate hook was outputting git's "HEAD is now at..." message to stdout, concatenating it with the path, causing harness to reject the path as non-existent directory. Fixed hook to redirect all git output to /dev/null — only the path is now echoed. All agent calls from here forward should work correctly.
+
+**Step 1 COMPLETE:** `reports/v0.2.0-architect-eval-0.md` written. Key findings: 14 cross-document contradictions, 28 spec gaps, 9 architecture risks, 14-phase build sequence, 21 binding decisions. Critical issues: (C1) GM personality model mismatch — v0.2.0 needs analytics/old-school/balanced archetypes but v0.1.0 has gm_philosophy/gm_risk_tolerance/gm_focus columns with incompatible CHECK constraints; (C2) 25-man/40-man distinction absent from v0.1.0 schema; (C6) service time in years not games; (C14) owner_personality CHECK constraint missing patient/win-now values (requires SQLite table-swap). LLM restructure finding: callTransactionFlavor exists but has zero callers — wire in rather than build; owner death bug fix already implemented at offseason.ts:283 and :303 — re-verify not re-fix.
+
+**Step 2:** Spawning CISO and Adversary in parallel for pre-build security and adversarial reviews.
+
+**Step 2 COMPLETE:** Both pre-build reviews written.
+
+`reports/v0.2.0-ciso-pre-build.md` — 0 Critical / 0 High / 5 Medium / 6 Low. Key findings: No Critical/High because all names are server-generated from fixed pools — LLM injection/XSS vectors are low-severity. Mediums: sanitize batched news/transaction headline LLM functions (CB-1); treat names as data-not-instructions in news prompts (CB-2); validate /api/news?type against Zod enum returning exact `{"error":"Invalid event type filter"}` 400 (CB-3); clamp ?limit/?before/?team params (CB-4); bound in-memory LLM queue + per-feature budget caps (CB-5). Note: actual llm.ts lives at `server/services/llm.ts`. Also found two existing SELECT * violations at players.ts:131 and teams.ts:66.
+
+`reports/v0.2.0-adversary-pre-build.md` — Verdict: NOT READY. 4 Critical / 9 High / 7 Medium / 4 Low.
+- AB-01 (Critical): Ambiguous "game" unit — two counters: league-wide `current_game_number` (1-500+) and per-team `games_played` (0-50). All v0.2.0 timing uses undefined units. Requires explicit time-unit mapping table.
+- AB-02 (Critical): Minor-league games never simulated — season_stats always empty — call-up OPS/ERA triggers and Group 6 tests unsatisfiable as written.
+- AB-03 (Critical): Waiver expiry races turbo loop; skipped on missing-SP/box-score-fail ticks.
+- AB-04 (Critical): DFA-to-create-40-man-space circular — DFA'd player stays on 40-man during waiver window.
+- Key Highs: free-agency unreachable (20.6 seasons); no worldgen guarantee both analytics/old-school cohorts exist for test Groups 3/4/6; undefined LLM behavior when model returns 9/10 headlines.
+
+**Step 3:** Spawning Architect to synthesize all findings and write `reports/v0.2.0-developer-instructions-1.md`.
+
+**Step 3 COMPLETE:** `reports/v0.2.0-developer-instructions-1.md` written (915 lines). All 4 Adversary Criticals ruled:
+- [AB-01 RULING]: All "game N" thresholds and "every N games" cadences use per-team `teams.games_played` (matching existing `shouldFireTradeDeadline` at season.ts:245). Prospect dev / service time batch boundaries use `current_game_number % 10`.
+- [AB-02 RULING]: Call-up/send-down decisions rating-based on AAA side; lightweight per-10-game stat synthesizer writes display-only stats for /api/teams/:id/minors.
+- [AB-03 RULING]: Waiver expiry uses `>=` range check (not `==`); maintenance hook moved OUT of simulateGame into runGameTick so it fires even on skipped games.
+- [AB-04 RULING]: DFA immediately vacates 40-man slot (overrides Architect eval-D4). Breaks circular dependency.
+- [AB-05 RULING]: Service time rescaled to 30 games/service-year (FA at 180 games) for the 50-game world.
+Migration 007 is a single-file teams table-swap with FK-pragma management. Build sequenced into 14 gated phases against 152-test baseline. DoD: zero TS/ESLint errors, all G0-G11, turbo <15s/season.
+
+---
+
+## Phase 2 — Build and Verify (Iteration 1)
+
+**Step 4:** Spawning Developer for v0.2.0 implementation (reads only feature spec + developer-instructions-1).
+
+**Step 4 COMPLETE:** Developer build complete. 349 tests passing (40 test files), 0 failures, 0 TypeScript errors, 0 ESLint errors. Turbo benchmark ~1,060ms for full regular season (budget: 15,000ms). Phases 1-14 all implemented: migration 007 (teams table-swap), LLM restructure, waiver wire, call-up/send-down, firing logic, market dynamics, prospect development, news feed backend + frontend, all new API endpoints, all data-testids. Completion report: `reports/v0.2.0-developer-build-complete.md`.
+
+**Step 5:** Spawning CISO and Adversary as background agents for post-build implementation review.
+
+**Step 5 COMPLETE:**
+
+`reports/v0.2.0-ciso-post-build.md` — 0 Critical / 0 High / 0 new Medium / 2 Low (NB-1, NB-2). 9 of 11 pre-build findings RESOLVED. CB-2 and CB-9 PARTIALLY RESOLVED (low risk). Key new finding: NB-1 — news-headline LLM pipeline is built and unit-tested but never invoked by running simulation; News tab will be empty in live sim (functional gap, not a security issue).
+
+`reports/v0.2.0-adversary-post-build.md` — Verdict: NOT READY. 2 Critical / 5 High / 6 Medium / 4 Low.
+- PB-01 (Critical): Entire news feed produces zero data — no event producer writes to news_items. callNewsHeadlinesBatch has zero callers. Ticker permanently empty. newsApi.test.ts only inserts rows by hand.
+- PB-02 (Critical): Duplicate new-dynasty-button testid still at App.tsx:164 and :213. Explicitly required fix per D13, unresolved.
+- High: Optioned 40-man players vanish from minors API. Spring cuts repair path dead code (no 25-man guarantee). "Recent" OPS/ERA triggers read season-cumulative stats. Trade matcher uses broken stub instead of ARCHETYPES table.
+
+**Governance Decision — Run all testers despite 2 Criticals:** Neither Critical prevents server startup. Testers run sequentially (Vite strictPort:true, SQLite single-file DB).
+
+**Step 6:** Spawning API Tester (synchronous), then UI Tester A, then UI Tester B.
+
+**Step 6 — API Tester COMPLETE:** `reports/v0.2.0-api-tester-results.md` — 24 Pass / 34 Fail / 17 Skip.
+Key: Server requires tsc migration copy fix before startup. Group 11 error handling all passes (exact 400 body, empty 200 arrays). Persistence (Group 10) passes. Key failures: news system orphaned (zero event producers write news_items); call-ups/send-downs/DFA never trigger across 500+ games; trades fire but not written to transactions table; owner_personality not returned by any API endpoint; spring cuts leave team 15 with 27 players on 25-man (invariant violation).
+
+**Step 6 — UI Tester A COMPLETE:** `reports/v0.2.0-ui-tester-a-results.md` — 26 Pass / 5 Fail / 51 Skip.
+Group 0 all passes (server on :3001, client on :5173, waiverCount in /api/state, DB readable). Failures: transactions uses `narrative` field not `flavor`; no `is_on_40man` column; schema uses `minor_level`/`free_agent_eligible` not `level`/`fa_eligible`; `news-ticker` testid absent (implementation uses `game-ticker`); `news-tab` nav button is `nav-news` not `news-tab`.
+
+**Step 6 — UI Tester B COMPLETE:** `reports/v0.2.0-ui-tester-b-results.md` — 11 Pass / 10 Fail / 9 Skip.
+All 5 filter buttons (news-filter-all/transactions/frontoffice/injuries/milestones) and news-feed present and functional. Failures: news-ticker not global (game-ticker on league page only, shows 20 not 5); news-tab nav testid is nav-news; news-item tests skipped (no events in DB); waivers-list and waiver-player-{id} testids absent from UI entirely; minors-stats-{playerId} testids missing from player rows.
+
+**Step 7:** Spawning Architect for ITERATE/COMPLETE decision.
+
+**Step 7 COMPLETE:** `reports/v0.2.0-architect-eval-1.md` and `reports/v0.2.0-developer-instructions-2.md` written. Decision: **ITERATE**.
+
+**Confirmed severity totals:** 4 Critical / 8 High / 8 Medium.
+
+**4 Confirmed Criticals:**
+1. News pipeline inert — zero production callers write to news_items; both news tab and ticker render nothing
+2. Duplicate new-dynasty-button testid (App.tsx:164 and :213)
+3. Call-up/DFA chain never fires — trigger conditions unreachable (callup.ts:122 needs active25Man < 23 with no injury system; "recent" windows never slide)
+4. Migrations not copied to dist on build (tsc doesn't copy .sql files → boot crash on clean deploy)
+
+**5 False positives cleared:**
+- Trades ARE written to transactions table (tradeDeadline.ts:122-129, 42 rows confirmed) — API Tester query window missed them
+- Schema field mismatches (level/is_on_40man/fa_eligible) are test-spec drift vs Architect rulings, not defects
+- Owner-death personality fix confirmed resolved
+- UI Testers' "game-ticker vs news-ticker" was stale-build artifact (ran v0.1.0 dist)
+
+---
+
+## Phase 2 — Iteration 2
+
+**Step 4 (Iteration 2):** Spawning Developer for all Critical/High/Medium fixes per developer-instructions-2.md.
+
+**Step 4 (Iteration 2) COMPLETE:** Developer iteration 2 complete. 389 tests passing (0 failures), clean build, 0 TypeScript errors, 0 ESLint errors, 7 migrations in dist/. 39 new regression tests added across 9 test files. Completion report: `reports/v0.2.0-developer-iter2-complete.md`.
+
+**Step 5 (Iteration 2):** Spawning CISO and Adversary as background agents for Iteration 2 post-build review.
+
+**Step 5 (Iteration 2) COMPLETE:**
+
+`reports/v0.2.0-ciso-iter2-post-build.md` — 0 Critical / 0 High / 0 Medium / 2 Low (carryovers). NB-1 RESOLVED: news pipeline wired correctly. Ship-eligible from security standpoint.
+
+`reports/v0.2.0-adversary-iter2-post-build.md` — Verdict: NOT READY. 2 Critical / 2 High / 3 Medium / 2 Low.
+- AB-01 (Critical): rosterMaintenance.ts:120-138 resets `recent_*` to zero BEFORE evaluateSendDowns/evaluateCallUps read them — triggers structurally unreachable. 0 send-downs, 0 call-ups, 0 DFAs, 0 waiver claims in full-season probes.
+- AB-02 (Critical): INJURY and MILESTONE news producers missing (2 of 15 spec types). forceMinimumTrades produces 0 trades on unfavorable seeds — ≥3 floor not guaranteed.
+- AB-05 (Medium): Wrong .gitignore file edited — server/data/*.ts still gitignored, clean checkout can't boot.
+
+**Governance Decision — Run testers despite 2 Criticals:** Server starts and sim runs. Testers provide full signal on all working systems.
+
+**Step 6 (Iteration 2):** Spawning API Tester, then UI Tester A, then UI Tester B.
+
+**Step 6 (Iteration 2) — API Tester COMPLETE:** `reports/v0.2.0-api-tester-iter2-results.md`. Groups 0, 3, 7, 8, 10 passing. Criticals confirmed: waiver wire never populates (0 DFAs across 4 seasons); 0 mid-season call-ups/send-downs. Mediums: news ?type=FRONT+OFFICE returns 400 (working value is `frontoffice`); pagination offset ignored; details_json null on front-office events; spring cut uses `send_down` type not `release`.
+
+**Step 6 (Iteration 2) — UI Tester A COMPLETE:** `reports/v0.2.0-ui-tester-a-iter2-results.md` — 31 Pass / 4 Fail / 2 Skip. news-ticker globally visible on all tabs (5 items), news-tab nav correct, all filters present, minors-stats-{playerId} confirmed (150+ entries). Fails: `new-dynasty-button` testid uses suffix `-header`; GET /api/front-office-events returns 404.
+
+**Step 6 (Iteration 2) — UI Tester B COMPLETE:** `reports/v0.2.0-ui-tester-b-iter2-results.md` — 22 Pass. Core news testids all present. Gaps: news-badge/news-headline/news-game-number sub-testids missing from news item spans; news-item-detail missing from expanded view; minors tab testid is `team-minors-tab` not `minors-tab`; non-game headlines are procedural fallbacks (no ANTHROPIC_API_KEY). Game result events correctly show score-only. Injuries and milestones return 0 (no such events in DB — corroborates AB-02 INJURY/MILESTONE producer gap).
+
+**Step 7 (Iteration 2):** Spawning Architect for ITERATE/COMPLETE decision.
+
+**Step 7 (Iteration 2) COMPLETE:** `reports/v0.2.0-architect-eval-2.md` and `reports/v0.2.0-developer-instructions-3.md` written. Decision: **ITERATE**. 2 Critical / 1 High / 5 Medium / 3 Low.
+
+**2 Confirmed Criticals:**
+1. AB-01: rosterMaintenance.ts:124-131 zeroes `recent_*` to 0 immediately BEFORE evaluateSendDowns/evaluateCallUps read them — triggers structurally unreachable. §5.2 test gives false green.
+2. AB-02: INJURY and MILESTONE news producers have zero callers. forceMinimumTrades non-deterministic (0 trades on seed 11).
+
+**False positives:** ?type=FRONT+OFFICE 400 correct; details_json NULL acceptable; spring cuts send_down+release correct.
+
+---
+
+## Phase 2 — Iteration 3
+
+**Step 4 (Iteration 3):** Spawning Developer for Iteration 3 fixes per developer-instructions-3.md.
+
+**Step 4 (Iteration 3) COMPLETE:** 401 tests passing (0 failures), 0 TypeScript errors, 0 ESLint errors, clean build with 7 migrations. Fixes: rosterMaintenance ordering (AB-01), INJURY/MILESTONE news producers wired (AB-02a), forceMinimumTrades guaranteed ≥3 trades on all seeds (AB-02b), root .gitignore fixed for data files (AB-05), news sub-testids added, interim_manager consistency. 4 new regression tests. Completion report: `reports/v0.2.0-developer-iter3-complete.md`.
+
+**Step 5 (Iteration 3):** Spawning CISO and Adversary in parallel for Iteration 3 post-build review.
+
+**Step 5 (Iteration 3) COMPLETE:**
+
+`reports/v0.2.0-ciso-iter3-post-build.md` — 0 Critical / 0 High / 0 Medium / 0 new findings. CB-9 SELECT * now RESOLVED. NB-2/CB-2 Low further mitigated (llm.ts:330 now delimits keyTransactions). All prior resolved items remain resolved. Ship-eligible from security standpoint (third consecutive clean CISO pass).
+
+`reports/v0.2.0-adversary-iter3-post-build.md` — Verdict: NOT READY. 2 Critical / 0 High / 2 Medium / 2 Low.
+- AB-10 (Critical): AAA pipeline essentially empty (3-7 AAA players across all 20 teams, AA=0, ~95% of minor leaguers stuck at level A). No A→AA→AAA promotion path exists. Call-up/send-down/waiver triggers fire into a vacuum — zero in-season call-ups, DFAs, waiver claims, send-downs across full-season probes on seeds 7 and 11.
+- AB-11 (Critical): INJURY news mathematically impossible — worldgen.ts:329 caps injury_prone at 6 but game.ts:761 trigger requires ≥7. MILESTONE news effectively impossible from cold career-0 start. 2 of 15 mandated news types permanently empty. Green tests pass only with synthetic injury_prone=10/career_hr=99 values that worldgen can never produce.
+- AB-12 (Medium): manager_resigned event type has no news_items producer.
+- AB-13 (Medium): forceMinimumTrades can trade active 25-man regulars (not prospect/depth players).
+- Iter-3 Resolutions confirmed: AB-01 ordering fix correct (recency window now populated at evaluators), AB-02b trade floor seed-independent (3+ trades on seeds 7 and 11), AB-02a INJURY/MILESTONE producers wired at engine.ts:451-489, AB-05 gitignore fixed.
+
+**Step 6 (Iteration 3):** Spawning API Tester, then UI Tester A, then UI Tester B.
+
+**Step 6 (Iteration 3) — API Tester COMPLETE:** `reports/v0.2.0-api-tester-iter3-results.md`. Spring cuts 25-man exact PASS. Group 11 errors mostly pass. Fails: rosterMaintenance fires every tick with "team null has 717 on 25-man" (data integrity bug); DFA never fires, waiver wire empty; 0 call-ups across 162 games; in-season firings stalled (0 events despite teams at 4-12 with meddling owners); interim_manager flag=0 on teams showing "Interim Manager" names; /api/teams/:id/minors returns empty array; uppercase type filters return 400.
+
+**Step 6 (Iteration 3) — UI Testers A+B COMPLETE:** Worker A: 23 Pass / 5 Fail. Worker B: 20 Pass / 1 Fail. Positives: news-ticker on all tabs (5 items), all new sub-testids present (news-badge, news-headline, news-game-number, news-item-detail), filters functional, click-expand working, waivers-list present, minors-stats-{playerId} present. Key: INJURY: 22 events and MILESTONE: 2 events found in DB after 11 seasons — contradicts Adversary's "mathematically impossible" AB-11 claim. Architect must assess. Fails: /api/front-office-events 404; LLM headlines fallback (no API key); /api/teams/:id/minors returns empty array via API while UI shows data correctly (route vs endpoint mismatch).
+
+**Step 7 (Iteration 3):** Spawning Architect for ITERATE/COMPLETE decision.
+
+**Step 7 (Iteration 3) COMPLETE:** `reports/v0.2.0-architect-eval-3.md` and `reports/v0.2.0-developer-instructions-4.md` written. Decision: **ITERATE**. 2 Critical / 1 High / 3 Medium. 4 false positives declared.
+- AB-11 REAL DEFECT: worldgen injury_prone cap=6, game trigger=7 (one-point dead band). DB injuries stale/synthetic. Fix: worldgen cap.
+- AB-10 ROOT CAUSE: draft.ts:386 assigns levels by absolute rating → team's 26th-40th cascade to level A. Fix: rank-based + promotion path.
+- Null-team/is_on_25man PROMOTED TO HIGH: offseason.ts:82,263 null team_id without clearing is_on_25man → 717 phantom 25-man players.
+- False positives: /api/front-office-events (not in spec); /api/teams/:id/minors "empty" (level-keyed object, not array); uppercase type 400s (canonical); stale-DB injuries.
+- Architect framing: Iteration 4 is the final pass — mechanical fixes, mandated fresh-world regression tests.
+
+---
+
+## Phase 2 — Iteration 4 (Final)
+
+**Step 4 (Iteration 4):** Spawning Developer for final fixes per developer-instructions-4.md.
+
+**Step 4 (Iteration 4) COMPLETE:** 415 tests passing (0 failures), 0 TypeScript errors, 0 ESLint errors, clean build. Commit 532942c. Fixes: AB-10 (rank-based assignRosterLevels + offseason promotion), AB-11 (injury_prone widened to 3-9 + age-scaled career stats), null-team phantom 25-man cleared at retirement/FA + rosterMaintenance scoped, §3.1 trade Tier 4 surplus guard, §3.2 manager_resigned trigger, §3.3 GET /api/front-office-events route added, §4.4 player transactions 404 fixed. Completion report: `reports/v0.2.0-developer-iter4-complete.md`.
+
+**Step 5 (Iteration 4):** Spawning CISO and Adversary in parallel for Iteration 4 post-build review.
+
+**Step 5 (Iteration 4) COMPLETE:**
+
+`reports/v0.2.0-ciso-iter4-post-build.md` — 0 Critical / 0 High / 0 Medium. 1 Low informational: tradeDeadline.ts doesn't clear is_on_25man at write-time (self-healed same tick by invariant). Ship-eligible — 4th consecutive clean CISO pass. Note: /api/front-office-events route is in frontOffice.ts (not teams.ts as dev report said), correctly built with Zod, league_id scoping, explicit columns, scrubError.
+
+`reports/v0.2.0-adversary-iter4-post-build.md` — Verdict: NOT READY. 1 Critical / 0 High / 2 Medium / 2 Low.
+- AB-11 RESOLVED: injury_prone now 3-9 (worldgen.ts:331). INJURY fires organically (157-201/season, seeds 7/11/42). MILESTONE 63-90/season. Both confirmed by fresh-world probes.
+- AB-NULL RESOLVED: phantom 25-man zero in 2-season probe. Both offseason write sites fixed.
+- AB-10 STILL CRITICAL: rank-based assignRosterLevels (draft.ts:391) puts AAA = ranks 26-32, strictly below 25-man. sendDown.ts:44 requires AAA overall > MLB player overall — unsatisfiable by construction (developer's own Deviation #1 admits this). In-game injuries (157-201/season) fire as events but never open a 25-man slot (no is_injured mechanism). Zero call-ups, DFAs, waiver claims across 5-season fresh-world probe. Tests pass by manufacturing AAA upgrade prerequisites the real sim never produces (AB-16 false green).
+- AB-17 (Medium): manager_resigned producer wired but trigger unreachable in-season.
+
+**Root cause of AB-10:** injuries fire as INJURY news events but no `is_injured` flag reduces the active 25-man count. The "MLB roster drops below 23" unconditional call-up trigger can never fire. Rank-based assignment guarantees AAA players are always worse than MLB players, so rating-based triggers are unreachable too. Fix: add `is_injured` column to players table, set it when game.ts generates injury events, evaluate `WHERE is_on_25man=1 AND is_injured=0` in evaluateCallUps.
+
+**Step 6 (Iteration 4):** Spawning API Tester, then UI Testers A+B.
+
+**Step 6 (Iteration 4) COMPLETE:** `reports/v0.2.0-{api,ui-tester-a,ui-tester-b}-iter4-results.md` written.
+Confirmed fixed: /api/front-office-events now 200 (45 entries); INJURY news 31 events, MILESTONE 3 events in UI; news-badge/news-headline/news-game-number/news-item-detail all present; click-expand working. Spring cuts exact-25 PASS.
+Still failing: 0 call-ups/DFAs across 281 simmed games; API rejects uppercase ?type=INJURY/?type=MILESTONE with 400 (canonical is lowercase — prior false positive ruling applies); minors-tab vs team-minors-tab (prior false positive ruling applies); 1 trade in 281 games vs 3+ target (unclear if season hasn't reached deadline yet).
+
+**Step 7 (Iteration 4):** Spawning Architect for ITERATE/COMPLETE decision.
+
+**Step 7 (Iteration 4) COMPLETE:** Decision: **ITERATE**. 1 Critical / 0 High / 2 Medium / 4 Low. 3 false positives declared.
+
+Sole remaining Critical — AB-10: engine.ts:473-484 injury branch never writes is_on_25man=0 or is_injured=1; sendDown.ts:44 strictly-greater threshold impossible. Ruling Option C: use existing is_injured column + add injury_return_game (migration 008); engine sets flags + clears slot; callup.ts counts non-injured 25-man; sendDown relaxed to within-5. Mandatory organic integration test.
+
+---
+
+## Phase 2 — Iteration 5
+
+**Step 4 (Iteration 5):** Spawning Developer for AB-10 fix per developer-instructions-5.md.
+
+**Step 4 (Iteration 5) COMPLETE:** 417 tests passing (0 failures), 0 TypeScript errors, 0 ESLint errors, 8 migrations in dist. Commits 6333ba2 (code) + 27f60d6 (report). Key: injury events now vacate 25-man slots in writeGame transaction; send-down threshold relaxed to within-5; worldgen initializes options_remaining; organic integration test confirms 134-137 call_ups + 8+ DFAs on seeds 7+11 with zero manual seeding. Tautological callupSenddownReachability test deleted and replaced. Completion report: `reports/v0.2.0-developer-iter5-complete.md`.
+
+**Step 5 (Iteration 5):** Spawning CISO and Adversary in parallel for Iteration 5 post-build review.
+
+**Step 5 (Iteration 5) COMPLETE:**
+
+`reports/v0.2.0-ciso-iter5-post-build.md` — 0 Critical / 0 High / 0 Medium / 0 Low. 417/417 tests pass. NB-1 resolved (news pipeline wired). CB-9 SELECT* resolved. 5th consecutive clean CISO pass. Recommends COMPLETE.
+
+`reports/v0.2.0-adversary-iter5-post-build.md` — Verdict: **READY**. 0 Critical / 0 High / 0 Medium / 2 Low.
+- AB-10 FULLY RESOLVED: Organic probes (no manual seeding, seeds 7/11/42) — seed 7: 137 call-ups/21 send-downs/8 DFAs/4 waiver claims; seed 11: 134/21/4/3; seed 42: 148/29/8/5. Categorical reversal of Iter-4 0/0/0. DFA→waiver→claim state machine confirmed end-to-end (developer under-reported waiver_claim=0; actual 3-5/season). All 15 mandated news event types fire organically. manager_resigned reachable in-season via meddling-owner job_security decrement. New integration test confirmed fails against pre-fix 532942c, passes on 6333ba2. Zero injury-vacating regressions (no injured-while-active, no stuck-injured, no phantom/over-25 rosters across 3 seasons).
+- AB-18 (Low): Within-5 send-down can be undone by same-tick Trigger-1 call-up of same player — burns an option, redundant news pair. Bounded, non-looping, non-blocking.
+- AB-17 (Low): Integration test's in-season send_down assertion satisfiable by spring cuts alone (transactions lacks game_number column). call_up/dfa/waiver_claim assertions are the real gates and are sound.
+- "Ship it." — 2 Low findings are optional polish for next iteration.
+
+**Step 6 (Iteration 5):** Spawning API Tester, then UI Testers A+B.
+
+**Step 6 (Iteration 5) — API Tester COMPLETE:** `reports/v0.2.0-api-tester-iter5-results.md`. Key findings:
+- **Migration 008 not auto-applied on production server path (P0):** Server logs `[db] No migrations directory found` on startup. `dist/server/migrations/` exists but is not discovered by `node dist/server/index.js`. Migration 008 (injury_return_game column) not applied on restored DBs → sim crashes every tick with `no such column: injury_return_game`. Manual sqlite3 fix required to unblock testing.
+- **0 DFA events in 22 seasons** — waiver wire never activated (Adversary claimed 4-8/season; discrepancy explained by migration issue on production path vs. vitest source path)
+- **7 call-ups total in 22 seasons** (Adversary claimed 134-148/season; same root cause hypothesis)
+- **Interim manager re-fire loop** — "Interim Manager" keeps getting fired and replaced with "Interim Manager" in subsequent seasons
+- **`/api/transactions` type filter broken** — always returns dev_tick records regardless of ?type= param
+- Group 2 PASS: Owner death + owner sold team both update name + personality correctly
+- Group 10 PASS: Persistence (game number, FO events, service time survive restart)
+- Group 11 PARTIAL: /api/waivers 200/empty ✓, ?type=invalid 400 ✓; uppercase INJURY/MILESTONE still 400 (prior FP ruling applies)
+
+Spawning UI Tester A now; UI Tester B after.
+
+**Step 6 (Iteration 5) — UI Tester A COMPLETE:** `reports/v0.2.0-ui-tester-a-iter5-results.md`. 44 PASS / 2 FAIL / 4 SKIP.
+- Critical context: correct server path is `dist/server/server/index.js` not `dist/server/index.js` — no migration errors on correct path. The API Tester's P0 finding was caused by using the wrong binary path.
+- PASS: news-ticker present on all 6 active tabs (exactly 5 items); waivers-list testid; minors-stats-{id} (142 elements); team-minors-tab; team-roster-tab; all Group 9 news filters; game_result headlines are score-only; /api/news?type=invalid → 400; persistence; zero console errors.
+- FAIL: `roster-player-{id}` testids absent (roster renders without per-player testids); Owner text not visible in team detail panel (only GM info shown).
+- Nav testid mismatch: all main nav uses `nav-{section}` (nav-league, nav-teams, etc.) not `{section}-tab`; standings testid is `league-standings-table` not `standings-table`. Architect must rule: spec drift vs false positive.
+
+**Step 6 (Iteration 5) — UI Tester B COMPLETE:** `reports/v0.2.0-ui-tester-b-iter5-results.md`. 32 PASS / 0 FAIL / 2 SKIP.
+- Group 9 fully passes. All 13 spec items pass.
+- `news-ticker` confirmed on all 6 active tabs; ticker update verified (IDs shifted after sim run, count held at exactly 5).
+- All 5 filter buttons present and correctly filtering (transactions filter investigation resolved: it IS working).
+- `news-badge`, `news-headline`, `news-game-number` confirmed on all sampled items; `news-item-detail` appears on click.
+- Game result ticker items are score-only format confirmed.
+- All non-game headlines non-empty (procedural fallback, no API key in test env — passes "non-empty" criterion).
+- 2 SKIPs were CORS artifact in page.evaluate(); both verified correct via direct API calls.
+
+**Step 7 (Iteration 5):** Spawning Architect for ITERATE/COMPLETE decision.
+
+**Step 7 (Iteration 5) COMPLETE:** Decision: **ITERATE**. 1 Critical / 0 High / 1 Medium / 4 Low. Reports: `reports/v0.2.0-architect-eval-5.md` and `reports/v0.2.0-developer-instructions-6.md`.
+
+AB-10 chain-inertness claim (0 DFA / 7 call-ups on API Tester) declared FALSE POSITIVE: API Tester ran on restored Iter-4 DB where `options_remaining=3` for all players (worldgen fix only applies to fresh worlds), blocking the option-less→DFA path by construction; post-deadline test window also suppressed call-ups. Mechanism confirmed fixed by Adversary organic probes and integration test.
+
+AB-19 (Critical) — GENUINE NEW DEFECT: Build/packaging only; zero sim-logic changes needed.
+1. `scripts/copy-migrations.mjs` copies SQL to `dist/server/migrations/` but runtime loader at `dist/server/server/db.js` reads `dist/server/server/migrations/` (one level deeper, due to tsc output nesting). Production server silently applies zero migrations. Only fatal in Iter-5 because migration 008 was the first migration a carried/restored DB would be missing.
+2. `package.json` `"start": "node dist/server/index.js"` targets a file that does not exist; real entry is `dist/server/server/index.js`.
+MB-1 (Medium): `buildPackaging.test.ts` asserts `dist/server/migrations/` (copy destination) not the runtime-read path — test was green while production was broken.
+All other API Tester and UI Tester findings declared false positive or doc-only.
+
+---
+
+## Phase 2 — Iteration 6 (Final)
+
+**Step 4 (Iteration 6):** Spawning Developer for AB-19 build/packaging fix per developer-instructions-6.md.
+
+**Step 4 (Iteration 6) COMPLETE:** 419 tests passing (0 failures), clean build, clean lint. Commit 6c9b9d6. Three changes: (1) `copy-migrations.mjs` destination → `dist/server/server/migrations/`; (2) `package.json` start script → `node dist/server/server/index.js`; (3) `buildPackaging.test.ts` updated to assert runtime-read path + db.js-sibling. Verification: buildPackaging 2/6 FAILED pre-fix, 6/6 PASSED post-fix. Fresh DB: all 8 migrations applied cleanly. Partial DB (1-7): migration 008 applied on boot, `injury_return_game` column confirmed. Completion report: `reports/v0.2.0-developer-iter6-complete.md`.
+
+**Step 5 (Iteration 6):** Spawning CISO and Adversary in parallel for post-build review (build-config-only fix; minimal scope). UI Testers skipped this iteration (zero UI changes; Group 9 and all testid results carry forward from Iter 5 — documented here per Orchestrator authority to skip redundant testing when scope is strictly non-UI).
+
+**Step 5 (Iteration 6) COMPLETE:**
+
+`reports/v0.2.0-ciso-iter6-post-build.md` — 0 Critical / 0 High / 0 Medium / 0 new Low. 6th consecutive clean CISO pass. security:bundle-grep exit 0. migration path root cause confirmed at source level. COMPLETE recommended.
+
+`reports/v0.2.0-adversary-iter6-post-build.md` — Verdict: **READY**. 0 Critical / 0 High / 0 Medium / 0 Low. All 7 mandate items independently verified: migration path fix correct (db.ts __dirname chain confirmed), npm start resolves to existing file, packaging test FAIL→PASS reproduced, no sim logic changed, 419/419 tests pass, fresh-DB boot applies all 8 migrations, carried-DB (1-7) auto-applies migration 008 without manual ALTER TABLE. Stale `dist/server/migrations/` leftover from pre-fix build is zero-severity (never read).
+
+**Step 6 (Iteration 6):** Spawning API Tester (focused: verify migration fix in production server). UI Testers skipped (no UI changes).
+
+**Step 6 (Iteration 6) — API Tester COMPLETE:** `reports/v0.2.0-api-tester-iter6-results.md`. ALL PASS. AB-19 fix confirmed end-to-end: fresh DB applied all 8 migrations in sequence (no "No migrations directory found"), carried DB restored without errors, sim ran full season+playoffs+offseason with zero `no such column: injury_return_game` crashes. Group 0 all pass. LLM fallback expected (no API key in test env).
+
+**Step 7 (Iteration 6):** Spawning Architect for final ITERATE/COMPLETE decision.
+
+**Step 7 (Iteration 6) COMPLETE:** Decision: **COMPLETE**. `reports/v0.2.0-architect-eval-6.md`. 0 Critical / 0 High / 0 Medium / 4 Low (deferred to v0.3.0). Both Iter-6 blockers resolved: AB-19 (migration path fix, start script fix) and MB-1 (packaging test now asserts runtime-read path). 419 tests pass. Architect independently verified fresh-DB boot applies all 8 migrations via built artifact. Ship v0.2.0.
+
+---
+
+## Phase 3 — Ship
+
+**Developer:** Create PR from `feature/v0.2.0-live-org-market-firings-news` → `main`.
+- Remote not yet configured. Developer will add `https://github.com/pudubrews-ai/baseballdynasty` and push.
+- If push fails (repo not yet created on GitHub or credentials not configured): note in report and halt. Founder must configure remote manually.
+- PR title: "feat(v0.2.0): Live org, market dynamics, in-season firings, news feed"
+
+**Phase 3 COMPLETE:** PR created successfully. Governance log committed (882324e). Feature branch and main pushed to remote. **PR #1:** https://github.com/pudubrews-ai/baseballdynasty/pull/1
+
+**Awaiting Founder merge approval.** Orchestrator will trigger merge on "merge" signal. Founder must NOT merge manually.

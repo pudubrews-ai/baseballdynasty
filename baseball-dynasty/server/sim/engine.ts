@@ -11,7 +11,11 @@ import { generateSchedule, saveSchedule, getNextGame, isSeasonComplete, shouldFi
 import { simulateGame } from './game.js';
 import { runPlayoffs } from './playoffs.js';
 import { runOffseason } from './offseason.js';
-import { getLlmStatus } from '../services/llm.js';
+import { springCutsNeeded, runSpringCuts } from './springCuts.js';
+import { runRosterMaintenance } from './rosterMaintenance.js';
+import { forceMinimumTrades } from './tradeDeadline.js';
+import { getLlmStatus, resetNewsCallsThisSeason } from '../services/llm.js';
+import { insertGameNewsItem, insertNewsItem, insertMilestoneNewsItem, fillPendingHeadlines, fillPendingTransactionFlavors } from './news.js';
 import { scrubError } from '../util/scrub.js';
 import type { LeagueStateSnapshot, SimSpeed } from '../../shared/types.js';
 import type { NewLeagueBodyType } from '../../shared/schemas.js';
@@ -91,6 +95,17 @@ export async function refreshCache(leagueId: number): Promise<LeagueStateSnapsho
     return null;
   }
 
+  // Compute waiverCount and lastNewsId for v0.2.0
+  const waiverCountRow = prepared(
+    "SELECT COUNT(*) as cnt FROM players WHERE league_id = ? AND waiver_state IN ('dfa','waivers')"
+  ).get(league.id) as { cnt: number } | undefined;
+  const waiverCount = waiverCountRow?.cnt ?? 0;
+
+  const lastNewsRow = prepared(
+    'SELECT MAX(id) as maxId FROM news_items WHERE league_id = ?'
+  ).get(league.id) as { maxId: number | null } | undefined;
+  const lastNewsId = lastNewsRow?.maxId ?? 0;
+
   const snapshot: LeagueStateSnapshot = {
     leagueId: league.id,
     phase: mapPhase(league.phase),
@@ -104,6 +119,8 @@ export async function refreshCache(leagueId: number): Promise<LeagueStateSnapsho
     lastGameId: league.last_game_id,
     llmStatus: getLlmStatus(),
     worldgenSeed: league.worldgen_seed,
+    waiverCount,
+    lastNewsId,
   };
 
   updateCache(leagueId, snapshot);
@@ -291,6 +308,11 @@ async function runOneTick(league: LeagueRow): Promise<void> {
       await runDraftTick(league, isTurbo);
       break;
     case 'regular_season':
+      // AB-08: spring cuts run as first regular-season event; no game simmed on this tick
+      if (springCutsNeeded(league)) {
+        runSpringCuts(league);
+        break;
+      }
       await runGameTick(league);
       break;
     case 'playoffs':
@@ -377,6 +399,13 @@ async function runGameTick(league: LeagueRow): Promise<void> {
   // Check trade deadline
   if (shouldFireTradeDeadline(league.id, league.season_number)) {
     fireTradeDeadline(league.id, league.season_number);
+    // AB-12: force minimum 3 trades after the deadline marker fires
+    try {
+      const allTeams = prepared('SELECT * FROM teams WHERE league_id = ?').all(league.id) as TeamRow[];
+      forceMinimumTrades(allTeams, league.id, league.season_number);
+    } catch (err) {
+      console.warn('[engine] Force minimum trades error:', err);
+    }
   }
 
   const homeTeam = prepared('SELECT * FROM teams WHERE id = ?').get(nextGame.homeTeamId) as TeamRow | undefined;
@@ -397,16 +426,113 @@ async function runGameTick(league: LeagueRow): Promise<void> {
     league.id
   );
 
+  // §1.1(f): Insert game result news item (score-only, no LLM, immediate)
+  // §1.2(a): Also read notable_events_json to emit INJURY and MILESTONE news items.
+  try {
+    const gameRow = prepared(
+      'SELECT id, home_score, away_score, notable_events_json FROM game_log WHERE league_id = ? AND game_number = ? AND season_number = ? ORDER BY id DESC LIMIT 1'
+    ).get(league.id, nextGame.gameNumber, league.season_number) as {
+      id: number; home_score: number; away_score: number; notable_events_json: string | null;
+    } | undefined;
+    if (gameRow) {
+      insertGameNewsItem({
+        leagueId: league.id,
+        seasonNumber: league.season_number,
+        gameNumber: nextGame.gameNumber,
+        homeTeamId: nextGame.homeTeamId,
+        awayTeamId: nextGame.awayTeamId,
+        homeScore: gameRow.home_score,
+        awayScore: gameRow.away_score,
+        homeTeamName: `${homeTeam.city} ${homeTeam.name}`,
+        awayTeamName: `${awayTeam.city} ${awayTeam.name}`,
+      });
+
+      // §1.2(a): Surface injury + milestone NotableEvents into the news feed
+      if (gameRow.notable_events_json) {
+        try {
+          const events = JSON.parse(gameRow.notable_events_json) as Array<{
+            type: string;
+            playerId?: number;
+            description?: string;
+            recoveryGames?: number; // AB-10 Part A: IL stint length
+          }>;
+          for (const ev of events) {
+            if (!ev.playerId) continue;
+            // Resolve team_id from players table (CB: structured columns only, never raw description)
+            const playerRow = prepared('SELECT team_id FROM players WHERE id = ?').get(ev.playerId) as { team_id: number | null } | undefined;
+            const teamId = playerRow?.team_id ?? null;
+            if (ev.type === 'milestone') {
+              insertMilestoneNewsItem({
+                leagueId: league.id,
+                seasonNumber: league.season_number,
+                gameNumber: nextGame.gameNumber,
+                playerId: ev.playerId,
+                teamId: teamId ?? nextGame.homeTeamId,
+                sourceTable: 'game_log',
+                sourceId: gameRow.id,
+              });
+            } else if (ev.type === 'injury') {
+              // AB-10 Part A: vacate the 25-man slot so call-up Trigger 1 fires.
+              // Guard with is_on_25man=1 so we never double-injure or touch minor leaguers.
+              prepared(
+                `UPDATE players
+                 SET is_injured = 1, is_on_25man = 0, injury_return_game = ?
+                 WHERE id = ? AND is_on_25man = 1`
+              ).run(nextGame.gameNumber + (ev.recoveryGames ?? 7), ev.playerId);
+              insertNewsItem({
+                leagueId: league.id,
+                seasonNumber: league.season_number,
+                gameNumber: nextGame.gameNumber,
+                eventType: 'injury',
+                playerId: ev.playerId,
+                teamId: teamId,
+                sourceTable: 'game_log',
+                sourceId: gameRow.id,
+              });
+            }
+          }
+        } catch (err) {
+          console.warn('[engine] notable-events news insert error:', scrubError(err).message);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[engine] Game news insert error:', scrubError(err).message);
+  }
+
+  // AB-18/AB-03: roster maintenance runs AFTER simulateGame, unconditionally
+  // (including skipped-game ticks — the hook is here, not in simulateGame).
+  // Crash-gap acceptance: if crash here, next tick re-evaluates idempotent conditions.
+  runRosterMaintenance(league.id, nextGame.homeTeamId, nextGame.awayTeamId, nextGame.gameNumber);
+
+  // §1.1(g): Fill pending headlines once per game tick (async, non-blocking)
+  fillPendingHeadlines(league.id).catch(err =>
+    console.warn('[engine] fillPendingHeadlines error:', scrubError(err).message)
+  );
+
+  // §1.1(h): Fill pending transaction flavors once per game tick
+  fillPendingTransactionFlavors(league.id).catch(err =>
+    console.warn('[engine] fillPendingTransactionFlavors error:', scrubError(err).message)
+  );
+
   // Check if season complete after this game
   if (isSeasonComplete(league.id)) {
     prepared('UPDATE leagues SET phase = ? WHERE id = ?').run('playoffs', league.id);
     console.log('[engine] Regular season complete after game', nextGame.gameNumber);
+    // Flush trailing pending headlines at phase transition (AB-07)
+    fillPendingHeadlines(league.id).catch(err =>
+      console.warn('[engine] Phase transition fillPendingHeadlines error:', scrubError(err).message)
+    );
   }
 }
 
 async function runPlayoffTick(league: LeagueRow): Promise<void> {
   try {
     await runPlayoffs(league.id);
+    // Flush pending headlines at each playoff tick
+    fillPendingHeadlines(league.id).catch(err =>
+      console.warn('[engine] Playoff fillPendingHeadlines error:', scrubError(err).message)
+    );
   } catch (err) {
     console.error('[engine] Playoff error:', scrubError(err).message);
   }
@@ -415,6 +541,15 @@ async function runPlayoffTick(league: LeagueRow): Promise<void> {
 async function runOffseasonTick(league: LeagueRow, isTurbo: boolean): Promise<void> {
   try {
     await runOffseason(league, isTurbo);
+    // Flush pending headlines at offseason phase (AB-07 phase transition flush)
+    await fillPendingHeadlines(league.id);
+    await fillPendingTransactionFlavors(league.id);
+    // Reset news call season cap at offseason→new-season boundary (CB-5)
+    const freshLeague = prepared('SELECT phase, offseason_step FROM leagues WHERE id = ?').get(league.id) as { phase: string; offseason_step: string | null } | undefined;
+    if (freshLeague?.phase === 'regular_season') {
+      // Offseason just completed (transitioned to regular_season)
+      resetNewsCallsThisSeason();
+    }
   } catch (err) {
     console.error('[engine] Offseason error:', scrubError(err).message);
   }

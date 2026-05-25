@@ -122,6 +122,8 @@ export interface LeagueRow {
   offseason_step: string | null;
   schedule_json: string | null;
   created_at: number;
+  // v0.2.0 new columns
+  spring_cuts_done_season: number | null;
 }
 
 export interface TeamRow {
@@ -148,12 +150,25 @@ export interface TeamRow {
   gm_philosophy: string;
   gm_risk_tolerance: string;
   gm_focus: string;
+  // v0.2.0 new columns
+  gm_archetype: string;
   manager_name: string;
   manager_style: string;
+  manager_tactics: number;
+  manager_motivation: number;
+  manager_communication: number;
   owner_name: string;
   owner_personality: string;
   owner_age: number;
   job_security: number;
+  trade_posture: string | null;
+  interim_gm: number;
+  interim_manager: number;
+  last_call_up_check_game: number;
+  last_firing_check_game: number;
+  last_gm_firing_check_game: number;
+  last_service_time_update_game: number;
+  deadline_trades_this_season: number;
 }
 
 export interface PlayerRow {
@@ -194,6 +209,17 @@ export interface PlayerRow {
   career_ip: number;
   career_k: number;
   career_wins: number;
+  // v0.2.0 new columns
+  is_on_25man: number;
+  options_remaining: number;
+  service_time_days: number;
+  first_mlb_call_up_game: number | null;
+  free_agent_eligible: number;
+  manipulation_delay_until_game: number | null;
+  prospect_visible: number;
+  waiver_state: string;
+  dfa_team_id: number | null;
+  claim_game_window_end: number | null;
 }
 
 export interface GameLogRow {

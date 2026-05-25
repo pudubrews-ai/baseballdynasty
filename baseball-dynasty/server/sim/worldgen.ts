@@ -45,7 +45,10 @@ const GM_PHILOSOPHIES: Array<'win-now' | 'rebuild' | 'balanced'> = ['win-now', '
 const GM_RISK_TOLERANCES: Array<'conservative' | 'moderate' | 'aggressive'> = ['conservative', 'moderate', 'aggressive'];
 const GM_FOCUSES: Array<'hitting' | 'pitching' | 'defense'> = ['hitting', 'pitching', 'defense'];
 const MANAGER_STYLES: Array<'aggressive' | 'balanced' | 'conservative'> = ['aggressive', 'balanced', 'conservative'];
-const OWNER_PERSONALITIES: Array<'meddling' | 'hands-off' | 'moderate'> = ['meddling', 'hands-off', 'moderate'];
+// v0.2.0: expanded owner personality includes win-now and patient (AB-17)
+const OWNER_PERSONALITIES: Array<'meddling' | 'hands-off' | 'moderate' | 'win-now' | 'patient'> = ['meddling', 'hands-off', 'moderate', 'win-now', 'patient'];
+// GM archetypes per AB-06 market-correlated derivation
+type GmArchetype = 'analytics' | 'old-school' | 'balanced';
 const POTENTIAL_DIST: Array<{ grade: string; pct: number }> = [
   { grade: 'A', pct: 0.10 },
   { grade: 'B', pct: 0.25 },
@@ -174,10 +177,10 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
     'INSERT INTO leagues (name, season_number, phase, sim_speed, current_game_date, current_game_number, last_pick_id, last_game_id, worldgen_seed, archived, created_at) VALUES (?, 1, ?, ?, 0, 0, 0, 0, ?, 0, ?)'
   );
   const insertTeam = db.prepare(
-    `INSERT INTO teams (league_id, name, city, state_province, region, market_size, conference, division, color, wins, losses, runs_scored, runs_allowed, games_played, payroll_budget, current_payroll, revenue, gm_name, gm_philosophy, gm_risk_tolerance, gm_focus, manager_name, manager_style, owner_name, owner_personality, owner_age, job_security, abbreviation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 5, ?)`
+    `INSERT INTO teams (league_id, name, city, state_province, region, market_size, conference, division, color, wins, losses, runs_scored, runs_allowed, games_played, payroll_budget, current_payroll, revenue, gm_name, gm_philosophy, gm_risk_tolerance, gm_focus, gm_archetype, manager_name, manager_style, manager_tactics, manager_motivation, manager_communication, owner_name, owner_personality, owner_age, job_security, abbreviation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 5, ?)`
   );
   const insertPlayer = db.prepare(
-    `INSERT INTO players (league_id, team_id, first_name, last_name, age, position, overall_rating, potential, potential_revealed, contact, power, speed, fielding, arm, pitching_velocity, pitching_control, pitching_stamina, is_on_mlb_roster, annual_salary, contract_years_remaining, service_time, injury_prone, coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country, is_drafted) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
+    `INSERT INTO players (league_id, team_id, first_name, last_name, age, position, overall_rating, potential, potential_revealed, contact, power, speed, fielding, arm, pitching_velocity, pitching_control, pitching_stamina, is_on_mlb_roster, is_on_25man, annual_salary, contract_years_remaining, service_time, service_time_days, injury_prone, coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country, is_drafted, career_hits, career_hr, career_rbi, career_ip, career_k, options_remaining) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`
   );
 
   const doWorldgen = db.transaction(() => {
@@ -231,8 +234,30 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
       const riskTolerance = GM_RISK_TOLERANCES[randInt(rng, 0, 2)] ?? 'moderate';
       const focus = GM_FOCUSES[randInt(rng, 0, 2)] ?? 'hitting';
       const managerStyle = MANAGER_STYLES[randInt(rng, 0, 2)] ?? 'balanced';
-      const ownerPersonality = OWNER_PERSONALITIES[randInt(rng, 0, 2)] ?? 'moderate';
+      const ownerPersonality = OWNER_PERSONALITIES[randInt(rng, 0, 4)] ?? 'moderate';
       const ownerAge = randInt(rng, 45, 75);
+
+      // AB-06: GM archetype correlated with market size (seeded)
+      const archetypeRng = seedFor(`archetype_${i}_${leagueId}`, seed);
+      const archetypeRoll = archetypeRng();
+      let gmArchetype: GmArchetype;
+      const marketSize = city.market_size;
+      if (marketSize === 'small' || marketSize === 'medium') {
+        // 60% analytics, 25% balanced, 15% old-school
+        if (archetypeRoll < 0.60) gmArchetype = 'analytics';
+        else if (archetypeRoll < 0.85) gmArchetype = 'balanced';
+        else gmArchetype = 'old-school';
+      } else {
+        // large/mega: 50% old-school, 30% balanced, 20% analytics
+        if (archetypeRoll < 0.50) gmArchetype = 'old-school';
+        else if (archetypeRoll < 0.80) gmArchetype = 'balanced';
+        else gmArchetype = 'analytics';
+      }
+
+      // Manager numeric ratings (random 40-70 range)
+      const managerTactics = randInt(rng, 40, 70);
+      const managerMotivation = randInt(rng, 40, 70);
+      const managerCommunication = randInt(rng, 40, 70);
 
       const gmFirst = pickRandomName(rng, 'us', 'first');
       const gmLast = pickRandomName(rng, 'us', 'last');
@@ -259,8 +284,12 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
         philosophy,
         riskTolerance,
         focus,
+        gmArchetype,
         `${managerFirst} ${managerLast}`,
         managerStyle,
+        managerTactics,
+        managerMotivation,
+        managerCommunication,
         `${ownerFirst} ${ownerLast}`,
         ownerPersonality,
         ownerAge,
@@ -296,8 +325,10 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
       // Contract years: 1-4
       const contractYears = randInt(rng, 1, 4);
 
-      // injury_prone: weighted toward 3-6
-      const injuryProne = randInt(rng, 3, 6);
+      // injury_prone: most players 3-6, a tail of injury-prone players 7-9
+      // AB-11 FIX: widened range to include ≥7 so the game.ts trigger (injury_prone >= 7) is reachable.
+      // randInt(3,9) puts ~43% of players at ≥7; the 0.05 per-game gate keeps actual injuries sparse.
+      const injuryProne = randInt(rng, 3, 9);
 
       // Name generation
       const firstName = pickRandomName(rng, origin, 'first');
@@ -319,6 +350,39 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
       const workEthic = randInt(rng, 1, 10);
       const leadership = randInt(rng, 1, 10);
 
+      // v0.2.0: service_time_days = serviceTime * 30 (AB-05 rescaling)
+      const serviceTimeDays = serviceTime * 30;
+
+      // AB-10 Part B: options_remaining based on service time — veterans exhaust their options.
+      // MLB rules: players get 3 options; each send-down uses one. After 3 years of service,
+      // most players have used all options. service_time >= 3 → 0 options, >= 2 → max 1, else 3.
+      const optionsRemaining = serviceTime >= 3 ? 0 : serviceTime >= 2 ? 1 : 3;
+
+      // AB-11 FIX §1.2b: Seed age-scaled career stats so veterans sit near milestone thresholds.
+      // Milestones fire on crossing 100/200 HR, 2000 hits, 1000 K — all starting at 0 makes them
+      // unreachable in a fresh play horizon. Scale by (age - 22) × rate, clamped 0..threshold-1
+      // so a player never *starts* past a threshold (they must cross it in play).
+      const yearsPlayed = Math.max(0, age - 22);
+      let careerHits = 0;
+      let careerHr = 0;
+      let careerRbi = 0;
+      let careerIp = 0;
+      let careerK = 0;
+      if (!isPitcher && yearsPlayed > 0) {
+        // Approximate per-year rates from ratings (contact drives hits, power drives HR)
+        const hitsPerYear = Math.round((contact ?? 50) * 4);
+        const hrPerYear = Math.round((power ?? 50) / 12);
+        const rbiPerYear = Math.round(hrPerYear * 3.5);
+        careerHits = Math.min(1999, yearsPlayed * hitsPerYear);
+        careerHr = Math.min(199, yearsPlayed * hrPerYear);
+        careerRbi = yearsPlayed * rbiPerYear;
+      } else if (isPitcher && yearsPlayed > 0) {
+        const ipPerYear = Math.round((pitchingStamina ?? 50) * 2.5);
+        const kPerYear = Math.round((pitchingVelocity ?? 50) * 0.06 * ipPerYear);
+        careerIp = yearsPlayed * ipPerYear;
+        careerK = Math.min(999, yearsPlayed * kPerYear);
+      }
+
       insertPlayer.run(
         leagueId,
         firstName,
@@ -338,6 +402,7 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
         annualSalary,
         contractYears,
         serviceTime,
+        serviceTimeDays,
         injuryProne,
         coachability,
         workEthic,
@@ -345,6 +410,12 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
         origin,
         '', // birthplace_city
         country,
+        careerHits,
+        careerHr,
+        careerRbi,
+        careerIp,
+        careerK,
+        optionsRemaining,
       );
     }
 

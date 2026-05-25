@@ -72,8 +72,8 @@ app.get('/api/healthz', (_req: Request, res: Response) => {
 
 app.get('/api/state', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const sincePickId = req.query['sincePickId'] ? parseInt(String(req.query['sincePickId']), 10) : 0;
-    const sinceGameId = req.query['sinceGameId'] ? parseInt(String(req.query['sinceGameId']), 10) : 0;
+    const sincePickId = z.coerce.number().int().min(0).catch(0).parse(req.query['sincePickId'] ?? 0);
+    const sinceGameId = z.coerce.number().int().min(0).catch(0).parse(req.query['sinceGameId'] ?? 0);
     const state = await getActiveLeagueState(sincePickId, sinceGameId);
     if (!state) {
       // §3.5: Return full shape even when no league exists
@@ -92,6 +92,8 @@ app.get('/api/state', async (req: Request, res: Response, next: NextFunction): P
         worldgenSeed: 0,
         picksDelta: [],
         gamesDelta: [],
+        waiverCount: 0,
+        lastNewsId: 0,
       });
       return;
     }
@@ -185,11 +187,18 @@ import { teamsRouter } from './routes/teams.js';
 import { playersRouter } from './routes/players.js';
 import { gamesRouter } from './routes/games.js';
 import { timelineRouter } from './routes/timeline.js';
+import { waiversRouter } from './routes/waivers.js';
+import { newsRouter } from './routes/news.js';
+import { frontOfficeRouter } from './routes/frontOffice.js';
 
 app.use('/api/teams', teamsRouter);
 app.use('/api/players', playersRouter);
 app.use('/api/games', gamesRouter);
 app.use('/api/timeline', timelineRouter);
+app.use('/api/waivers', waiversRouter);
+app.use('/api/news', newsRouter);
+// §3.3: League-wide front-office-events read endpoint (firings, owner events, resignations)
+app.use('/api/front-office-events', frontOfficeRouter);
 
 // §2.9 / §3.2: Draft order endpoint — branches on phase (expansion vs annual)
 app.get('/api/draft/order', async (_req: Request, res: Response, next: NextFunction): Promise<void> => {

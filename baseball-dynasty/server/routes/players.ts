@@ -77,10 +77,10 @@ playersRouter.get('/leaders', async (req: Request, res: Response, next: NextFunc
        ORDER BY ss.strikeouts_pitching DESC LIMIT 10`
     ).all(league.id, season) as LeaderRow[]).map(mapLeader('K'));
 
-    // WHIP leaders (min 75 IP — raised from 50 per §2.5 Iter 4 to improve realism)
+    // WHIP leaders (min 75 IP — AB-21: use hits_allowed not hits)
     const whip = (prepared(
       `SELECT p.first_name, p.last_name, t.city || ' ' || t.name as team_name,
-       (ss.walks_pitching + ss.hits) / ss.innings_pitched as value
+       (ss.walks_pitching + ss.hits_allowed) / ss.innings_pitched as value
        FROM season_stats ss
        JOIN players p ON p.id = ss.player_id
        LEFT JOIN teams t ON t.id = ss.team_id
@@ -122,13 +122,55 @@ playersRouter.get('/search', async (req: Request, res: Response, next: NextFunct
   } catch (err) { next(err); }
 });
 
+// GET /api/players/:id/transactions — full transaction history for a player
+// §4.4 (§0.5): returns 404 when the player id does not exist (was 200 []).
+playersRouter.get('/:id/transactions', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const idResult = playerIdSchema.safeParse(req.params['id']);
+    if (!idResult.success) { res.status(400).json({ error: 'invalid_id' }); return; }
+
+    // §4.4: existence check — 404 if player not found at all (league-independent)
+    const playerExists = prepared('SELECT id FROM players WHERE id = ?').get(idResult.data) as { id: number } | undefined;
+    if (!playerExists) { res.status(404).json({ error: 'Player not found' }); return; }
+
+    const league = getActiveLeague();
+    if (!league) { res.json([]); return; }
+
+    const transactions = prepared(
+      `SELECT t.id, t.league_id, t.season_number, t.transaction_type, t.team_id,
+              t.player_id, t.narrative, t.created_at,
+              tm.city || ' ' || tm.name as team_name
+       FROM transactions t
+       LEFT JOIN teams tm ON tm.id = t.team_id
+       WHERE t.league_id = ? AND t.player_id = ?
+       ORDER BY t.created_at DESC
+       LIMIT 100`
+    ).all(league.id, idResult.data) as Array<{
+      id: number; league_id: number; season_number: number; transaction_type: string;
+      team_id: number | null; player_id: number | null; narrative: string | null;
+      created_at: number; team_name: string | null;
+    }>;
+
+    res.json(transactions);
+  } catch (err) { next(err); }
+});
+
 playersRouter.get('/:id', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const idResult = playerIdSchema.safeParse(req.params['id']);
     if (!idResult.success) { res.status(400).json({ error: 'invalid_id' }); return; }
 
     const league = getActiveLeague();
-    const player = prepared('SELECT * FROM players WHERE id = ?').get(idResult.data) as PlayerRow | undefined;
+    const player = prepared(
+      `SELECT id, league_id, team_id, first_name, last_name, age, position, overall_rating, potential, potential_revealed,
+              contact, power, speed, fielding, arm, pitching_velocity, pitching_control, pitching_stamina,
+              is_on_mlb_roster, minor_level, annual_salary, contract_years_remaining, service_time, injury_prone,
+              coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country,
+              is_drafted, career_hits, career_hr, career_rbi, career_ip, career_k, career_wins,
+              is_on_25man, options_remaining, service_time_days, first_mlb_call_up_game, free_agent_eligible,
+              manipulation_delay_until_game, prospect_visible, waiver_state, dfa_team_id, claim_game_window_end
+       FROM players WHERE id = ?`
+    ).get(idResult.data) as PlayerRow | undefined;
     if (!player) { res.status(404).json({ error: 'Player not found' }); return; } // §2.16.2
 
     const team = player.team_id

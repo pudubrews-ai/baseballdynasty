@@ -5,12 +5,14 @@ import { getDb, prepared, type LeagueRow, type TeamRow, type PlayerRow } from '.
 import { seedFor, randInt, randNormal } from './prng.js';
 import { runAnnualDraft } from './draft.js';
 import { callSeasonNarrative } from '../services/llm.js';
+import { insertTransactionNewsItem, insertFrontOfficeNewsItem } from './news.js';
 
 const GM_PHILOSOPHIES: Array<'win-now' | 'rebuild' | 'balanced'> = ['win-now', 'rebuild', 'balanced'];
 const GM_RISK_TOLERANCES: Array<'conservative' | 'moderate' | 'aggressive'> = ['conservative', 'moderate', 'aggressive'];
 const GM_FOCUSES: Array<'hitting' | 'pitching' | 'defense'> = ['hitting', 'pitching', 'defense'];
 const MANAGER_STYLES: Array<'aggressive' | 'balanced' | 'conservative'> = ['aggressive', 'balanced', 'conservative'];
-const OWNER_PERSONALITIES: Array<'meddling' | 'hands-off' | 'moderate'> = ['meddling', 'hands-off', 'moderate'];
+// v0.2.0: expanded owner_personality includes win-now and patient
+const OWNER_PERSONALITIES: Array<'meddling' | 'hands-off' | 'moderate' | 'win-now' | 'patient'> = ['meddling', 'hands-off', 'moderate', 'win-now', 'patient'];
 
 export async function runOffseason(league: LeagueRow, isTurbo: boolean): Promise<void> {
   const leagueId = league.id;
@@ -18,7 +20,7 @@ export async function runOffseason(league: LeagueRow, isTurbo: boolean): Promise
 
   console.log(`[offseason] Starting from step: ${currentStep}`);
 
-  const steps = ['retirement', 'development', 'free_agency', 'front_office', 'annual_draft', 'done'];
+  const steps = ['retirement', 'development', 'non_tender', 'free_agency', 'front_office', 'annual_draft', 'done'];
   const startIdx = steps.indexOf(currentStep);
 
   // §1.2 Iter-5: Import pause-check for cooperative offseason cancellation
@@ -34,6 +36,9 @@ export async function runOffseason(league: LeagueRow, isTurbo: boolean): Promise
         break;
       case 'development':
         await runDevelopmentStep(leagueId, league.worldgen_seed ^ league.season_number);
+        break;
+      case 'non_tender':
+        await runNonTenderStep(leagueId, league.season_number);
         break;
       case 'free_agency':
         await runFreeAgencyStep(leagueId, league.season_number);
@@ -74,7 +79,9 @@ async function runRetirementStep(leagueId: number, seasonNumber: number): Promis
   ).all(leagueId) as PlayerRow[];
 
   for (const player of retirees) {
-    db.prepare('UPDATE players SET team_id = NULL, is_on_mlb_roster = 0 WHERE id = ?').run(player.id);
+    // AB-NULL FIX §2.1: also clear is_on_25man and minor_level so retired players don't
+    // appear as phantom 25-man members (was creating 717+ ghost rows after 11 seasons).
+    db.prepare('UPDATE players SET team_id = NULL, is_on_mlb_roster = 0, is_on_25man = 0, minor_level = NULL WHERE id = ?').run(player.id);
     db.prepare(
       'INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
     ).run(
@@ -100,11 +107,10 @@ async function runDevelopmentStep(leagueId: number, seed: number): Promise<void>
       const newAge = player.age + 1;
       let ratingChange = 0;
 
-      // Development model
-      if (newAge <= 27 && player.minor_level !== null) {
-        // Young minor leaguers grow: +1 to +3
-        ratingChange = randInt(rng, 0, 3);
-      } else if (newAge >= 28 && newAge <= 32) {
+      // Development model — AB-10 RULING: young minor leaguer growth (+0..+3) REMOVED.
+      // Minor leaguer growth now happens ONLY in-season via prospectDev.ts.
+      // Keep: peak/decline curves for 28+ players (applies to MLB and AAA players).
+      if (newAge >= 28 && newAge <= 32) {
         // Stars in peak years: -1 to +1
         ratingChange = randInt(rng, -1, 1);
       } else if (newAge >= 33) {
@@ -112,7 +118,7 @@ async function runDevelopmentStep(leagueId: number, seed: number): Promise<void>
         ratingChange = randInt(rng, -2, 0);
       }
 
-      const newRating = Math.max(25, Math.min(99, player.overall_rating + ratingChange));
+      let newRating = Math.max(25, Math.min(99, player.overall_rating + ratingChange));
 
       // 5% injury chance per season
       const injured = rng() < 0.05 ? 1 : 0;
@@ -123,17 +129,185 @@ async function runDevelopmentStep(leagueId: number, seed: number): Promise<void>
       // Contract year reduction
       const newContractYears = Math.max(0, player.contract_years_remaining - 1);
 
+      // AB-10: Bust downgrade — once per player per season, AFTER aging.
+      // If newAge === 26 AND minor_level IN ('AA','A','Rookie') AND potential IN ('C','D'):
+      // potential='D', overall_rating = MIN(overall_rating, 65).
+      let newPotential = player.potential;
+      const bustLevels = ['AA', 'A', 'Rookie'];
+      if (newAge === 26 && player.minor_level !== null && bustLevels.includes(player.minor_level) &&
+          (player.potential === 'C' || player.potential === 'D')) {
+        newPotential = 'D';
+        newRating = Math.min(newRating, 65);
+      }
+
       db.prepare(
-        'UPDATE players SET age = ?, overall_rating = ?, is_injured = ?, potential_revealed = ?, contract_years_remaining = ? WHERE id = ?'
-      ).run(newAge, newRating, injured, potentialRevealed, newContractYears, player.id);
+        'UPDATE players SET age = ?, overall_rating = ?, potential = ?, is_injured = ?, potential_revealed = ?, contract_years_remaining = ? WHERE id = ?'
+      ).run(newAge, newRating, newPotential, injured, potentialRevealed, newContractYears, player.id);
     }
   });
 
   devTx();
   console.log(`[offseason] Development: ${players.length} players aged and developed`);
+
+  // AB-10 FIX §1.1b: Promote prospects up a level when they outgrow their current one.
+  // This keeps AAA stocked over multi-season play after the initial worldgen cohort graduates.
+  runProspectPromotionStep(leagueId, db);
 }
 
-// Step 3: Free agency — D20
+// AB-10 §1.1b: Offseason prospect level promotion pass.
+// Runs once per offseason (not per tick) to avoid churn.
+// Rules:
+//   A  with overall_rating >= 50 AND age <= 25 → promote to AA
+//   AA with overall_rating >= 58 AND age <= 27 → promote to AAA
+// Cap: team's AAA count must not exceed 40-man space minus 25-man (i.e., 15 max).
+function runProspectPromotionStep(leagueId: number, db: ReturnType<typeof getDb>): void {
+  const teams = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
+  let promoted = 0;
+
+  const promotionTx = db.transaction(() => {
+    for (const team of teams) {
+      // Count current AAA on this team
+      const aaaCount = (prepared(
+        `SELECT COUNT(*) as cnt FROM players WHERE team_id = ? AND minor_level = 'AAA'`
+      ).get(team.id) as { cnt: number }).cnt;
+
+      const aaaCapacity = Math.max(0, 15 - aaaCount); // Max 15 AAA slots (40-man minus 25-man)
+
+      // Promote AA → AAA (highest rated eligible first, within capacity)
+      if (aaaCapacity > 0) {
+        const aaToAaa = prepared(
+          `SELECT * FROM players WHERE team_id = ? AND minor_level = 'AA'
+           AND overall_rating >= 58 AND age <= 27
+           ORDER BY overall_rating DESC LIMIT ?`
+        ).all(team.id, aaaCapacity) as PlayerRow[];
+
+        for (const p of aaToAaa) {
+          prepared(`UPDATE players SET minor_level = 'AAA' WHERE id = ?`).run(p.id);
+          promoted++;
+        }
+      }
+
+      // Promote A → AA (no cap needed on AA, just promote eligible)
+      const aToAa = prepared(
+        `SELECT * FROM players WHERE team_id = ? AND minor_level = 'A'
+         AND overall_rating >= 50 AND age <= 25
+         ORDER BY overall_rating DESC LIMIT 10`
+      ).all(team.id) as PlayerRow[];
+
+      for (const p of aToAa) {
+        prepared(`UPDATE players SET minor_level = 'AA' WHERE id = ?`).run(p.id);
+        promoted++;
+      }
+    }
+  });
+
+  promotionTx();
+  console.log(`[offseason] Prospect promotion: ${promoted} players promoted`);
+}
+
+// Step 3: Non-tender — analytics/small-market GMs non-tender high-arb players
+// Per §6 [AB-12]: runs before free_agency; at least one non-tender forced if zero natural.
+async function runNonTenderStep(leagueId: number, seasonNumber: number): Promise<void> {
+  const { getArchetype } = await import('./archetypes.js');
+  const teams = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
+  const db = getDb();
+  let totalNonTenders = 0;
+
+  const nonTenderTx = db.transaction(() => {
+    for (const team of teams) {
+      if (team.interim_gm === 1) continue;
+
+      const archetype = getArchetype(team.gm_archetype ?? 'balanced');
+      if (!archetype.nontender_arb_year || !archetype.nontender_salary_threshold) continue;
+
+      // Non-tender players with arb-year >= 3 (approx: service_time_days >= 3*30=90)
+      // and salary > threshold
+      const candidates = prepared(
+        `SELECT * FROM players
+         WHERE team_id = ? AND is_on_mlb_roster = 1
+           AND service_time_days >= ? AND annual_salary > ?
+         ORDER BY annual_salary DESC`
+      ).all(
+        team.id,
+        archetype.nontender_arb_year * 30,
+        archetype.nontender_salary_threshold
+      ) as PlayerRow[];
+
+      for (const player of candidates) {
+        // Non-tender: release to FA pool
+        db.prepare(
+          'UPDATE players SET team_id = NULL, is_on_mlb_roster = 0, is_on_25man = 0, minor_level = NULL WHERE id = ?'
+        ).run(player.id);
+
+        const ntResult = db.prepare(
+          `INSERT INTO transactions
+             (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
+           VALUES (?, ?, 'non_tender', ?, ?, NULL, ?)`
+        ).run(leagueId, seasonNumber, team.id, player.id, Date.now());
+
+        // §1.1(e): Insert non-tender news item
+        insertTransactionNewsItem({
+          leagueId,
+          seasonNumber,
+          gameNumber: 0,
+          eventType: 'non_tender',
+          teamId: team.id,
+          playerId: player.id,
+          sourceTable: 'transactions',
+          sourceId: ntResult.lastInsertRowid as number,
+        });
+
+        totalNonTenders++;
+      }
+    }
+
+    // Force at least one non-tender if zero natural candidates (eval G23)
+    if (totalNonTenders === 0) {
+      // Find highest-salary player with service_time_days >= 4*30 AND age >= 30
+      // on any small/medium market team
+      const forcedCandidate = db.prepare(
+        `SELECT p.* FROM players p
+         JOIN teams t ON t.id = p.team_id
+         WHERE t.league_id = ? AND t.market_size IN ('small','medium') AND t.interim_gm = 0
+           AND p.is_on_mlb_roster = 1 AND p.service_time_days >= 120 AND p.age >= 30
+         ORDER BY p.annual_salary DESC
+         LIMIT 1`
+      ).get(leagueId) as PlayerRow | undefined;
+
+      if (forcedCandidate) {
+        db.prepare(
+          'UPDATE players SET team_id = NULL, is_on_mlb_roster = 0, is_on_25man = 0, minor_level = NULL WHERE id = ?'
+        ).run(forcedCandidate.id);
+
+        const forcedNtResult = db.prepare(
+          `INSERT INTO transactions
+             (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
+           VALUES (?, ?, 'non_tender', ?, ?, NULL, ?)`
+        ).run(leagueId, seasonNumber, forcedCandidate.team_id, forcedCandidate.id, Date.now());
+
+        // §1.1(e): Insert forced non-tender news item
+        insertTransactionNewsItem({
+          leagueId,
+          seasonNumber,
+          gameNumber: 0,
+          eventType: 'non_tender',
+          teamId: forcedCandidate.team_id,
+          playerId: forcedCandidate.id,
+          sourceTable: 'transactions',
+          sourceId: forcedNtResult.lastInsertRowid as number,
+        });
+
+        totalNonTenders++;
+        console.log(`[offseason] Forced non-tender: ${forcedCandidate.first_name} ${forcedCandidate.last_name}`);
+      }
+    }
+  });
+
+  nonTenderTx();
+  console.log(`[offseason] Non-tender step: ${totalNonTenders} players non-tendered`);
+}
+
+// Step 4 (was 3): Free agency — D20
 async function runFreeAgencyStep(leagueId: number, seasonNumber?: number): Promise<void> {
   const db = getDb();
 
@@ -143,7 +317,8 @@ async function runFreeAgencyStep(leagueId: number, seasonNumber?: number): Promi
   ).all(leagueId) as PlayerRow[];
 
   for (const fa of freeAgents) {
-    prepared('UPDATE players SET team_id = NULL, is_on_mlb_roster = 0, minor_level = NULL WHERE id = ?').run(fa.id);
+    // AB-NULL FIX §2.1: also clear is_on_25man so free agents don't appear as phantom 25-man members.
+    prepared('UPDATE players SET team_id = NULL, is_on_mlb_roster = 0, is_on_25man = 0, minor_level = NULL WHERE id = ?').run(fa.id);
   }
 
   const availableFAs = prepared(
@@ -194,7 +369,7 @@ async function runFreeAgencyStep(leagueId: number, seasonNumber?: number): Promi
 
       // §4.2: Use actual season_number, not hardcoded 1
       const actualSeason = seasonNumber ?? leagueRow?.season_number ?? 1;
-      db.prepare(
+      const faSignResult = db.prepare(
         'INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
       ).run(
         leagueId, actualSeason, 'free_agent_signing',
@@ -202,6 +377,18 @@ async function runFreeAgencyStep(leagueId: number, seasonNumber?: number): Promi
         `${signingTeam?.city ?? 'Unknown'} signs ${fa.first_name} ${fa.last_name} for $${(bestBid / 1_000_000).toFixed(1)}M`,
         Date.now()
       );
+
+      // §1.1(e): Insert FA signing news item
+      insertTransactionNewsItem({
+        leagueId,
+        seasonNumber: actualSeason,
+        gameNumber: 0,
+        eventType: 'free_agent_signing',
+        teamId: bestTeamId,
+        playerId: fa.id,
+        sourceTable: 'transactions',
+        sourceId: faSignResult.lastInsertRowid as number,
+      });
     }
   }
 
@@ -221,7 +408,7 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
       const newLast = ['Johnson', 'Smith', 'Williams', 'Brown', 'Jones'][Math.floor(rng() * 5)] ?? 'Johnson';
       const newStyle = MANAGER_STYLES[Math.floor(rng() * 3)] ?? 'balanced';
 
-      db.prepare(
+      const mgrFoeResult = db.prepare(
         'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
       ).run(
         leagueId, seasonNumber, team.id, 'manager_fired',
@@ -231,15 +418,39 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
         Date.now()
       );
 
+      // §1.1(e): Insert offseason manager firing news item
+      insertFrontOfficeNewsItem({
+        leagueId,
+        seasonNumber,
+        gameNumber: 0,
+        eventType: 'manager_fired',
+        teamId: team.id,
+        sourceTable: 'front_office_events',
+        sourceId: mgrFoeResult.lastInsertRowid as number,
+      });
+
       db.prepare(
-        'UPDATE teams SET manager_name = ?, manager_style = ?, job_security = 5 WHERE id = ?'
+        'UPDATE teams SET manager_name = ?, manager_style = ?, job_security = 5, interim_manager = 0 WHERE id = ?'
       ).run(`${newFirst} ${newLast}`, newStyle, team.id);
     } else {
-      // Reduce job security by win rate
+      // Reduce job security by win rate; clear interim_manager flag at offseason
       const winPct = team.wins / Math.max(1, team.wins + team.losses);
       const securityDelta = winPct > 0.55 ? 1 : winPct < 0.45 ? -1 : 0;
       const newSecurity = Math.max(1, Math.min(10, team.job_security + securityDelta));
-      db.prepare('UPDATE teams SET job_security = ? WHERE id = ?').run(newSecurity, team.id);
+
+      // §3.5: If clearing interim_manager but manager_name is still 'Interim Manager',
+      // assign a fresh permanent manager name/ratings so no team ends up with
+      // interim_manager=0 AND manager_name='Interim Manager'.
+      if (team.interim_manager === 1 && team.manager_name === 'Interim Manager') {
+        const permFirst = ['Bob', 'Tom', 'Mike', 'Dave', 'Jim'][Math.floor(rng() * 5)] ?? 'Bob';
+        const permLast = ['Johnson', 'Smith', 'Williams', 'Brown', 'Jones'][Math.floor(rng() * 5)] ?? 'Johnson';
+        const permStyle = MANAGER_STYLES[Math.floor(rng() * 3)] ?? 'balanced';
+        db.prepare(
+          'UPDATE teams SET manager_name = ?, manager_style = ?, job_security = ?, interim_manager = 0 WHERE id = ?'
+        ).run(`${permFirst} ${permLast}`, permStyle, newSecurity, team.id);
+      } else {
+        db.prepare('UPDATE teams SET job_security = ?, interim_manager = 0 WHERE id = ?').run(newSecurity, team.id);
+      }
     }
 
     // GM fired if owner meddling (40% if win_pct < 0.45)
@@ -251,7 +462,7 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
       const newRisk = GM_RISK_TOLERANCES[Math.floor(rng() * 3)] ?? 'moderate';
       const newFocus = GM_FOCUSES[Math.floor(rng() * 3)] ?? 'hitting';
 
-      db.prepare(
+      const gmFoeResult = db.prepare(
         'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
       ).run(
         leagueId, seasonNumber, team.id, 'gm_fired',
@@ -260,8 +471,32 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
         Date.now()
       );
 
+      // §1.1(e): Insert offseason GM firing news item
+      insertFrontOfficeNewsItem({
+        leagueId,
+        seasonNumber,
+        gameNumber: 0,
+        eventType: 'gm_fired',
+        teamId: team.id,
+        sourceTable: 'front_office_events',
+        sourceId: gmFoeResult.lastInsertRowid as number,
+      });
+
       db.prepare(
-        'UPDATE teams SET gm_name = ?, gm_philosophy = ?, gm_risk_tolerance = ?, gm_focus = ? WHERE id = ?'
+        'UPDATE teams SET gm_name = ?, gm_philosophy = ?, gm_risk_tolerance = ?, gm_focus = ?, interim_gm = 0 WHERE id = ?'
+      ).run(`${newFirst} ${newLast}`, newPhilosophy, newRisk, newFocus, team.id);
+    }
+
+    // If team still has interim GM at offseason (fired mid-season, non-meddling owner),
+    // hire a permanent GM now. Also clear interim flags universally at offseason end.
+    if (team.interim_gm === 1) {
+      const newFirst = ['Alex', 'Chris', 'Pat', 'Sam', 'Terry'][Math.floor(rng() * 5)] ?? 'Alex';
+      const newLast = ['Martinez', 'Garcia', 'Wilson', 'Davis', 'Miller'][Math.floor(rng() * 5)] ?? 'Garcia';
+      const newPhilosophy = GM_PHILOSOPHIES[Math.floor(rng() * 3)] ?? 'balanced';
+      const newRisk = GM_RISK_TOLERANCES[Math.floor(rng() * 3)] ?? 'moderate';
+      const newFocus = GM_FOCUSES[Math.floor(rng() * 3)] ?? 'hitting';
+      db.prepare(
+        'UPDATE teams SET gm_name = ?, gm_philosophy = ?, gm_risk_tolerance = ?, gm_focus = ?, interim_gm = 0 WHERE id = ?'
       ).run(`${newFirst} ${newLast}`, newPhilosophy, newRisk, newFocus, team.id);
     }
 
@@ -269,9 +504,9 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
     if (rng() < 0.02) {
       const newFirst = ['Richard', 'William', 'James', 'George', 'Edward'][Math.floor(rng() * 5)] ?? 'Richard';
       const newLast = ['Thompson', 'Anderson', 'Taylor', 'Moore', 'Jackson'][Math.floor(rng() * 5)] ?? 'Thompson';
-      const newPersonality = OWNER_PERSONALITIES[Math.floor(rng() * 3)] ?? 'moderate';
+      const newPersonality = OWNER_PERSONALITIES[Math.floor(rng() * OWNER_PERSONALITIES.length)] ?? 'moderate';
 
-      db.prepare(
+      const soldFoeResult = db.prepare(
         'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
       ).run(
         leagueId, seasonNumber, team.id, 'owner_sold_team',
@@ -279,6 +514,17 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
         `${team.owner_name} sells the franchise to ${newFirst} ${newLast}.`,
         Date.now()
       );
+
+      // §1.1(e): Insert owner sold team news item
+      insertFrontOfficeNewsItem({
+        leagueId,
+        seasonNumber,
+        gameNumber: 0,
+        eventType: 'owner_sold_team',
+        teamId: team.id,
+        sourceTable: 'front_office_events',
+        sourceId: soldFoeResult.lastInsertRowid as number,
+      });
 
       db.prepare('UPDATE teams SET owner_name = ?, owner_personality = ? WHERE id = ?')
         .run(`${newFirst} ${newLast}`, newPersonality, team.id);
@@ -290,7 +536,7 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
       const heirFirst = ['Robert', 'Henry', 'Arthur', 'Charles', 'Winston'][Math.floor(rng() * 5)] ?? 'Robert';
       const heirLast = team.owner_name.split(' ')[1] ?? 'Heir'; // Same surname for heir
 
-      db.prepare(
+      const diedFoeResult = db.prepare(
         'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
       ).run(
         leagueId, seasonNumber, team.id, 'owner_died',
@@ -299,7 +545,18 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
         Date.now()
       );
 
-      const heirPersonality = OWNER_PERSONALITIES[Math.floor(rng() * 3)] ?? 'moderate';
+      // §1.1(e): Insert owner died news item
+      insertFrontOfficeNewsItem({
+        leagueId,
+        seasonNumber,
+        gameNumber: 0,
+        eventType: 'owner_died',
+        teamId: team.id,
+        sourceTable: 'front_office_events',
+        sourceId: diedFoeResult.lastInsertRowid as number,
+      });
+
+      const heirPersonality = OWNER_PERSONALITIES[Math.floor(rng() * OWNER_PERSONALITIES.length)] ?? 'moderate';
       db.prepare('UPDATE teams SET owner_name = ?, owner_personality = ? WHERE id = ?').run(`${heirFirst} ${heirLast}`, heirPersonality, team.id);
     }
   }
