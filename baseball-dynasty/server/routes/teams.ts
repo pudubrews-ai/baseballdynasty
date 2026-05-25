@@ -2,6 +2,28 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { prepared, getActiveLeague, type TeamRow, type PlayerRow } from '../db.js';
 
+// Derived owner patience — §9
+function ownerPatience(personality: string): number {
+  const map: Record<string, number> = {
+    meddling: 2, 'win-now': 4, moderate: 6, patient: 8, 'hands-off': 10,
+  };
+  return map[personality] ?? 6;
+}
+
+// Derived owner net worth tier — §9
+function ownerNetWorthTier(marketSize: string, ownerAge: number): string {
+  const baseTier: Record<string, string> = {
+    mega: 'billionaire', large: 'wealthy', medium: 'wealthy', small: 'modest',
+  };
+  const tierOrder = ['modest', 'wealthy', 'billionaire', 'mega'];
+  let tier = baseTier[marketSize] ?? 'wealthy';
+  if (ownerAge >= 65) {
+    const idx = tierOrder.indexOf(tier);
+    tier = tierOrder[Math.min(idx + 1, tierOrder.length - 1)] ?? tier;
+  }
+  return tier;
+}
+
 export const teamsRouter = Router();
 
 const teamIdSchema = z.coerce.number().int().positive();
@@ -146,6 +168,31 @@ teamsRouter.get('/:id', async (req: Request, res: Response, next: NextFunction):
       'SELECT id, first_name, last_name, age, position, overall_rating, potential, annual_salary, contract_years_remaining FROM players WHERE team_id = ? AND is_on_25man = 1 ORDER BY overall_rating DESC'
     ).all(team.id);
 
+    // Front office history
+    const frontOfficeHistory = prepared(
+      `SELECT id, event_type, departing_person, incoming_person, reason, hired_person_context,
+              season_number, created_at
+       FROM front_office_events
+       WHERE team_id = ?
+       ORDER BY created_at DESC
+       LIMIT 20`
+    ).all(team.id) as Array<{
+      id: number; event_type: string; departing_person: string | null;
+      incoming_person: string | null; reason: string | null;
+      hired_person_context: string | null; season_number: number; created_at: number;
+    }>;
+
+    // Hire context for current GM/manager — M-01: unconditional fallback for original worldgen GMs/managers
+    const gmHireEvent = frontOfficeHistory.find(e => e.event_type === 'gm_fired');
+    const gmHiredContext = gmHireEvent
+      ? (gmHireEvent.hired_person_context ?? (team.interim_gm === 1 ? 'Interim appointment' : 'Hired in offseason'))
+      : (team.interim_gm === 1 ? 'Interim appointment' : 'Founding GM (league inception)');
+    const managerHireEvent = frontOfficeHistory.find(e =>
+      e.event_type === 'manager_fired' || e.event_type === 'manager_resigned');
+    const managerHiredContext = managerHireEvent
+      ? (managerHireEvent.hired_person_context ?? (team.interim_manager === 1 ? 'Interim appointment' : 'Hired in offseason'))
+      : (team.interim_manager === 1 ? 'Interim appointment' : 'Founding manager (league inception)');
+
     res.json({
       id: team.id,
       name: team.name,
@@ -173,6 +220,9 @@ teamsRouter.get('/:id', async (req: Request, res: Response, next: NextFunction):
       manager_communication: team.manager_communication,
       owner_name: team.owner_name,
       owner_personality: team.owner_personality,
+      owner_age: team.owner_age,
+      owner_patience: ownerPatience(team.owner_personality),
+      owner_net_worth_tier: ownerNetWorthTier(team.market_size, team.owner_age),
       interim_gm: team.interim_gm,
       interim_manager: team.interim_manager,
       job_security: team.job_security,
@@ -181,6 +231,9 @@ teamsRouter.get('/:id', async (req: Request, res: Response, next: NextFunction):
       revenue: team.revenue,
       minors,                              // §3.3
       roster,                              // §2.1
+      gm_hired_context: gmHiredContext,
+      manager_hired_context: managerHiredContext,
+      front_office_history: frontOfficeHistory,
     });
   } catch (err) { next(err); }
 });
@@ -224,7 +277,12 @@ teamsRouter.get('/:id/history', async (req: Request, res: Response, next: NextFu
     if (!idResult.success) { res.status(400).json({ error: 'invalid_id' }); return; }
 
     const history = prepared(
-      'SELECT * FROM front_office_events WHERE team_id = ? ORDER BY created_at DESC LIMIT 20'
+      `SELECT id, event_type, departing_person, incoming_person, reason, hired_person_context,
+              season_number, created_at
+       FROM front_office_events
+       WHERE team_id = ?
+       ORDER BY created_at DESC
+       LIMIT 20`
     ).all(idResult.data);
 
     res.json(history);

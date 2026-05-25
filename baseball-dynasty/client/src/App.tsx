@@ -7,6 +7,8 @@ import Draft from './views/Draft.js';
 import Players from './views/Players.js';
 import Timeline from './views/Timeline.js';
 import News from './views/News.js';
+import Watch from './views/Watch.js';
+import FranchiseSelection from './views/FranchiseSelection.js';
 import { createLeague, deleteLeague } from './api.js';
 
 // News ticker: shows last 5 events, scrolls as new ones arrive
@@ -58,7 +60,12 @@ function NewsTicker({ lastNewsId }: { lastNewsId: number }) {
   );
 }
 
-type TabName = 'league' | 'teams' | 'games' | 'draft' | 'players' | 'timeline' | 'news';
+type TabName = 'league' | 'teams' | 'games' | 'draft' | 'players' | 'timeline' | 'news' | 'watch';
+
+interface FranchiseStateResponse {
+  ownedTeamId: number | null;
+  selectionResolved: boolean;
+}
 
 // React error boundary
 class ErrorBoundary extends React.Component<
@@ -91,6 +98,8 @@ class ErrorBoundary extends React.Component<
 function AppContent() {
   const [activeTab, setActiveTab] = useState<TabName>('league');
   const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [franchiseState, setFranchiseState] = useState<FranchiseStateResponse | null>(null);
+  const [showFranchiseSelection, setShowFranchiseSelection] = useState(false);
   const leagueStateValue = useLeagueStatePolling();
   const { state, noLeague, reconnecting } = leagueStateValue;
 
@@ -102,6 +111,37 @@ function AppContent() {
       setActiveTab('draft');
     }
   }, [state?.phase]);
+
+  // Load franchise state on mount and when league changes
+  useEffect(() => {
+    if (noLeague) {
+      setFranchiseState(null);
+      setShowFranchiseSelection(false);
+      return;
+    }
+    fetch('/api/franchise')
+      .then(r => r.ok ? r.json() : null)
+      .then((data: FranchiseStateResponse | null) => {
+        setFranchiseState(data);
+        // Show franchise selection during the draft phase until selection is resolved.
+        // mapPhase collapses expansion_draft/annual_draft -> 'draft', so gate on 'draft' +
+        // the snapshot's selectionResolved flag (engine.ts exposes state.selectionResolved).
+        if (data && !data.selectionResolved && state?.phase === 'draft' && state?.selectionResolved === false) {
+          setShowFranchiseSelection(true);
+        } else if (data?.selectionResolved) {
+          setShowFranchiseSelection(false);
+        }
+      })
+      .catch(() => {});
+  }, [noLeague, state?.phase, state?.selectionResolved]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleFranchiseSelectionComplete = () => {
+    setShowFranchiseSelection(false);
+    fetch('/api/franchise')
+      .then(r => r.ok ? r.json() : null)
+      .then((data: FranchiseStateResponse | null) => setFranchiseState(data))
+      .catch(() => {});
+  };
 
   const handleNewDynasty = () => {
     if (!noLeague) {
@@ -132,10 +172,15 @@ function AppContent() {
     { id: 'players', label: 'Players' },
     { id: 'timeline', label: 'Timeline' },
     { id: 'news', label: 'News' },
+    { id: 'watch', label: '▶ Watch' },
   ];
 
   return (
     <LeagueStateContext.Provider value={leagueStateValue}>
+      {/* Franchise selection overlay — shown once before first expansion draft */}
+      {showFranchiseSelection && !noLeague && (
+        <FranchiseSelection onComplete={handleFranchiseSelectionComplete} />
+      )}
       <div style={{ fontFamily: 'system-ui, sans-serif', minHeight: '100vh', background: '#0f172a', color: '#e2e8f0' }}>
         {/* Reconnecting banner */}
         {reconnecting && (
@@ -151,6 +196,11 @@ function AppContent() {
             {state && <span style={{ fontSize: '14px', color: '#94a3b8', marginLeft: '12px' }}>
               Season {state.seasonNumber}
             </span>}
+            {franchiseState?.ownedTeamId && (
+              <span style={{ fontSize: '12px', color: '#f59e0b', marginLeft: '12px' }}>
+                (Your Franchise)
+              </span>
+            )}
           </h1>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
             {state?.simSpeed === 'turbo' && (
@@ -173,7 +223,12 @@ function AppContent() {
           {tabs.map(tab => (
             <button
               key={tab.id}
-              data-testid={tab.id === 'news' ? 'news-tab' : `nav-${tab.id}`}
+              data-testid={
+                tab.id === 'news' ? 'news-tab'
+                : tab.id === 'watch' ? 'watch-tab'
+                : tab.id === 'timeline' ? 'timeline-tab'
+                : `nav-${tab.id}`
+              }
               onClick={() => {
                 hasUserNavigatedRef.current = true;
                 setActiveTab(tab.id);
@@ -224,6 +279,7 @@ function AppContent() {
                 {activeTab === 'players' && <Players />}
                 {activeTab === 'timeline' && <Timeline />}
                 {activeTab === 'news' && <News />}
+                {activeTab === 'watch' && <Watch />}
               </>
             )}
           </ErrorBoundary>

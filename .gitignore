@@ -9,6 +9,9 @@
 *.db-shm
 *.db-wal
 
+# Reports (local agent output — not for public repo)
+reports/
+
 # Build output
 dist/
 node_modules/

@@ -103,11 +103,14 @@ function executeSendDown(
        WHERE id = ?`
     ).run(player.id);
 
+    // AB-18: set last_send_down_game to block same-tick recall
+    db.prepare('UPDATE players SET last_send_down_game = ? WHERE id = ?').run(currentGameNumber, player.id);
+
     const sdResult = db.prepare(
       `INSERT INTO transactions
-         (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
-       VALUES (?, ?, 'send_down', ?, ?, NULL, ?)`
-    ).run(leagueId, seasonNumber, team.id, player.id, Date.now());
+         (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at)
+       VALUES (?, ?, 'send_down', ?, ?, NULL, ?, ?)`
+    ).run(leagueId, seasonNumber, team.id, player.id, currentGameNumber, Date.now());
 
     // §1.1(a): Insert send-down news item
     insertRosterNewsItem({

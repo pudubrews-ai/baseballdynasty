@@ -24,6 +24,9 @@ import { accrueServiceTime } from './serviceTime.js';
 import { runProspectDev } from './prospectDev.js';
 import { evaluateTradeDeadline, setTradePosture } from './tradeDeadline.js';
 import { evaluateFirings } from './firings.js';
+import { getFranchiseState, setGmConfidence } from './franchise.js';
+import { resolveDirectives } from './directives.js';
+import { insertNewsItem } from './news.js';
 
 // AB-NULL §4.3: One-time self-heal for carried-over DBs with stale is_on_25man on null-team players.
 // Called once per runRosterMaintenance invocation — cheap (no-op if already clean).
@@ -35,7 +38,7 @@ function cleanupPhantom25man(leagueId: number): void {
 
 // Roster invariant: each team should have exactly 25 on is_on_25man=1 (hard cap after cuts).
 // During regular season, log warnings for violations. Auto-trim >25, auto-promote <25.
-function checkRosterInvariant(leagueId: number): void {
+function checkRosterInvariant(leagueId: number, currentGameNumber: number = 0): void {
   const league = prepared('SELECT season_number FROM leagues WHERE id = ?').get(leagueId) as { season_number: number } | undefined;
   if (!league) return;
 
@@ -76,8 +79,9 @@ function checkRosterInvariant(leagueId: number): void {
       while (deficit > 0) {
         const fromMinors = prepared(
           `SELECT * FROM players WHERE team_id = ? AND is_on_mlb_roster = 1 AND is_on_25man = 0 AND minor_level IS NOT NULL
+           AND (last_send_down_game IS NULL OR ? - last_send_down_game >= 5)
            ORDER BY overall_rating DESC LIMIT 1`
-        ).get(v.team_id) as { id: number } | undefined;
+        ).get(v.team_id, currentGameNumber) as { id: number } | undefined;
         if (fromMinors) {
           prepared('UPDATE players SET is_on_25man = 1, minor_level = NULL WHERE id = ?').run(fromMinors.id);
           deficit--;
@@ -185,6 +189,67 @@ export function runRosterMaintenance(
     }
   }
 
+  // v0.3.0: GM confidence checkpoint + directive resolution for owned team
+  if (league) {
+    try {
+      const fs = getFranchiseState(leagueId);
+      if (fs && fs.owned_team_id != null) {
+        const ownedTeamId = fs.owned_team_id;
+        const ownedTeam = prepared('SELECT * FROM teams WHERE id = ?').get(ownedTeamId) as TeamRow | undefined;
+
+        if (ownedTeam && (homeTeamId === ownedTeamId || awayTeamId === ownedTeamId)) {
+          const gamesPlayed = ownedTeam.games_played;
+
+          // 10-game confidence checkpoint (D12-REV)
+          if (gamesPlayed - fs.last_confidence_checkpoint_game >= 10) {
+            const margin = ownedTeam.wins - ownedTeam.losses;
+            let delta = 0;
+            if (margin > 0) delta = 2 * Math.floor(margin / 5);
+            else if (margin < 0) delta = -1 * Math.floor((-margin) / 5);
+            if (delta !== 0) setGmConfidence(leagueId, delta);
+            prepared('UPDATE franchise_state SET last_confidence_checkpoint_game = ? WHERE league_id = ?')
+              .run(gamesPlayed, leagueId);
+
+            // Re-read confidence after update
+            const fsUpdated = getFranchiseState(leagueId);
+            const conf = fsUpdated?.gm_confidence ?? 100;
+
+            // Resign trigger — L3: only emit once per season (dedupe across 10-game checkpoints)
+            if (conf <= 0 && fsUpdated?.gm_resign_pending_season !== league.season_number) {
+              const gmName = ownedTeam.gm_name ?? 'GM';
+              insertNewsItem({
+                leagueId, seasonNumber: league.season_number, gameNumber,
+                eventType: 'gm_fired', teamId: ownedTeamId,
+                headlineText: `${gmName} resigns, citing inability to operate with ownership interference.`,
+                detailsJson: JSON.stringify({ reason: 'low_confidence_resignation' }),
+              });
+              prepared('UPDATE franchise_state SET gm_resign_pending_season = ? WHERE league_id = ?')
+                .run(league.season_number, leagueId);
+            }
+
+            // Status update 80+ (<=1 per 10 games)
+            if (conf >= 80 && gamesPlayed - (fsUpdated?.last_status_update_game ?? 0) >= 10) {
+              const gmName = ownedTeam.gm_name ?? 'GM';
+              insertNewsItem({
+                leagueId, seasonNumber: league.season_number, gameNumber,
+                eventType: 'milestone', teamId: ownedTeamId,
+                headlineText: `${gmName}: The plan is working. We like where this club is headed.`,
+                detailsJson: JSON.stringify({ kind: 'gm_status' }),
+              });
+              prepared('UPDATE franchise_state SET last_status_update_game = ? WHERE league_id = ?')
+                .run(gamesPlayed, leagueId);
+            }
+          }
+
+          // Directive resolution
+          resolveDirectives(leagueId, league.season_number, gameNumber);
+        }
+      }
+    } catch (err) {
+      console.warn('[rosterMaintenance] Confidence/directive error:', err);
+    }
+  }
+
   // AB-10 Part A: Recover players whose IL stint has elapsed.
   // Recovered players get is_injured=0 but remain is_on_25man=0; they sit on the 40-man
   // as minors-eligible reserves. The invariant/call-up/send-down passes reintegrate them.
@@ -202,7 +267,7 @@ export function runRosterMaintenance(
 
   // Step 4: Roster invariant check
   try {
-    checkRosterInvariant(leagueId);
+    checkRosterInvariant(leagueId, gameNumber);
   } catch (err) {
     console.warn('[rosterMaintenance] Invariant check error:', err);
   }

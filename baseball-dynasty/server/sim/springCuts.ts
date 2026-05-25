@@ -145,11 +145,11 @@ function runSpringCutsForTeam(
            WHERE id = ?`
         ).run(player.id);
 
-        // Log transaction
+        // Log transaction (game_number=0 for spring cuts — pre-season)
         const scSendResult = prepared(
           `INSERT INTO transactions
-             (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
-           VALUES (?, ?, 'send_down', ?, ?, ?, ?)`
+             (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at)
+           VALUES (?, ?, 'send_down', ?, ?, ?, 0, ?)`
         ).run(
           leagueId,
           seasonNumber,
@@ -232,7 +232,7 @@ function runSpringCutsForTeam(
           `UPDATE players SET is_on_25man = 0, minor_level = 'AAA', options_remaining = options_remaining - 1 WHERE id = ?`
         ).run(surplusCandidate.id);
         const sdRes = prepared(
-          `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at) VALUES (?, ?, 'send_down', ?, ?, NULL, ?)`
+          `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at) VALUES (?, ?, 'send_down', ?, ?, NULL, 0, ?)`
         ).run(leagueId, seasonNumber, team.id, surplusCandidate.id, Date.now());
         insertRosterNewsItem({
           leagueId, seasonNumber, gameNumber: 0, eventType: 'send_down',
@@ -252,7 +252,7 @@ function runSpringCutsForTeam(
         `UPDATE players SET is_on_25man = 0, minor_level = 'AAA', options_remaining = options_remaining - 1 WHERE id = ?`
       ).run(overage.id);
       const sdResult = prepared(
-        `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at) VALUES (?, ?, 'send_down', ?, ?, NULL, ?)`
+        `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at) VALUES (?, ?, 'send_down', ?, ?, NULL, 0, ?)`
       ).run(leagueId, seasonNumber, team.id, overage.id, Date.now());
       insertRosterNewsItem({
         leagueId, seasonNumber, gameNumber: 0, eventType: 'send_down',
@@ -296,7 +296,7 @@ function fillTo25(team: TeamRow, seasonNumber: number, leagueId: number): void {
     if (from40) {
       prepared('UPDATE players SET is_on_25man = 1, minor_level = NULL WHERE id = ?').run(from40.id);
       prepared(
-        `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at) VALUES (?, ?, 'call_up', ?, ?, NULL, ?)`
+        `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at) VALUES (?, ?, 'call_up', ?, ?, NULL, 0, ?)`
       ).run(leagueId, seasonNumber, team.id, from40.id, Date.now());
       count++;
       continue;
@@ -311,7 +311,7 @@ function fillTo25(team: TeamRow, seasonNumber: number, leagueId: number): void {
     if (fromMinors) {
       prepared('UPDATE players SET is_on_mlb_roster = 1, is_on_25man = 1, minor_level = NULL WHERE id = ?').run(fromMinors.id);
       prepared(
-        `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at) VALUES (?, ?, 'call_up', ?, ?, NULL, ?)`
+        `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at) VALUES (?, ?, 'call_up', ?, ?, NULL, 0, ?)`
       ).run(leagueId, seasonNumber, team.id, fromMinors.id, Date.now());
       count++;
       continue;
@@ -326,7 +326,7 @@ function fillTo25(team: TeamRow, seasonNumber: number, leagueId: number): void {
     if (fromFa) {
       prepared('UPDATE players SET team_id = ?, is_on_mlb_roster = 1, is_on_25man = 1, minor_level = NULL WHERE id = ?').run(team.id, fromFa.id);
       prepared(
-        `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at) VALUES (?, ?, 'signing', ?, ?, NULL, ?)`
+        `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at) VALUES (?, ?, 'signing', ?, ?, NULL, 0, ?)`
       ).run(leagueId, seasonNumber, team.id, fromFa.id, Date.now());
       count++;
       continue;
@@ -384,8 +384,8 @@ function repairPositionMinimums(
         ).run(fromMinors.id);
         prepared(
           `INSERT INTO transactions
-             (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
-           VALUES (?, ?, 'call_up', ?, ?, ?, ?)`
+             (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at)
+           VALUES (?, ?, 'call_up', ?, ?, ?, 0, ?)`
         ).run(leagueId, seasonNumber, team.id, fromMinors.id, null, Date.now());
         continue;
       }
@@ -403,8 +403,8 @@ function repairPositionMinimums(
         ).run(team.id, fromFa.id);
         prepared(
           `INSERT INTO transactions
-             (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
-           VALUES (?, ?, 'signing', ?, ?, ?, ?)`
+             (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at)
+           VALUES (?, ?, 'signing', ?, ?, ?, 0, ?)`
         ).run(leagueId, seasonNumber, team.id, fromFa.id, null, Date.now());
         continue;
       }
@@ -435,11 +435,11 @@ function releaseToFa(
      WHERE id = ?`
   ).run(player.id);
 
-  // Log release transaction
+  // Log release transaction (game_number=0 for spring cuts)
   const releaseResult = prepared(
     `INSERT INTO transactions
-       (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
-     VALUES (?, ?, 'release', ?, ?, ?, ?)`
+       (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at)
+     VALUES (?, ?, 'release', ?, ?, ?, 0, ?)`
   ).run(
     leagueId,
     seasonNumber,

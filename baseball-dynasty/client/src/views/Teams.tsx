@@ -71,9 +71,23 @@ interface TeamDetail extends TeamSummary {
   };
   manager_name: string;
   owner_name: string;
+  owner_personality: string;
+  owner_patience: number;
+  owner_net_worth_tier: string;
   payroll_budget: number;
   current_payroll: number;
   revenue: number;
+  gm_hired_context: string | null;
+  manager_hired_context: string | null;
+  front_office_history: Array<{
+    id: number;
+    event_type: string;
+    departing_person: string | null;
+    incoming_person: string | null;
+    reason: string | null;
+    hired_person_context: string | null;
+    season_number: number;
+  }>;
 }
 
 type TeamTab = 'roster' | 'minors' | 'financials' | 'history';
@@ -160,6 +174,20 @@ export default function Teams() {
           <div style={{ fontSize: '13px', color: '#94a3b8', marginBottom: '12px' }}>
             <div>{teamDetail.division}</div>
             <div style={{ color: '#60a5fa' }}>{teamDetail.wins}W - {teamDetail.losses}L</div>
+          </div>
+
+          {/* M8: Owner info block */}
+          <div style={{ fontSize: '13px', color: '#cbd5e1', marginBottom: '12px', borderTop: '1px solid #334155', paddingTop: '10px' }}>
+            <div data-testid="owner-name">Owner: {teamDetail.owner_name}</div>
+            <div data-testid="owner-personality">Personality: {teamDetail.owner_personality}</div>
+            <div data-testid="owner-patience">Patience: {teamDetail.owner_patience}/10</div>
+            <div data-testid="owner-net-worth-tier">Net Worth: {teamDetail.owner_net_worth_tier}</div>
+            {teamDetail.gm_hired_context && (
+              <div data-testid="gm-hire-context" style={{ color: '#94a3b8' }}>GM: {teamDetail.gm_name} — {teamDetail.gm_hired_context}</div>
+            )}
+            {teamDetail.manager_hired_context && (
+              <div data-testid="manager-hire-context" style={{ color: '#94a3b8' }}>Manager: {teamDetail.manager_name} — {teamDetail.manager_hired_context}</div>
+            )}
           </div>
 
           {/* Sub-tabs */}
@@ -292,15 +320,33 @@ export default function Teams() {
           )}
 
           {activeTab === 'history' && (
-            <div style={{ maxHeight: '400px', overflowY: 'auto', fontSize: '12px' }}>
+            <div
+              data-testid="frontoffice-history"
+              style={{ maxHeight: '400px', overflowY: 'auto', fontSize: '12px' }}
+            >
               {Array.isArray(tabData) && (tabData as unknown[]).length === 0 ? (
                 <p style={{ color: '#64748b' }}>No history yet</p>
               ) : (
-                Array.isArray(tabData) && (tabData as Array<{ id: number; event_type: string; departing_person: string; incoming_person: string; narrative: string }>).map(event => (
+                Array.isArray(tabData) && (tabData as Array<{
+                  id: number; event_type: string; departing_person: string | null;
+                  incoming_person: string | null; reason: string | null;
+                  hired_person_context: string | null; season_number: number;
+                }>).map(event => (
                   <div key={event.id} style={{ padding: '6px 0', borderBottom: '1px solid #334155' }}>
-                    <div style={{ color: '#f59e0b', fontSize: '11px' }}>{event.event_type}</div>
+                    <div style={{ color: '#f59e0b', fontSize: '11px' }}>
+                      {event.event_type}{event.reason ? ` — ${event.reason}` : ''}
+                    </div>
                     {/* §4.4: Render as text node, never dangerouslySetInnerHTML */}
-                    <div>{event.narrative}</div>
+                    {(event.departing_person || event.incoming_person) && (
+                      <div style={{ color: '#94a3b8' }}>
+                        {event.departing_person && `Out: ${event.departing_person}`}
+                        {event.departing_person && event.incoming_person && ' → '}
+                        {event.incoming_person && `In: ${event.incoming_person}`}
+                      </div>
+                    )}
+                    {event.hired_person_context && (
+                      <div style={{ color: '#6b7280', fontSize: '11px' }}>{event.hired_person_context}</div>
+                    )}
                   </div>
                 ))
               )}

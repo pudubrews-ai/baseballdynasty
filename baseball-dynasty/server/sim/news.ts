@@ -186,6 +186,8 @@ export function insertFrontOfficeNewsItem(params: {
   teamId: number;
   sourceTable?: string;
   sourceId?: number;
+  headlineText?: string | null;
+  detailsJson?: string | null;
 }): void {
   insertNewsItem({
     leagueId: params.leagueId,
@@ -195,6 +197,8 @@ export function insertFrontOfficeNewsItem(params: {
     teamId: params.teamId,
     sourceTable: params.sourceTable ?? 'front_office_events',
     sourceId: params.sourceId ?? null,
+    headlineText: params.headlineText ?? null,
+    detailsJson: params.detailsJson ?? null,
   });
 }
 

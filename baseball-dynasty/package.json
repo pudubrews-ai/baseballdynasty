@@ -10,7 +10,7 @@
     "dev": "concurrently -k -n server,client -c blue,green \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "export $(grep -v '^#' .env | xargs) && tsx watch server/index.ts",
     "dev:client": "vite",
-    "build": "tsc -p tsconfig.server.json && node scripts/copy-migrations.mjs && vite build && npm run security:bundle-grep",
+    "build": "tsc --noEmit && tsc -p tsconfig.server.json && node scripts/copy-migrations.mjs && vite build && npm run security:bundle-grep",
     "copy:migrations": "node scripts/copy-migrations.mjs",
     "start": "node dist/server/server/index.js",
     "test": "vitest run",
@@ -25,6 +25,7 @@
     "@anthropic-ai/sdk": "0.32.1",
     "better-sqlite3": "11.5.0",
     "express": "5.0.1",
+    "framer-motion": "11.18.2",
     "zod": "3.23.8"
   },
   "devDependencies": {

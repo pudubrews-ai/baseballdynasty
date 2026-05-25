@@ -106,6 +106,12 @@ export async function refreshCache(leagueId: number): Promise<LeagueStateSnapsho
   ).get(league.id) as { maxId: number | null } | undefined;
   const lastNewsId = lastNewsRow?.maxId ?? 0;
 
+  // v0.3.0: franchise state
+  const { getFranchiseState } = await import('./franchise.js');
+  const franchiseState = getFranchiseState(league.id);
+  const ownedTeamId: number | null = franchiseState?.owned_team_id ?? null;
+  const selectionResolved: boolean = franchiseState?.selection_resolved === 1;
+
   const snapshot: LeagueStateSnapshot = {
     leagueId: league.id,
     phase: mapPhase(league.phase),
@@ -121,6 +127,8 @@ export async function refreshCache(leagueId: number): Promise<LeagueStateSnapsho
     worldgenSeed: league.worldgen_seed,
     waiverCount,
     lastNewsId,
+    ownedTeamId,
+    selectionResolved,
   };
 
   updateCache(leagueId, snapshot);

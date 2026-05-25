@@ -28,8 +28,9 @@
 //   Interim GM: conservative/moderate defaults, tenure=0, interim_gm=1
 //   Interims cannot be fired mid-season (stability floor)
 
-import { getDb, prepared, type TeamRow } from '../db.js';
+import { getDb, prepared, getActiveLeague, type TeamRow } from '../db.js';
 import { insertFrontOfficeNewsItem } from './news.js';
+import { resetGmConfidence } from './franchise.js';
 
 const BASE_GAMES_UNDER_500 = 8;
 
@@ -82,13 +83,15 @@ function logFrontOfficeEvent(
   eventType: string,
   departingPerson: string,
   incomingPerson: string,
-  narrative: string
+  narrative: string,
+  reason: string | null = null,
+  hiredPersonContext: string | null = null
 ): number {
   const result = db.prepare(
     `INSERT INTO front_office_events
-       (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(leagueId, seasonNumber, teamId, eventType, departingPerson, incomingPerson, narrative, Date.now());
+       (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, reason, hired_person_context, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(leagueId, seasonNumber, teamId, eventType, departingPerson, incomingPerson, narrative, reason, hiredPersonContext, Date.now());
   return result.lastInsertRowid as number;
 }
 
@@ -99,13 +102,14 @@ function logFiringNews(
   seasonNumber: number,
   teamId: number,
   eventType: 'manager_fired' | 'gm_fired',
-  playerNarrative: string
+  playerNarrative: string,
+  currentGameNumber: number = 0
 ): void {
   db.prepare(
     `INSERT INTO transactions
-       (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
-     VALUES (?, ?, ?, ?, NULL, ?, ?)`
-  ).run(leagueId, seasonNumber, eventType, teamId, playerNarrative, Date.now());
+       (league_id, season_number, transaction_type, team_id, player_id, narrative, game_number, created_at)
+     VALUES (?, ?, ?, ?, NULL, ?, ?, ?)`
+  ).run(leagueId, seasonNumber, eventType, teamId, playerNarrative, currentGameNumber, Date.now());
 }
 
 // Promote bench coach to interim manager (ratings -10, same style)
@@ -114,7 +118,8 @@ function promoteInterimManager(
   team: TeamRow,
   leagueId: number,
   seasonNumber: number,
-  currentGameNumber: number = 0
+  currentGameNumber: number = 0,
+  reasonOverride?: string
 ): void {
   const interimName = makeInterimManagerName();
   const newTactics = Math.max(0, team.manager_tactics - 10);
@@ -132,21 +137,29 @@ function promoteInterimManager(
      WHERE id = ?`
   ).run(interimName, newTactics, newMotivation, newCommunication, team.id);
 
+  const reason = reasonOverride ??
+    `Fired after going ${team.wins}-${team.losses} through ${team.games_played} games (Season ${seasonNumber})`;
+  const hiredPersonContext = 'Promoted from bench coach';
+  const headlineText = `${team.manager_name} fired, ${team.city} ${team.name} — ${reason}`;
+
   const foeRowid = logFrontOfficeEvent(
     db, leagueId, seasonNumber, team.id,
     'manager_fired',
     team.manager_name,
     interimName,
-    `${team.city} ${team.name} fire manager ${team.manager_name}. ${interimName} takes over.`
+    `${team.city} ${team.name} fire manager ${team.manager_name}. ${interimName} takes over.`,
+    reason,
+    hiredPersonContext
   );
 
   logFiringNews(
     db, leagueId, seasonNumber, team.id,
     'manager_fired',
-    `${team.city} ${team.name} fire manager ${team.manager_name}.`
+    `${team.city} ${team.name} fire manager ${team.manager_name}.`,
+    currentGameNumber
   );
 
-  // §1.1(c): Insert front office news item
+  // §1.1(c): Insert front office news item with headlineText (AB-07)
   insertFrontOfficeNewsItem({
     leagueId,
     seasonNumber,
@@ -155,9 +168,57 @@ function promoteInterimManager(
     teamId: team.id,
     sourceTable: 'front_office_events',
     sourceId: foeRowid,
+    headlineText,
+    detailsJson: JSON.stringify({ reason, eventType: 'manager_fired', teamId: team.id }),
   });
 
   console.log(`[firings] ${team.city} ${team.name}: manager ${team.manager_name} fired, interim promoted`);
+}
+
+// promoteInterimManagerDirective: called from directive endpoint (bypasses evaluateFirings).
+export function promoteInterimManagerDirective(
+  team: { id: number; city: string; name: string; wins: number; losses: number; games_played: number;
+          manager_name: string; interim_manager: number;
+          manager_tactics: number; manager_motivation: number; manager_communication: number;
+          job_security: number; },
+  leagueId: number,
+  seasonNumber: number,
+  currentGameNumber: number,
+  reason: string
+): void {
+  const db = getDb();
+  const interimName = makeInterimManagerName();
+  const newTactics = Math.max(0, team.manager_tactics - 10);
+  const newMotivation = Math.max(0, team.manager_motivation - 10);
+  const newCommunication = Math.max(0, team.manager_communication - 10);
+
+  db.prepare(
+    `UPDATE teams SET manager_name = ?, manager_tactics = ?, manager_motivation = ?,
+     manager_communication = ?, interim_manager = 1, job_security = 5 WHERE id = ?`
+  ).run(interimName, newTactics, newMotivation, newCommunication, team.id);
+
+  const hiredPersonContext = 'Interim appointment';
+  const headlineText = `${team.manager_name} fired, ${team.city} ${team.name} — ${reason}`;
+
+  const foeRowid = logFrontOfficeEvent(
+    db, leagueId, seasonNumber, team.id,
+    'manager_fired', team.manager_name, interimName,
+    `Owner of ${team.city} ${team.name} fires manager ${team.manager_name}.`,
+    reason, hiredPersonContext
+  );
+
+  logFiringNews(db, leagueId, seasonNumber, team.id, 'manager_fired',
+    headlineText, currentGameNumber);
+
+  insertFrontOfficeNewsItem({
+    leagueId, seasonNumber, gameNumber: currentGameNumber,
+    eventType: 'manager_fired', teamId: team.id,
+    sourceTable: 'front_office_events', sourceId: foeRowid,
+    headlineText,
+    detailsJson: JSON.stringify({ reason, eventType: 'manager_fired', teamId: team.id }),
+  });
+
+  console.log(`[firings] Directive: ${team.city} ${team.name}: manager ${team.manager_name} fired`);
 }
 
 // Install interim GM (conservative/moderate, tenure=0)
@@ -180,21 +241,29 @@ function installInterimGm(
      WHERE id = ?`
   ).run(interimName, team.id);
 
+  const under500 = Math.max(0, team.losses - team.wins);
+  const reason = `Fired after team went ${team.wins}-${team.losses}, ${under500} games under .500 at time of dismissal`;
+  const hiredPersonContext = 'Interim appointment';
+  const headlineText = `${team.gm_name} fired, ${team.city} ${team.name} — ${reason}`;
+
   const foeRowid = logFrontOfficeEvent(
     db, leagueId, seasonNumber, team.id,
     'gm_fired',
     team.gm_name,
     interimName,
-    `${team.city} ${team.name} fire GM ${team.gm_name}. ${interimName} takes over.`
+    `${team.city} ${team.name} fire GM ${team.gm_name}. ${interimName} takes over.`,
+    reason,
+    hiredPersonContext
   );
 
   logFiringNews(
     db, leagueId, seasonNumber, team.id,
     'gm_fired',
-    `${team.city} ${team.name} fire GM ${team.gm_name}.`
+    `${team.city} ${team.name} fire GM ${team.gm_name}.`,
+    currentGameNumber
   );
 
-  // §1.1(c): Insert front office news item
+  // §1.1(c): Insert front office news item with headlineText (AB-07)
   insertFrontOfficeNewsItem({
     leagueId,
     seasonNumber,
@@ -203,7 +272,17 @@ function installInterimGm(
     teamId: team.id,
     sourceTable: 'front_office_events',
     sourceId: foeRowid,
+    headlineText,
+    detailsJson: JSON.stringify({ reason, eventType: 'gm_fired', teamId: team.id }),
   });
+
+  // v0.3.0: reset GM confidence on GM change
+  try {
+    const league = getActiveLeague();
+    if (league && league.id === leagueId) {
+      resetGmConfidence(leagueId);
+    }
+  } catch { /* non-critical */ }
 
   console.log(`[firings] ${team.city} ${team.name}: GM ${team.gm_name} fired, interim installed`);
 }
@@ -265,12 +344,18 @@ function evaluateManagerFiring(
        last_firing_check_game = ? WHERE id = ?`
     ).run(interimName, newTactics, newMotivation, newCommunication, team.games_played, team.id);
 
+    const reason = 'Resigned citing philosophical differences with ownership';
+    const hiredPersonContext = 'Promoted from bench coach';
+    const headlineText = `${resigningName} resigned, ${team.city} ${team.name} — ${reason}`;
+
     const foeRowid = logFrontOfficeEvent(
       db, leagueId, seasonNumber, team.id,
       'manager_resigned',
       resigningName,
       interimName,
-      `${team.city} ${team.name} manager ${resigningName} resigns amid front-office pressure. ${interimName} steps in.`
+      `${team.city} ${team.name} manager ${resigningName} resigns amid front-office pressure. ${interimName} steps in.`,
+      reason,
+      hiredPersonContext
     );
 
     insertFrontOfficeNewsItem({
@@ -281,6 +366,8 @@ function evaluateManagerFiring(
       teamId: team.id,
       sourceTable: 'front_office_events',
       sourceId: foeRowid,
+      headlineText,
+      detailsJson: JSON.stringify({ reason, eventType: 'manager_resigned', teamId: team.id }),
     });
 
     console.log(`[firings] ${team.city} ${team.name}: manager ${resigningName} resigned (job_security=0, meddling owner)`);
@@ -326,13 +413,18 @@ function evaluateManagerFiring(
     ).run(team.id);
 
     // Log "owner breaks glass" front_office_events entry and news item
-    const foeRowid = logFrontOfficeEvent(
+    const glassUnder500 = Math.max(0, team.losses - team.wins);
+    const glassReason = `Owner lost confidence in manager after ${glassUnder500}-game losing streak`;
+    const glassFoeRowid = logFrontOfficeEvent(
       db, leagueId, seasonNumber, team.id,
       'manager_fired',
       team.manager_name,
       'Interim Manager',
-      `Owner of ${team.city} ${team.name} fires manager directly — front office shakeup.`
+      `Owner of ${team.city} ${team.name} fires manager directly — front office shakeup.`,
+      glassReason,
+      'Interim appointment'
     );
+    const glassHeadline = `${team.manager_name} fired, ${team.city} ${team.name} — ${glassReason}`;
     insertFrontOfficeNewsItem({
       leagueId,
       seasonNumber,
@@ -340,7 +432,9 @@ function evaluateManagerFiring(
       eventType: 'manager_fired',
       teamId: team.id,
       sourceTable: 'front_office_events',
-      sourceId: foeRowid,
+      sourceId: glassFoeRowid,
+      headlineText: glassHeadline,
+      detailsJson: JSON.stringify({ reason: glassReason, eventType: 'manager_fired', teamId: team.id }),
     });
 
     console.log(`[firings] ${team.city} ${team.name}: owner breaks glass, manager fired, GM job_security -= 2`);
@@ -372,6 +466,13 @@ export function evaluateFirings(
     // Read fresh team state inside transaction
     const freshTeam = db.prepare('SELECT * FROM teams WHERE id = ?').get(team.id) as TeamRow | undefined;
     if (!freshTeam) return;
+
+    // D24/AB-05: Trust The Process lock — skip procedural firings for owned team
+    const fsRow = db.prepare('SELECT firings_locked_season, owned_team_id FROM franchise_state WHERE league_id = ?').get(leagueId) as
+      { firings_locked_season: number | null; owned_team_id: number | null } | undefined;
+    if (fsRow && fsRow.owned_team_id === team.id && fsRow.firings_locked_season === seasonNumber) {
+      return; // Trust The Process: firings locked for owned team this season
+    }
 
     // Manager check every 5 games
     const managerCheckDue = freshTeam.games_played - freshTeam.last_firing_check_game >= 5;
