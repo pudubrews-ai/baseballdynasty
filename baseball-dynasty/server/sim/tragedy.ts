@@ -18,21 +18,28 @@ import { callTragedy } from '../services/llm.js';
 // Probability model (per spec §7)
 // ─────────────────────────────────────────────────────────────────────────────
 
-const PLAYER_BASE_PROB = 0.0001;   // 0.01%
-const MANAGER_BASE_PROB = 0.00025; // 0.025%
+const SEASON_LENGTH = 50;
+const PLAYER_BASE_PROB = 0.0001 / SEASON_LENGTH;   // 0.01% per season → per tick
+const MANAGER_BASE_PROB = 0.00025 / SEASON_LENGTH; // 0.025% per season → per tick
 
-function playerTragProb(age: number, isOnRoster: boolean): number {
+function playerTragProb(age: number, isOnMlbRoster: boolean): number {
   let p = PLAYER_BASE_PROB;
-  if (age >= 35) p *= 1.5; // age multiplier
-  if (age >= 40) p *= 2.0; // additional for veterans
-  if (!isOnRoster) p *= 0.5; // minors/non-active are less exposed
+  // Age bracket (mutually exclusive, per spec)
+  if (age <= 22)      p *= 1.5;
+  else if (age <= 32) p *= 1.0;
+  else if (age <= 37) p *= 1.2;
+  else                p *= 1.8;  // 38+
+  // Roster level
+  if (isOnMlbRoster) p *= 1.3;
+  else               p *= 0.7;   // Rookie/A per spec
   return p;
 }
 
 function managerTragProb(age: number): number {
   let p = MANAGER_BASE_PROB;
-  if (age >= 60) p *= 1.5;
-  if (age >= 70) p *= 2.0;
+  if (age < 50)       p *= 0.7;
+  else if (age <= 65) p *= 1.0;
+  else                p *= 2.0;  // 65+
   return p;
 }
 
@@ -137,7 +144,7 @@ export function rollAndResolveTragedy(
     if (!team.manager_name) continue;
     // Seed with team id for manager (no separate manager_id)
     const rng = seedFor(`tragedy_mgr_${team.id}`, worldgenSeed ^ seasonNumber ^ gameNumber);
-    const prob = MANAGER_BASE_PROB; // spec says 0.025% with age multipliers; use base as proxy
+    const prob = managerTragProb(55); // proxy age 55 (no manager age stored); applies ×1.0 bracket per spec
     if (rng() < prob) {
       resolveTragedy(db, leagueId, seasonNumber, gameNumber, worldgenSeed, {
         playerId: null,
