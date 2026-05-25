@@ -157,6 +157,10 @@ Test spec must include:
 - Never use `select('*')` in API routes — always use an explicit field list
 - Responsive layouts can duplicate data-testid — each testid must appear exactly once in the DOM
 - When a fix is applied to one call in a file, check ALL similar calls in the same file
+- last_xxx_game per-team counters must be included in the offseason season-reset query alongside wins/losses/games_played — omitting them silently breaks all game-loop timers after season 1
+- current_payroll is additive-only during FA — reset from SUM(annual_salary) each offseason before FA bidding begins
+- LLM news batch prompts must explicitly instruct "always include player name when provided" and show a named example — without this, Haiku defaults to team-centric generic phrasing
+- For structural news events with names already in scope at call site (signings, non-tenders, waivers, releases, milestones), set headlineText directly — bypasses LLM, guarantees names, costs nothing
 
 ---
 
