@@ -197,6 +197,95 @@ function applyPedSuspension(
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Per-tick dispatcher checks (Step 15 — Priority 2 and 3)
+// These sweep for stale gambling-ban / PED-3rd players who slipped through
+// the game-1 roll (e.g. mid-season signing of a banned player, edge cases).
+// Called from dispatcher.ts each game tick.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * checkGamblingBanThisTick — Priority 2.
+ * Finds any player with gambling_ban=1 still on a roster and fully removes them.
+ * Returns true if at least one player was swept (used by B-3 guard).
+ */
+export function checkGamblingBanThisTick(
+  leagueId: number,
+  seasonNumber: number,
+  gameNumber: number,
+  _worldgenSeed: number
+): boolean {
+  const db = getDb();
+
+  const stale = db.prepare(
+    `SELECT id, first_name, last_name, team_id
+     FROM players
+     WHERE league_id = ? AND gambling_ban = 1 AND team_id IS NOT NULL`
+  ).all(leagueId) as Array<{ id: number; first_name: string; last_name: string; team_id: number }>;
+
+  if (stale.length === 0) return false;
+
+  for (const player of stale) {
+    db.prepare(
+      `UPDATE players
+       SET is_on_25man = 0, is_on_mlb_roster = 0, team_id = NULL, minor_level = NULL,
+           suspension_games_remaining = 9999, suspension_type = 'gambling'
+       WHERE id = ?`
+    ).run(player.id);
+
+    db.prepare(
+      `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
+       VALUES (?, ?, 'suspended', ?, ?, ?, ?)`
+    ).run(leagueId, seasonNumber, player.team_id, player.id,
+      `${player.first_name} ${player.last_name} removed — lifetime gambling ban enforced.`,
+      Date.now());
+
+    console.log(`[suspensions] Gambling ban sweep: removed ${player.first_name} ${player.last_name} (team ${player.team_id})`);
+  }
+
+  return true;
+}
+
+/**
+ * checkPedThirdOffenseThisTick — Priority 3.
+ * Finds any player with ped_offenses >= 3 still on a roster and removes them.
+ * Called ONLY when gambling ban did NOT fire this tick (B-3 guard).
+ */
+export function checkPedThirdOffenseThisTick(
+  leagueId: number,
+  seasonNumber: number,
+  gameNumber: number,
+  _worldgenSeed: number
+): void {
+  const db = getDb();
+
+  const stale = db.prepare(
+    `SELECT id, first_name, last_name, team_id
+     FROM players
+     WHERE league_id = ? AND ped_offenses >= 3 AND team_id IS NOT NULL`
+  ).all(leagueId) as Array<{ id: number; first_name: string; last_name: string; team_id: number }>;
+
+  if (stale.length === 0) return;
+
+  for (const player of stale) {
+    db.prepare(
+      `UPDATE players
+       SET is_on_25man = 0, is_on_mlb_roster = 0, team_id = NULL, minor_level = NULL,
+           suspension_games_remaining = 9999, suspension_type = 'ped'
+       WHERE id = ?`
+    ).run(player.id);
+
+    db.prepare(
+      `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
+       VALUES (?, ?, 'suspended', ?, ?, ?, ?)`
+    ).run(leagueId, seasonNumber, player.team_id, player.id,
+      `${player.first_name} ${player.last_name} removed — lifetime PED ban (3rd offense) enforced.`,
+      Date.now());
+
+    console.log(`[suspensions] PED-3rd sweep: removed ${player.first_name} ${player.last_name} (team ${player.team_id})`);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Decrement suspension_games_remaining for players whose team played this tick
 // Called from rosterMaintenance per-team loop
 // ─────────────────────────────────────────────────────────────────────────────

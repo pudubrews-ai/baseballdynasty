@@ -17,9 +17,9 @@ import { forceMinimumTrades } from './tradeDeadline.js';
 import { getLlmStatus, resetNewsCallsThisSeason } from '../services/llm.js';
 import { insertGameNewsItem, insertNewsItem, insertMilestoneNewsItem, fillPendingHeadlines, fillPendingTransactionFlavors } from './news.js';
 import { scrubError } from '../util/scrub.js';
-import { rollAndResolveTragedy } from './tragedy.js';
 import { rollSuspensions } from './suspensions.js';
 import { rollMalcontent, rollTradeDemand, markPersonalityRollsDone } from './personality.js';
+import { runDispatcher } from './dispatcher.js';
 import type { LeagueStateSnapshot, SimSpeed } from '../../shared/types.js';
 import type { NewLeagueBodyType } from '../../shared/schemas.js';
 
@@ -427,19 +427,21 @@ async function runGameTick(league: LeagueRow): Promise<void> {
     }
   }
 
-  // Step 11: Tragedy roll — between game ticks, regular season only (L1 — not during playoffs)
-  // At most one tragedy per tick (B-2). If resolved, pause sim and return (game deferred).
+  // Step 15: Dispatcher — ordered synchronous event handler (B-1).
+  // Priority 1 (Tragedy) fires BEFORE simulateGame; if it fires, pause and defer the game.
+  // Priorities 2-4 (gambling sweep, PED-3rd sweep, relocation threat) also run here.
+  // Priorities 5-6 (injury/suspension, cascade) are delegated to runRosterMaintenance below.
   try {
-    const hadTragedy = rollAndResolveTragedy(
-      league.id, league.season_number, nextGame.gameNumber, league.worldgen_seed
+    const dispatchResult = runDispatcher(
+      league, nextGame.gameNumber, nextGame.homeTeamId, nextGame.awayTeamId
     );
-    if (hadTragedy) {
+    if (dispatchResult.tragedyFired) {
       // Pause synchronously (setSimSpeed called here to avoid circular import with tragedy.ts)
       await setSimSpeed('paused');
       return;
     }
   } catch (err) {
-    console.warn('[engine] Tragedy roll error:', scrubError(err).message);
+    console.warn('[engine] Dispatcher error:', scrubError(err).message);
   }
 
   // Check trade deadline
