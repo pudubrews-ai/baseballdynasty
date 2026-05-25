@@ -1,67 +1,56 @@
-# Baseball Dynasty Simulator v0.1.0
+# Baseball Dynasty Simulator — v0.3.0
 
-A single-player baseball dynasty simulation game. Build a franchise from an expansion draft, simulate full seasons, manage your roster through trades and free agency, and build a dynasty across multiple seasons.
+See the [root README](../README.md) for full project overview and feature descriptions.
+
+---
 
 ## Prerequisites
 
-- Node.js >= 20.0.0 < 23.0.0
+- Node.js `>=20.0.0 <23.0.0`
+- npm `>=10`
 
 ## Setup
 
-1. Clone the repository
-2. Copy `.env.example` to `.env` and fill in your Anthropic API key:
-   ```
-   cp .env.example .env
-   ```
-3. Install dependencies:
-   ```
-   npm ci
-   ```
+```bash
+# From the baseball-dynasty/ directory:
+npm ci
+cp .env.example .env
+# Set ANTHROPIC_API_KEY in .env (optional — sim runs without it)
+```
 
 ## Running
 
-Development mode (both server and client):
+```bash
+npm run dev       # Dev server: client on :5173, API on :3001
+npm run build     # Production build to dist/
+npm start         # Serve production build
 ```
-npm run dev
-```
-
-- Client: http://localhost:5173
-- Server API: http://localhost:3001
-
-## Environment Variables
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `ANTHROPIC_API_KEY` | No* | Claude Haiku API key for LLM features. Get one at https://console.anthropic.com |
-| `PORT` | No | Server port (default: 3001) |
-| `DAILY_LLM_CALL_BUDGET` | No | Max LLM calls per day (default: 2000) |
-| `DEFAULT_SEED` | No | Deterministic PRNG seed for testing |
-
-*Without an API key, LLM features (draft reasoning, season narratives) will use procedural fallbacks.
 
 ## Testing
 
-```
-npm test
+```bash
+npm test          # Vitest (unit + integration)
+npm run test:watch
 ```
 
-## Building
+## Environment Variables
 
-```
-npm run build
-```
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `ANTHROPIC_API_KEY` | No | — | Claude Haiku for LLM flavor text |
+| `PORT` | No | `3001` | Server port |
+| `DAILY_LLM_CALL_BUDGET` | No | `2000` | Max LLM calls/day |
+| `DEFAULT_SEED` | No | — | Deterministic PRNG seed |
 
 ## Architecture
 
-- **Frontend**: React + Vite (TypeScript)
-- **Backend**: Express 5 + better-sqlite3
-- **LLM**: Claude Haiku via Anthropic SDK (optional, gracefully degrades)
-- **Database**: SQLite (created at `data/dynasty.db`)
+- **Frontend:** React 19 + Vite 6 + Tailwind CSS + Framer Motion
+- **Backend:** Express 5 + better-sqlite3 (synchronous SQLite)
+- **Database:** `data/dynasty.db` — created on first run, migrations applied automatically on startup
+- **LLM:** Claude Haiku via Anthropic SDK — narrator only, all sim decisions are code
 
-See `v0.1.0-app-spec-section.md` for full specifications.
+## Security
 
-## Security Notes
-
-- API key never touches the browser bundle
-- All SQL uses parameterized queries
+- API key never reaches the browser bundle (verified by `scripts/check-bundle-no-keys.mjs` on every build)
+- All SQL uses parameterized queries (verified by `scripts/check-no-template-sql.mjs`)
 - LLM responses are sanitized before storage and rendering
