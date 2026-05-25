@@ -168,12 +168,3 @@ This means the sim runs entirely without an API key. It also means outcomes are 
 | v0.2.0 | Minor league system (DFA/waivers/call-ups/send-downs/service time), market dynamics, GM archetypes, in-season firings, news feed |
 | v0.3.0 | Watch tab (Aquarium Mode), franchise selection, owner nudge mechanic, newspaper dynasty timeline, front office reasons in 4 locations |
 
----
-
-## Roadmap
-
-| Version | Planned |
-|---|---|
-| v0.4.0 | International draft, Rule 5 draft, minor league free agency |
-| v0.5.0 | Stadium upgrades, revenue model depth, ownership drama arcs |
-| v1.0.0 | 10-season dynasty playthrough, exportable history, shareable recaps |
