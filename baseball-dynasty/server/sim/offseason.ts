@@ -336,14 +336,21 @@ async function runFinancialUpdateStep(leagueId: number, seasonNumber: number, se
 
 // =========================================================
 // Step 5: Financial Update — revenue model + budget updates + franchise valuation
+// v0.5.0: PINNED constants (Section 5g). Do NOT change these values.
 // =========================================================
 
-// Revenue constants (documented as tunable)
-const BASE_MARKET_REVENUE: Record<string, number> = { mega: 300, large: 200, medium: 130, small: 90 };
-const PERFORMANCE_BONUS_RATE = 200; // millions; (.600 - .500) * 200 = +20M
-const CHAMPIONSHIP_BONUS = 40; // millions
-const PLAYOFF_APPEARANCE_BONUS = 15; // millions
-const LOSING_STREAK_PENALTY_PER_SEGMENT = 5; // millions per 10-game sub-.500 margin segment
+// PINNED revenue constants — Section 5g
+const REVENUE_BASE_MARKET: Record<string, number> = {
+  mega: 40_000_000, large: 25_000_000, medium: 15_000_000, small: 8_000_000,
+};
+const REVENUE_AVG_TICKET: Record<string, number> = {
+  mega: 45, large: 35, medium: 25, small: 20,
+};
+const REVENUE_BROADCASTING_BASE = 25_000_000;
+const REVENUE_BROADCASTING_PLAYOFF_BONUS = 5_000_000; // per playoff round
+const REVENUE_BROADCASTING_CHAMPIONSHIP = 25_000_000;
+const REVENUE_MERCH_STAR_BONUS = 2_000_000;
+const REVENUE_MERCH_CHAMPIONSHIP = 8_000_000;
 
 async function runFinancialUpdate(leagueId: number, seasonNumber: number, seed: number): Promise<void> {
   const db = getDb();
@@ -357,10 +364,12 @@ async function runFinancialUpdate(leagueId: number, seasonNumber: number, seed: 
     for (const team of teams) {
       // Get this season's history (just archived)
       const thisHistory = prepared(
-        'SELECT wins, losses, made_playoffs, won_championship, revenue, payroll_budget FROM franchise_season_history WHERE league_id = ? AND team_id = ? AND season_number = ?'
+        `SELECT wins, losses, made_playoffs, won_championship, playoff_round,
+                revenue, payroll_budget FROM franchise_season_history
+         WHERE league_id = ? AND team_id = ? AND season_number = ?`
       ).get(leagueId, team.id, seasonNumber) as {
         wins: number; losses: number; made_playoffs: number; won_championship: number;
-        revenue: number; payroll_budget: number;
+        playoff_round: string | null; revenue: number; payroll_budget: number;
       } | undefined;
 
       if (!thisHistory) continue; // no season data yet
@@ -368,23 +377,101 @@ async function runFinancialUpdate(leagueId: number, seasonNumber: number, seed: 
       const gamesPlayed = thisHistory.wins + thisHistory.losses;
       const winPct = gamesPlayed > 0 ? thisHistory.wins / gamesPlayed : 0.5;
 
-      // Revenue formula
-      const baseRev = BASE_MARKET_REVENUE[team.market_size] ?? 90;
-      const performanceBonus = Math.max(0, (winPct - 0.500)) * PERFORMANCE_BONUS_RATE;
-      const champBonus = thisHistory.won_championship === 1 ? CHAMPIONSHIP_BONUS : 0;
-      const playoffBonus = (thisHistory.made_playoffs === 1 && thisHistory.won_championship !== 1) ? PLAYOFF_APPEARANCE_BONUS : 0;
-      const gamesUnder500 = Math.max(0, thisHistory.losses - thisHistory.wins);
-      const losingPenalty = Math.floor(gamesUnder500 / 10) * LOSING_STREAK_PENALTY_PER_SEGMENT;
-
-      const ownerMod: Record<string, number> = {
-        'win-now': 1.2, meddling: 1.2, moderate: 1.05, patient: 1.0, 'hands-off': 0.9,
+      // Compute season attendance using shared computeAttendanceRate
+      const capacities: Record<string, number> = {
+        mega: 50000, large: 42000, medium: 35000, small: 28000,
       };
-      const modifier = ownerMod[team.owner_personality] ?? 1.0;
+      const capacity = team.stadium_capacity > 0 ? team.stadium_capacity : (capacities[team.market_size] ?? 35000);
+      const homeGames = Math.round(gamesPlayed / 2); // approx home games
 
-      const annualRevenue = Math.round((baseRev + performanceBonus + champBonus + playoffBonus - losingPenalty) * modifier);
+      // Check rivalries for this team
+      const rivals = prepared(
+        `SELECT team_a_id, team_b_id FROM rivalries WHERE league_id = ? AND rivalry_score > 0`
+      ).all(leagueId) as Array<{ team_a_id: number; team_b_id: number }>;
+      const rivalIds = rivals
+        .filter(r => r.team_a_id === team.id || r.team_b_id === team.id)
+        .map(r => r.team_a_id === team.id ? r.team_b_id : r.team_a_id);
+
+      // Check for star player
+      const starCheck = prepared(
+        `SELECT 1 FROM players WHERE team_id = ? AND is_on_25man = 1 AND overall_rating >= 85 LIMIT 1`
+      ).get(team.id) as unknown | undefined;
+      const hasStarPlayer = !!starCheck;
+
+      // Playoff race: within 5 games of top 4 in conference
+      const confRow = prepared('SELECT conference FROM teams WHERE id = ?').get(team.id) as { conference: string } | undefined;
+      let isPlayoffRace = false;
+      if (confRow) {
+        const confTeams = prepared(
+          `SELECT wins, losses FROM teams WHERE league_id = ? AND conference = ? ORDER BY wins DESC LIMIT 4`
+        ).all(leagueId, confRow.conference) as Array<{ wins: number; losses: number }>;
+        if (confTeams.length >= 4) {
+          const cutoff = confTeams[3];
+          if (cutoff) {
+            const cutoffPct = (cutoff.wins + cutoff.losses) > 0 ? cutoff.wins / (cutoff.wins + cutoff.losses) : 0.5;
+            isPlayoffRace = winPct >= cutoffPct - 0.1; // within ~5 games on 50-game schedule
+          }
+        }
+      }
+
+      const attendanceRate = computeAttendanceRate(
+        team, rivalIds, isPlayoffRace,
+        false, // honeymoon handled by column in team
+        hasStarPlayer,
+        false  // per-season average: no specific rivalry game
+      );
+      const avgGameAttendance = Math.round(attendanceRate * capacity);
+      const seasonAttendanceTotal = avgGameAttendance * homeGames;
+
+      // PINNED revenue formula
+      const ticketPrice = REVENUE_AVG_TICKET[team.market_size] ?? 25;
+      const attendanceRevenue = seasonAttendanceTotal * ticketPrice;
+      const premiumSeatingRevenue = Math.round(attendanceRevenue * 0.08);
+      const concessionsRevenue = Math.round(attendanceRevenue * 0.12);
+
+      // Broadcasting
+      const playoffRound = thisHistory.playoff_round ?? 'missed';
+      const playoffRoundsAdvanced = playoffRound === 'champion' ? 3
+        : playoffRound === 'finalist' ? 2
+        : playoffRound === 'semis' ? 1
+        : 0;
+      const broadcastingRevenue = REVENUE_BROADCASTING_BASE
+        + (playoffRoundsAdvanced * REVENUE_BROADCASTING_PLAYOFF_BONUS)
+        + (thisHistory.won_championship === 1 ? REVENUE_BROADCASTING_CHAMPIONSHIP : 0);
+
+      // Merchandise
+      const merchandiseBase = Math.round(attendanceRevenue * 0.02);
+      const merchandiseStarBonus = hasStarPlayer ? REVENUE_MERCH_STAR_BONUS : 0;
+      const merchandiseChampBonus = thisHistory.won_championship === 1 ? REVENUE_MERCH_CHAMPIONSHIP : 0;
+      const merchandiseRevenue = merchandiseBase + merchandiseStarBonus + merchandiseChampBonus;
+
+      // Luxury tax — read existing payroll
+      const actualPayroll = (db.prepare(
+        'SELECT COALESCE(SUM(annual_salary), 0) AS total FROM players WHERE team_id = ? AND contract_years_remaining > 0 AND annual_salary > 0'
+      ).get(team.id) as { total: number }).total;
+      const luxuryThreshold = 220_000_000;
+      const luxuryTaxPayments = actualPayroll > luxuryThreshold
+        ? Math.round((actualPayroll - luxuryThreshold) * 0.20)
+        : 0;
+
+      // Base market revenue
+      const baseMarketRevenue = REVENUE_BASE_MARKET[team.market_size] ?? 8_000_000;
+
+      const annualRevenueDollars = Math.max(0,
+        baseMarketRevenue
+        + attendanceRevenue
+        + premiumSeatingRevenue
+        + concessionsRevenue
+        + broadcastingRevenue
+        + merchandiseRevenue
+        - luxuryTaxPayments
+      );
+
+      // Guard: never NaN/Infinity
+      const safeRevenue = Number.isFinite(annualRevenueDollars) ? annualRevenueDollars : 0;
 
       // Write revenue to teams.revenue (archived next season in archive step)
-      db.prepare('UPDATE teams SET revenue = ? WHERE id = ?').run(annualRevenue * 1_000_000, team.id);
+      db.prepare('UPDATE teams SET revenue = ? WHERE id = ?').run(safeRevenue, team.id);
 
       // Budget update logic — reads prior season
       const priorHistory = prepared(
@@ -393,8 +480,8 @@ async function runFinancialUpdate(leagueId: number, seasonNumber: number, seed: 
 
       const currentBudget = team.payroll_budget;
       let newBudget = currentBudget;
-      const revMillions = annualRevenue; // already in millions
-      const budgetMillions = currentBudget / 1_000_000;
+      const revMillions = safeRevenue / 1_000_000;
+      const budgetMillions = currentBudget > 0 ? currentBudget / 1_000_000 : 1;
 
       if (revMillions > budgetMillions * 1.3) {
         // Increase budget 5-15% — analytics GM goes higher
@@ -410,8 +497,8 @@ async function runFinancialUpdate(leagueId: number, seasonNumber: number, seed: 
           newBudget = Math.round(currentBudget * (1 + band));
         }
       } else if (priorHistory && revMillions < budgetMillions * 0.8) {
-        const priorRevMillions = priorHistory.revenue / 1_000_000;
-        const priorBudgetMillions = priorHistory.payroll_budget / 1_000_000;
+        const priorRevMillions = priorHistory.revenue > 0 ? priorHistory.revenue / 1_000_000 : 0;
+        const priorBudgetMillions = priorHistory.payroll_budget > 0 ? priorHistory.payroll_budget / 1_000_000 : 1;
         // Check if also below 0.8 last season (2 consecutive)
         if (priorRevMillions < priorBudgetMillions * 0.8) {
           const decreasePct = 0.05 + rng() * 0.05; // 5-10%
@@ -438,15 +525,15 @@ async function runFinancialUpdate(leagueId: number, seasonNumber: number, seed: 
       const totalWins = histRows?.total_wins ?? 0;
       const champs = histRows?.championships ?? 0;
       const seasonsInLeague = Math.max(1, (histRows?.seasons_count ?? 1));
-      const attendancePremium: Record<string, number> = { mega: 100, large: 40, medium: 10, small: 0 };
-      const aPremium = attendancePremium[team.market_size] ?? 0;
+      // Revenue premium: scale franchise value with annualized revenue
+      const revPremium = Math.round(safeRevenue / 1_000_000 * 2); // 2x revenue multiple
 
       const franchiseValue = Math.max(0, Math.round(
         baseVal
         + Math.round(totalWins * 0.1)
         + (champs * 50)
         + (seasonsInLeague * 2)
-        + aPremium
+        + revPremium
       ));
 
       db.prepare('UPDATE teams SET franchise_value = ? WHERE id = ?').run(franchiseValue, team.id);

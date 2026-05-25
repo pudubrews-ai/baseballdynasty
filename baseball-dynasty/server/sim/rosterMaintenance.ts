@@ -33,6 +33,413 @@ import { decrementSuspensions } from './suspensions.js';
 import { recalcChemistry, checkMalcontentPressure, applyTradeDemandPenalties } from './personality.js';
 import { reaggravationRisk } from './injury.js';
 
+// =========================================================
+// v0.5.0 Section 6: Every-5-game cadence functions
+// =========================================================
+
+// 6a. Streak evaluation — rolls hot/cold for each active (non-injured) 25-man player.
+// Uses seeded PRNG. Writes only changed rows. Never mutates overall_rating.
+function evaluateStreaks(leagueId: number, gameNumber: number, seed: number): void {
+  const players = prepared(
+    `SELECT id, overall_rating, streak_type, streak_games_remaining, is_injured
+     FROM players
+     WHERE league_id = ? AND is_on_25man = 1 AND is_injured = 0 AND team_id IS NOT NULL`
+  ).all(leagueId) as Array<{
+    id: number; overall_rating: number; streak_type: string | null;
+    streak_games_remaining: number; is_injured: number;
+  }>;
+
+  const rng = _seedFor('streaks', seed ^ gameNumber);
+
+  for (const player of players) {
+    // If already streaking and has remaining games, don't re-roll (decrement is done in game.ts)
+    if (player.streak_type !== null && player.streak_games_remaining > 0) continue;
+
+    // 8% hot, 8% cold, 84% neutral (Section 4c thresholds)
+    const roll = rng();
+    const wasStreaking = player.streak_type !== null;
+    let newType: string | null = null;
+    let newGames = 0;
+
+    if (roll < 0.08) {
+      newType = 'hot';
+      newGames = Math.floor(rng() * 4) + 3; // 3-6 games
+    } else if (roll < 0.16) {
+      newType = 'cold';
+      newGames = Math.floor(rng() * 4) + 3; // 3-6 games
+    }
+    // else neutral — clear any expired streak
+
+    if (newType !== player.streak_type || newGames !== player.streak_games_remaining) {
+      prepared(
+        'UPDATE players SET streak_type = ?, streak_games_remaining = ? WHERE id = ?'
+      ).run(newType, newGames, player.id);
+
+      // Emit news for notable streaks (overall >= 75 only — avoid noise)
+      if (newType !== null && player.overall_rating >= 75 && !wasStreaking) {
+        // Don't re-fire if was already in same streak; leagueId scoped news
+        try {
+          const teamRow = prepared('SELECT team_id, first_name, last_name FROM players WHERE id = ?').get(player.id) as {
+            team_id: number | null; first_name: string; last_name: string;
+          } | undefined;
+          if (teamRow?.team_id) {
+            const league = prepared('SELECT season_number FROM leagues WHERE id = ?').get(leagueId) as { season_number: number } | undefined;
+            if (league) {
+              insertNewsItem({
+                leagueId, seasonNumber: league.season_number, gameNumber,
+                eventType: newType === 'hot' ? 'streak_hot' : 'streak_cold',
+                teamId: teamRow.team_id,
+                playerId: player.id,
+                headlineText: newType === 'hot'
+                  ? `${teamRow.first_name} ${teamRow.last_name} is on fire — entering hot streak`
+                  : `${teamRow.first_name} ${teamRow.last_name} in a slump — cold streak begins`,
+              });
+            }
+          }
+        } catch (_e) { /* non-critical */ }
+      }
+    }
+  }
+}
+
+// 6b. Live award race update — UPSERT award_races, emit lead-change news once per game.
+// Tie-break: value DESC, player_id ASC (X-F6a / X-N1 determinism).
+function updateAwardRaces(leagueId: number, gameNumber: number): void {
+  const league = prepared('SELECT season_number FROM leagues WHERE id = ?').get(leagueId) as { season_number: number } | undefined;
+  if (!league) return;
+
+  const conferences = ['American', 'National'] as const;
+  const awards = ['mvp', 'cy_young', 'roy'] as const;
+
+  for (const conference of conferences) {
+    for (const award of awards) {
+      // Build ranking based on season_stats + players in this conference
+      let sql: string;
+      if (award === 'mvp') {
+        // MVP: batters by (hits + (hr * 4) + (rbi_est * 2)) — approximate WAR proxy
+        sql = `
+          SELECT ss.player_id,
+                 (ss.hits + ss.home_runs * 4 + CAST(ss.ab * 0.25 AS INTEGER)) AS value
+          FROM season_stats ss
+          JOIN players p ON p.id = ss.player_id
+          JOIN teams t ON t.id = p.team_id
+          WHERE ss.league_id = ? AND ss.season_number = ?
+            AND t.conference = ?
+            AND p.team_id IS NOT NULL
+            AND ss.ab > 30
+          ORDER BY value DESC, ss.player_id ASC
+          LIMIT 5
+        `;
+      } else if (award === 'cy_young') {
+        // Cy Young: pitchers by wins + (strikeouts / 10) − (earned_runs / 3)
+        sql = `
+          SELECT ss.player_id,
+                 (ss.pitcher_wins + CAST(ss.strikeouts / 10 AS INTEGER) - CAST(ss.earned_runs / 3 AS INTEGER)) AS value
+          FROM season_stats ss
+          JOIN players p ON p.id = ss.player_id
+          JOIN teams t ON t.id = p.team_id
+          WHERE ss.league_id = ? AND ss.season_number = ?
+            AND t.conference = ?
+            AND p.team_id IS NOT NULL
+            AND (p.position = 'SP' OR p.position = 'RP' OR p.position = 'CL')
+            AND ss.innings_pitched > 20
+          ORDER BY value DESC, ss.player_id ASC
+          LIMIT 5
+        `;
+      } else {
+        // ROY: minimum service_time = 1 (first year), best stats overall
+        sql = `
+          SELECT ss.player_id,
+                 (ss.hits + ss.home_runs * 4 + ss.pitcher_wins * 3) AS value
+          FROM season_stats ss
+          JOIN players p ON p.id = ss.player_id
+          JOIN teams t ON t.id = p.team_id
+          WHERE ss.league_id = ? AND ss.season_number = ?
+            AND t.conference = ?
+            AND p.team_id IS NOT NULL
+            AND (p.service_time IS NULL OR p.service_time <= 1)
+          ORDER BY value DESC, ss.player_id ASC
+          LIMIT 5
+        `;
+      }
+
+      const rows = prepared(sql).all(leagueId, league.season_number, conference) as Array<{
+        player_id: number; value: number;
+      }>;
+
+      if (rows.length === 0) continue;
+
+      const leader = rows[0];
+      const second = rows[1] ?? null;
+
+      // Read current race leader (for lead-change detection)
+      // award_races table uses 'league' column (not 'conference') — matches migration 014
+      const existing = prepared(
+        `SELECT leader_player_id, leader_value FROM award_races WHERE league_id = ? AND season_number = ? AND award_type = ? AND league = ?`
+      ).get(leagueId, league.season_number, award, conference) as {
+        leader_player_id: number | null; leader_value: number | null;
+      } | undefined;
+
+      // Detect lead change (compare player_id, not value — X-F6a/X-N1)
+      const prevLeaderId = existing?.leader_player_id ?? null;
+      const leaderChanged = leader && prevLeaderId !== null && prevLeaderId !== leader.player_id;
+
+      // UPSERT award_races (column 'league' maps to conference value)
+      prepared(
+        `INSERT INTO award_races (league_id, season_number, award_type, league, leader_player_id, leader_value, second_player_id, second_value, last_updated_game)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(league_id, season_number, award_type, league)
+         DO UPDATE SET leader_player_id = excluded.leader_player_id,
+                       leader_value = excluded.leader_value,
+                       second_player_id = excluded.second_player_id,
+                       second_value = excluded.second_value,
+                       last_updated_game = excluded.last_updated_game`
+      ).run(
+        leagueId, league.season_number, award, conference,
+        leader?.player_id ?? null, leader?.value ?? 0,
+        second?.player_id ?? null, second?.value ?? 0,
+        gameNumber
+      );
+
+      // Emit lead-change news (once per real lead change, gated by last_updated_game)
+      if (leaderChanged && leader && (existing?.leader_player_id ?? null) !== null) {
+        try {
+          const newLeaderRow = prepared(
+            'SELECT first_name, last_name, team_id FROM players WHERE id = ?'
+          ).get(leader.player_id) as { first_name: string; last_name: string; team_id: number | null } | undefined;
+          const prevLeaderRow = prepared(
+            'SELECT first_name, last_name FROM players WHERE id = ?'
+          ).get(prevLeaderId) as { first_name: string; last_name: string } | undefined;
+
+          if (newLeaderRow && prevLeaderRow) {
+            const awardLabel = award === 'mvp' ? `${conference.substring(0, 2)} MVP`
+              : award === 'cy_young' ? `${conference.substring(0, 2)} Cy Young`
+              : `${conference.substring(0, 2)} ROY`;
+            insertNewsItem({
+              leagueId, seasonNumber: league.season_number, gameNumber,
+              eventType: 'award_leader_change',
+              teamId: newLeaderRow.team_id ?? null,
+              playerId: leader.player_id,
+              headlineText: `${newLeaderRow.first_name} ${newLeaderRow.last_name} takes ${awardLabel} lead from ${prevLeaderRow.first_name} ${prevLeaderRow.last_name}`,
+            });
+          }
+        } catch (_e) { /* non-critical */ }
+      }
+    }
+  }
+}
+
+// 6c. Record-chasing milestone checks (rescaled for 50-game season — X-F7b)
+// Single-season thresholds:
+//   HR: alert at 40 HR with 15+ games remaining
+//   Wins (pitchers): alert at 12 wins with 10+ games remaining
+//   AVG: alert at .360 with 20+ games remaining
+// Career thresholds (unchanged):
+//   HR: 490→500, 585→600, 680→700
+//   Hits: 2950→3000
+//   Wins: 290→300
+//   K: 2950→3000
+function checkRecordChasers(leagueId: number, gameNumber: number, leagueGamesInSeason: number): void {
+  const league = prepared('SELECT season_number FROM leagues WHERE id = ?').get(leagueId) as { season_number: number } | undefined;
+  if (!league) return;
+
+  const gamesRemaining = Math.max(0, leagueGamesInSeason - gameNumber);
+
+  // Single-season HR chasers
+  if (gamesRemaining >= 15) {
+    const hrChasers = prepared(
+      `SELECT ss.player_id, ss.home_runs, p.first_name, p.last_name, p.team_id
+       FROM season_stats ss
+       JOIN players p ON p.id = ss.player_id
+       WHERE ss.league_id = ? AND ss.season_number = ?
+         AND ss.home_runs >= 40 AND p.team_id IS NOT NULL`
+    ).all(leagueId, league.season_number) as Array<{
+      player_id: number; home_runs: number; first_name: string; last_name: string; team_id: number;
+    }>;
+
+    for (const p of hrChasers) {
+      try {
+        insertNewsItem({
+          leagueId, seasonNumber: league.season_number, gameNumber,
+          eventType: 'record_watch', teamId: p.team_id, playerId: p.player_id,
+          headlineText: `Record Watch — ${p.first_name} ${p.last_name} has ${p.home_runs} HR with ${gamesRemaining} games remaining`,
+        });
+      } catch (_e) { /* non-critical */ }
+    }
+  }
+
+  // Single-season win chasers (pitchers)
+  if (gamesRemaining >= 10) {
+    const winChasers = prepared(
+      `SELECT ss.player_id, ss.pitcher_wins, p.first_name, p.last_name, p.team_id
+       FROM season_stats ss
+       JOIN players p ON p.id = ss.player_id
+       WHERE ss.league_id = ? AND ss.season_number = ?
+         AND ss.pitcher_wins >= 12 AND p.team_id IS NOT NULL
+         AND (p.position = 'SP' OR p.position = 'RP')`
+    ).all(leagueId, league.season_number) as Array<{
+      player_id: number; pitcher_wins: number; first_name: string; last_name: string; team_id: number;
+    }>;
+
+    for (const p of winChasers) {
+      try {
+        insertNewsItem({
+          leagueId, seasonNumber: league.season_number, gameNumber,
+          eventType: 'record_watch', teamId: p.team_id, playerId: p.player_id,
+          headlineText: `Record Watch — ${p.first_name} ${p.last_name} has ${p.pitcher_wins} wins with ${gamesRemaining} games remaining`,
+        });
+      } catch (_e) { /* non-critical */ }
+    }
+  }
+
+  // Career HR milestones
+  const careerHrMilestones = [490, 585, 680];
+  for (const threshold of careerHrMilestones) {
+    const chasers = prepared(
+      `SELECT p.id, p.first_name, p.last_name, p.team_id, p.career_home_runs
+       FROM players p
+       WHERE p.league_id = ? AND p.career_home_runs >= ? AND p.career_home_runs < ? + 20
+         AND p.team_id IS NOT NULL`
+    ).all(leagueId, threshold, threshold) as Array<{
+      id: number; first_name: string; last_name: string; team_id: number; career_home_runs: number;
+    }>;
+    const target = threshold === 490 ? 500 : threshold === 585 ? 600 : 700;
+    for (const p of chasers) {
+      const needed = target - p.career_home_runs;
+      try {
+        insertNewsItem({
+          leagueId, seasonNumber: league.season_number, gameNumber,
+          eventType: 'record_watch', teamId: p.team_id, playerId: p.id,
+          headlineText: `Record Watch — ${p.first_name} ${p.last_name} needs ${needed} HR to reach ${target} career home runs`,
+        });
+      } catch (_e) { /* non-critical */ }
+    }
+  }
+
+  // Career hits milestone (2950→3000)
+  const hitChasers = prepared(
+    `SELECT p.id, p.first_name, p.last_name, p.team_id, p.career_hits
+     FROM players p
+     WHERE p.league_id = ? AND p.career_hits >= 2950 AND p.career_hits < 3020
+       AND p.team_id IS NOT NULL`
+  ).all(leagueId) as Array<{
+    id: number; first_name: string; last_name: string; team_id: number; career_hits: number;
+  }>;
+  for (const p of hitChasers) {
+    const needed = 3000 - p.career_hits;
+    if (needed > 0) {
+      try {
+        insertNewsItem({
+          leagueId, seasonNumber: league.season_number, gameNumber,
+          eventType: 'record_watch', teamId: p.team_id, playerId: p.id,
+          headlineText: `Record Watch — ${p.first_name} ${p.last_name} needs ${needed} hits to reach 3,000 career hits`,
+        });
+      } catch (_e) { /* non-critical */ }
+    }
+  }
+
+  // Career wins milestone (290→300) — pitchers
+  const winMilestoneChasers = prepared(
+    `SELECT p.id, p.first_name, p.last_name, p.team_id, p.career_wins
+     FROM players p
+     WHERE p.league_id = ? AND p.career_wins >= 290 AND p.career_wins < 310
+       AND p.team_id IS NOT NULL
+       AND (p.position = 'SP' OR p.position = 'RP')`
+  ).all(leagueId) as Array<{
+    id: number; first_name: string; last_name: string; team_id: number; career_wins: number;
+  }>;
+  for (const p of winMilestoneChasers) {
+    const needed = 300 - p.career_wins;
+    if (needed > 0) {
+      try {
+        insertNewsItem({
+          leagueId, seasonNumber: league.season_number, gameNumber,
+          eventType: 'record_watch', teamId: p.team_id, playerId: p.id,
+          headlineText: `Record Watch — ${p.first_name} ${p.last_name} needs ${needed} wins to reach 300 career wins`,
+        });
+      } catch (_e) { /* non-critical */ }
+    }
+  }
+
+  // Career strikeout milestone (2950→3000)
+  const kChasers = prepared(
+    `SELECT p.id, p.first_name, p.last_name, p.team_id, p.career_strikeouts
+     FROM players p
+     WHERE p.league_id = ? AND p.career_strikeouts >= 2950 AND p.career_strikeouts < 3020
+       AND p.team_id IS NOT NULL`
+  ).all(leagueId) as Array<{
+    id: number; first_name: string; last_name: string; team_id: number; career_strikeouts: number;
+  }>;
+  for (const p of kChasers) {
+    const needed = 3000 - p.career_strikeouts;
+    if (needed > 0) {
+      try {
+        insertNewsItem({
+          leagueId, seasonNumber: league.season_number, gameNumber,
+          eventType: 'record_watch', teamId: p.team_id, playerId: p.id,
+          headlineText: `Record Watch — ${p.first_name} ${p.last_name} needs ${needed} strikeouts to reach 3,000 career strikeouts`,
+        });
+      } catch (_e) { /* non-critical */ }
+    }
+  }
+}
+
+// 6d. Rule 5 game-30 return check (one-shot, uses rule5_return_checked flag — Section 5c)
+// If a Rule 5 player has not appeared in 30 games and the flag is not set, offer return.
+function checkRule5Returns(leagueId: number, gameNumber: number): void {
+  if (gameNumber < 30) return;
+
+  const league = prepared('SELECT season_number FROM leagues WHERE id = ?').get(leagueId) as { season_number: number } | undefined;
+  if (!league) return;
+
+  // Players who were Rule 5 drafted this season and haven't been checked yet
+  const candidates = prepared(
+    `SELECT p.id, p.first_name, p.last_name, p.team_id, p.rule5_from_team_id,
+            p.appearances_this_season
+     FROM players p
+     WHERE p.league_id = ? AND p.rule5_drafted = 1
+       AND p.rule5_return_checked = 0
+       AND p.team_id IS NOT NULL`
+  ).all(leagueId) as Array<{
+    id: number; first_name: string; last_name: string; team_id: number | null;
+    rule5_from_team_id: number | null; appearances_this_season: number;
+  }>;
+
+  for (const player of candidates) {
+    // Mark as checked (one-shot gate — X-F5c)
+    prepared('UPDATE players SET rule5_return_checked = 1 WHERE id = ?').run(player.id);
+
+    // If fewer than 10 appearances (hasn't contributed on 25-man), offer return
+    if (player.appearances_this_season < 10 && player.rule5_from_team_id !== null) {
+      // Return player to original team — move back
+      prepared(
+        `UPDATE players SET team_id = ?, is_on_mlb_roster = 0, is_on_25man = 0,
+         minor_level = 'AAA', rule5_drafted = 0, rule5_from_team_id = NULL
+         WHERE id = ?`
+      ).run(player.rule5_from_team_id, player.id);
+
+      // Insert transaction record
+      try {
+        prepared(
+          `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, details_json, narrative, created_at)
+           VALUES (?, ?, 'rule5_return', ?, ?, ?, ?, ?)`
+        ).run(
+          leagueId, league.season_number, player.team_id, player.id,
+          JSON.stringify({ returned_to_team_id: player.rule5_from_team_id }),
+          `${player.first_name} ${player.last_name} returned to original org`,
+          Date.now()
+        );
+
+        insertNewsItem({
+          leagueId, seasonNumber: league.season_number, gameNumber,
+          eventType: 'rule5_draft', teamId: player.team_id ?? null, playerId: player.id,
+          headlineText: `${player.first_name} ${player.last_name} returned to original organization (Rule 5)`,
+        });
+      } catch (_e) { /* non-critical */ }
+    }
+  }
+}
+
 // AB-NULL §4.3: One-time self-heal for carried-over DBs with stale is_on_25man on null-team players.
 // Called once per runRosterMaintenance invocation — cheap (no-op if already clean).
 function cleanupPhantom25man(leagueId: number): void {
@@ -139,6 +546,41 @@ export function runRosterMaintenance(
       applyTradeDemandPenalties(leagueId, gameNumber);
     } catch (err) {
       console.warn('[rosterMaintenance] Chemistry/personality error:', err);
+    }
+  }
+
+  // v0.5.0 Section 6: Every-5-game cadence — streaks, award races, record chasers, Rule 5 return
+  if (gameNumber % 5 === 0) {
+    // 6a. Streak evaluation
+    try {
+      const leagueRowForSeed = prepared('SELECT worldgen_seed FROM leagues WHERE id = ?').get(leagueId) as { worldgen_seed: number } | undefined;
+      const streakSeed = (leagueRowForSeed?.worldgen_seed ?? 12345) ^ gameNumber;
+      evaluateStreaks(leagueId, gameNumber, streakSeed);
+    } catch (err) {
+      console.warn('[rosterMaintenance] Streak evaluation error:', err);
+    }
+
+    // 6b. Live award race update
+    try {
+      updateAwardRaces(leagueId, gameNumber);
+    } catch (err) {
+      console.warn('[rosterMaintenance] Award races update error:', err);
+    }
+
+    // 6c. Record-chasing milestones (50-game season, so leagueGamesInSeason = 250 total; ~50 per team)
+    // Each team plays 50 home + 50 away = 50 games (20 teams × 50 games / 2 matchups)
+    const LEAGUE_TOTAL_GAMES = 250; // 20 teams × 50 games / 2 = 250 games total in schedule
+    try {
+      checkRecordChasers(leagueId, gameNumber, LEAGUE_TOTAL_GAMES);
+    } catch (err) {
+      console.warn('[rosterMaintenance] Record chasers error:', err);
+    }
+
+    // 6d. Rule 5 game-30 return check (one-shot flag)
+    try {
+      checkRule5Returns(leagueId, gameNumber);
+    } catch (err) {
+      console.warn('[rosterMaintenance] Rule 5 return check error:', err);
     }
   }
 
