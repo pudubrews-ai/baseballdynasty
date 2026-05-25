@@ -6,7 +6,7 @@
 import { getDb, prepared, getActiveLeague, updateCache, getCachedState, type LeagueRow, type TeamRow } from '../db.js';
 import { generateWorld } from './worldgen.js';
 import { runExpansionDraft } from './draft.js';
-import { validatePostDraftRosters } from './worldgen.js';
+import { validatePostDraftRosters, backfillV050PlayerFields } from './worldgen.js';
 import { generateSchedule, saveSchedule, getNextGame, isSeasonComplete, shouldFireTradeDeadline, fireTradeDeadline } from './season.js';
 import { simulateGame } from './game.js';
 import { runPlayoffs } from './playoffs.js';
@@ -355,6 +355,7 @@ async function runDraftTick(league: LeagueRow, isTurbo: boolean): Promise<void> 
         }
       });
       validatePostDraftRosters(league.id);
+      backfillV050PlayerFields(league.id); // v0.5.0: assign 40-man + bullpen roles after expansion draft
 
       // §2.4: After turbo draft, refresh cache once
       await refreshCache(league.id);

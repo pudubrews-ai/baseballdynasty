@@ -177,10 +177,10 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
     'INSERT INTO leagues (name, season_number, phase, sim_speed, current_game_date, current_game_number, last_pick_id, last_game_id, worldgen_seed, archived, created_at) VALUES (?, 1, ?, ?, 0, 0, 0, 0, ?, 0, ?)'
   );
   const insertTeam = db.prepare(
-    `INSERT INTO teams (league_id, name, city, state_province, region, market_size, conference, division, color, wins, losses, runs_scored, runs_allowed, games_played, payroll_budget, current_payroll, revenue, gm_name, gm_philosophy, gm_risk_tolerance, gm_focus, gm_archetype, manager_name, manager_style, manager_tactics, manager_motivation, manager_communication, owner_name, owner_personality, owner_age, job_security, abbreviation, franchise_value, stadium_capacity, founded_season) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 5, ?, ?, ?, 1)`
+    `INSERT INTO teams (league_id, name, city, state_province, region, market_size, conference, division, color, wins, losses, runs_scored, runs_allowed, games_played, payroll_budget, current_payroll, revenue, gm_name, gm_philosophy, gm_risk_tolerance, gm_focus, gm_archetype, manager_name, manager_style, manager_tactics, manager_motivation, manager_communication, owner_name, owner_personality, owner_age, job_security, abbreviation, franchise_value, stadium_capacity, founded_season, scouting_rating, international_bonus_pool) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 5, ?, ?, ?, 1, ?, ?)`
   );
   const insertPlayer = db.prepare(
-    `INSERT INTO players (league_id, team_id, first_name, last_name, age, position, overall_rating, potential, potential_revealed, contact, power, speed, fielding, arm, pitching_velocity, pitching_control, pitching_stamina, is_on_mlb_roster, is_on_25man, annual_salary, contract_years_remaining, service_time, service_time_days, injury_prone, coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country, is_drafted, career_hits, career_hr, career_rbi, career_ip, career_k, options_remaining) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO players (league_id, team_id, first_name, last_name, age, position, overall_rating, potential, potential_revealed, contact, power, speed, fielding, arm, pitching_velocity, pitching_control, pitching_stamina, is_on_mlb_roster, is_on_25man, annual_salary, contract_years_remaining, service_time, service_time_days, injury_prone, coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country, is_drafted, career_hits, career_hr, career_rbi, career_ip, career_k, options_remaining, bats, throws, vs_lefty_modifier, vs_righty_modifier, is_on_40man, signed_age, years_in_org, career_wins) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
 
   const doWorldgen = db.transaction(() => {
@@ -278,6 +278,24 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
         : city.market_size === 'large' ? 42000
         : city.market_size === 'medium' ? 36000 : 30000;
 
+      // v0.5.0: scouting_rating based on gm_archetype + market budget modifier
+      let scoutingRating = 5;
+      if (gmArchetype === 'analytics') scoutingRating += 2;
+      else if (gmArchetype === 'old-school') scoutingRating -= 1;
+      // market budget modifier: mega/large +1, small -1
+      if (marketSize === 'mega' || marketSize === 'large') scoutingRating += 1;
+      else if (marketSize === 'small') scoutingRating -= 1;
+      scoutingRating = Math.max(1, Math.min(10, scoutingRating));
+
+      // v0.5.0: international_bonus_pool by market size (seeded within band)
+      let intlPool: number;
+      switch (marketSize) {
+        case 'mega':   intlPool = randInt(rng, 8_000_000, 12_000_000); break;
+        case 'large':  intlPool = randInt(rng, 5_000_000, 8_000_000);  break;
+        case 'medium': intlPool = randInt(rng, 3_000_000, 5_000_000);  break;
+        default:       intlPool = randInt(rng, 1_500_000, 3_000_000);  break;
+      }
+
       const teamResult = insertTeam.run(
         leagueId,
         nickname,
@@ -305,8 +323,10 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
         ownerAge,
         abbreviation,
         startingFranchiseValue,
-        stadiumCapacity
-        // founded_season = 1 is hardcoded in the INSERT statement (last literal)
+        stadiumCapacity,
+        // founded_season = 1 is hardcoded in the INSERT statement
+        scoutingRating,
+        intlPool
       );
       teamIds.push(teamResult.lastInsertRowid as number);
     }
@@ -396,6 +416,44 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
         careerK = Math.min(999, yearsPlayed * kPerYear);
       }
 
+      // v0.5.0: career_wins for pitchers (age-scaled, clamped below 299 so 300-win milestone must be crossed)
+      let careerWins = 0;
+      if (isPitcher && yearsPlayed > 0) {
+        const winsPerYear = Math.round((pitchingVelocity + pitchingControl) / 40); // ~2-5 wins/year
+        careerWins = Math.min(298, yearsPlayed * winsPerYear);
+      }
+
+      // v0.5.0: Handedness
+      // Pitchers: throws L=30% R=70%, bats matches throws (cosmetic)
+      // Hitters: bats L=35% R=50% S=15%, throws always R
+      let bats: string;
+      let throws_: string;
+      if (isPitcher) {
+        throws_ = rng() < 0.30 ? 'L' : 'R';
+        bats = throws_; // cosmetic, never read for pitchers
+      } else {
+        const batsRoll = rng();
+        if (batsRoll < 0.35) bats = 'L';
+        else if (batsRoll < 0.85) bats = 'R';
+        else bats = 'S';
+        throws_ = 'R'; // never read for hitters
+      }
+
+      // v0.5.0: Platoon splits — random integer in [-10, +10]
+      const vsLeftyMod = randInt(rng, -10, 10);
+      const vsRightyMod = randInt(rng, -10, 10);
+
+      // v0.5.0: Org tenure — synthetic for worldgen players
+      // MLB: 4-8 years, AAA: 3-6, AA: 2-4, A: 1-3, Rookie: 0-1
+      // We'll use a deterministic band since we don't know assignment yet — default to 4 for MLB
+      // Assignment happens later; years_in_org will be 0 and backfill in migration handles carried-over DBs.
+      // For fresh worldgen, derive from level after assignment (updated below).
+      const yearsInOrg = 0; // will be set after team assignment in team assignment loop
+      const signedAge = Math.max(16, age - 4); // synthetic prior tenure
+
+      // v0.5.0: is_on_40man — set after team assignment (done in team assignment section below)
+      const isOn40man = 0; // will be set after assignment
+
       insertPlayer.run(
         leagueId,
         firstName,
@@ -429,13 +487,99 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
         careerIp,
         careerK,
         optionsRemaining,
+        bats,
+        throws_,
+        vsLeftyMod,
+        vsRightyMod,
+        isOn40man,
+        signedAge,
+        yearsInOrg,
+        careerWins,
       );
+    }
+
+    // v0.5.0: Backfill years_in_org and is_on_40man after player insertion and team assignment.
+    // Players are currently unassigned (team_id = NULL), so we do this as a batch update
+    // after the expansion draft assigns teams. This is done as a post-worldgen update.
+    // For now set realistic defaults by overall tier (MLB-caliber players treated as veterans).
+    // The expansion draft itself assigns teams; after that, we backfill based on roster level.
+    // We handle this after team assignment is complete (expansion draft assigns team_id).
+    // For the transaction, set synthetic years_in_org based on overall tier:
+    // overall >= 75: 4-8 years, >= 60: 3-6 years, >= 45: 2-4 years, else 1-3 years
+    const allPlayersForTenure = db.prepare(
+      `SELECT id, overall_rating, age FROM players WHERE league_id = ?`
+    ).all(leagueId) as Array<{ id: number; overall_rating: number; age: number }>;
+
+    const tenureStmt = db.prepare(
+      `UPDATE players SET years_in_org = ?, signed_age = ?, is_on_40man = 0 WHERE id = ?`
+    );
+    const tenureRng = seedFor('tenure_init', seed);
+    for (const p of allPlayersForTenure) {
+      let yio: number;
+      if (p.overall_rating >= 75) yio = randInt(tenureRng, 4, 8);
+      else if (p.overall_rating >= 60) yio = randInt(tenureRng, 3, 6);
+      else if (p.overall_rating >= 45) yio = randInt(tenureRng, 2, 4);
+      else yio = randInt(tenureRng, 1, 3);
+      const sAge = Math.max(16, p.age - yio);
+      tenureStmt.run(yio, sAge, p.id);
     }
 
     return { leagueId, worldgenSeed: seed };
   });
 
   return doWorldgen() as { leagueId: number; worldgenSeed: number };
+}
+
+// v0.5.0: Post-expansion-draft backfill for is_on_40man and bullpen_role
+// Called after validatePostDraftRosters to assign 40-man and bullpen roles
+export function backfillV050PlayerFields(leagueId: number): void {
+  const db = getDb();
+  // Set is_on_40man for all MLB roster players
+  db.prepare(`UPDATE players SET is_on_40man = 1 WHERE league_id = ? AND is_on_mlb_roster = 1`).run(leagueId);
+
+  // Assign bullpen_role for all relief pitchers (RP/CL)
+  const teams = prepared(`SELECT id, gm_archetype FROM teams WHERE league_id = ?`).all(leagueId) as Array<{ id: number; gm_archetype: string }>;
+
+  for (const team of teams) {
+    const relievers = prepared(
+      `SELECT id, overall_rating, pitching_control, pitching_velocity, vs_lefty_modifier, throws
+       FROM players
+       WHERE team_id = ? AND is_on_mlb_roster = 1 AND position IN ('RP','CL')
+       ORDER BY overall_rating DESC, pitching_control DESC`
+    ).all(team.id) as Array<{
+      id: number; overall_rating: number; pitching_control: number;
+      pitching_velocity: number; vs_lefty_modifier: number; throws: string;
+    }>;
+
+    const assignRoleStmt = db.prepare(`UPDATE players SET bullpen_role = ? WHERE id = ?`);
+
+    for (let ri = 0; ri < relievers.length; ri++) {
+      const r = relievers[ri]!;
+      let role: string;
+
+      // Closer: best reliever overall >= 70, composure (use pitching_control) >= 65
+      if (ri === 0 && r.overall_rating >= 70 && r.pitching_control >= 65) {
+        role = 'closer';
+      }
+      // Setup: second-best reliever, overall >= 65
+      else if (ri === 1 && r.overall_rating >= 65) {
+        role = 'setup';
+      }
+      // Left Specialist: left-handed (throws='L'), vs_lefty_modifier >= 5
+      else if (r.throws === 'L' && r.vs_lefty_modifier >= 5 && r.overall_rating >= 55) {
+        role = 'specialist';
+      }
+      // Middle Relief: overall 55-64
+      else if (r.overall_rating >= 55 && r.overall_rating <= 64) {
+        role = 'middle';
+      }
+      // Long Relief: lowest relievers with decent stamina
+      else {
+        role = 'long';
+      }
+      assignRoleStmt.run(role, r.id);
+    }
+  }
 }
 
 function pickRandomName(rng: () => number, origin: OriginKey, type: 'first' | 'last'): string {
