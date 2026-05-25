@@ -104,6 +104,8 @@ function AppContent() {
   const [useRealCities, setUseRealCities] = useState(false);
   const [franchiseState, setFranchiseState] = useState<FranchiseStateResponse | null>(null);
   const [showFranchiseSelection, setShowFranchiseSelection] = useState(false);
+  // Deep-link nav: when set, Teams component mounts and auto-navigates to this team + tab
+  const [teamsNavTarget, setTeamsNavTarget] = useState<{ teamId: number; tab: 'roster' | 'minors' | 'financials' | 'history' } | null>(null);
   const leagueStateValue = useLeagueStatePolling();
   const { state, noLeague, reconnecting } = leagueStateValue;
 
@@ -236,6 +238,8 @@ function AppContent() {
               }
               onClick={() => {
                 hasUserNavigatedRef.current = true;
+                // Clear deep-link nav target when user manually picks any tab
+                if (tab.id !== 'teams') setTeamsNavTarget(null);
                 setActiveTab(tab.id);
               }}
               style={{
@@ -278,7 +282,11 @@ function AppContent() {
             ) : (
               <>
                 {activeTab === 'league' && <League />}
-                {activeTab === 'teams' && <Teams />}
+                {activeTab === 'teams' && (
+                  <Teams
+                    {...(teamsNavTarget ? { defaultTeamId: teamsNavTarget.teamId, defaultTab: teamsNavTarget.tab } : {})}
+                  />
+                )}
                 {activeTab === 'games' && <Games />}
                 {activeTab === 'draft' && <Draft />}
                 {activeTab === 'players' && <Players />}
@@ -288,7 +296,13 @@ function AppContent() {
                 {activeTab === 'minors' && <MinorsStandings />}
                 {activeTab === 'watch' && <Watch />}
                 {activeTab === 'yourfranchise' && (
-                  <YourFranchise ownedTeamId={franchiseState?.ownedTeamId ?? null} />
+                  <YourFranchise
+                    ownedTeamId={franchiseState?.ownedTeamId ?? null}
+                    onNavigateToTeamHistory={(teamId) => {
+                      setTeamsNavTarget({ teamId, tab: 'history' });
+                      setActiveTab('teams');
+                    }}
+                  />
                 )}
               </>
             )}

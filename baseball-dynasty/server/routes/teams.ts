@@ -291,16 +291,37 @@ teamsRouter.get('/:id/history', async (req: Request, res: Response, next: NextFu
 
     const leagueId = teamExists.league_id;
 
-    // Season records from franchise_season_history
+    // Team division (for display in season records)
+    const teamMeta = prepared('SELECT division FROM teams WHERE id = ?').get(teamId) as { division: string } | undefined;
+    const teamDivision = teamMeta?.division ?? '';
+
+    // Season records from franchise_season_history — include manager_name for season table
     const seasonRecords = prepared(
-      `SELECT season_number, wins, losses, division_finish, playoff_round, made_playoffs, won_championship, city_label
+      `SELECT season_number, wins, losses, division_finish, playoff_round, made_playoffs, won_championship, city_label, manager_name
        FROM franchise_season_history
        WHERE league_id = ? AND team_id = ?
        ORDER BY season_number ASC`
     ).all(leagueId, teamId) as Array<{
       season_number: number; wins: number; losses: number; division_finish: number | null;
-      playoff_round: string | null; made_playoffs: number; won_championship: number; city_label: string | null;
+      playoff_round: string | null; made_playoffs: number; won_championship: number;
+      city_label: string | null; manager_name: string | null;
     }>;
+
+    // All-time roster: everyone who has played for this team (franchise_player_season) + current roster
+    const rosterHistory = prepared(
+      `SELECT DISTINCT sub.id, sub.first_name, sub.last_name, sub.position, sub.overall_rating
+       FROM (
+         SELECT p.id, p.first_name, p.last_name, p.position, p.overall_rating
+         FROM franchise_player_season fps
+         JOIN players p ON p.id = fps.player_id
+         WHERE fps.team_id = ?
+         UNION
+         SELECT p.id, p.first_name, p.last_name, p.position, p.overall_rating
+         FROM players p
+         WHERE p.team_id = ?
+       ) sub
+       ORDER BY sub.last_name, sub.first_name`
+    ).all(teamId, teamId) as Array<{ id: number; first_name: string; last_name: string; position: string; overall_rating: number }>;
 
     // Manager history from front_office_events + franchise_season_history for record computation
     const managerEvents = prepared(
@@ -485,15 +506,25 @@ teamsRouter.get('/:id/history', async (req: Request, res: Response, next: NextFu
     };
 
     res.json({
+      division: teamDivision,
       season_records: seasonRecords.map(r => ({
         season_number: r.season_number,
         wins: r.wins,
         losses: r.losses,
         division_finish: r.division_finish,
+        division: teamDivision,
         playoff_round: r.playoff_round ?? 'missed',
         made_playoffs: r.made_playoffs === 1,
         won_championship: r.won_championship === 1,
         city_label: r.city_label,
+        manager_name: r.manager_name ?? null,
+      })),
+      roster_history: rosterHistory.map(p => ({
+        id: p.id,
+        first_name: p.first_name,
+        last_name: p.last_name,
+        position: p.position,
+        overall_rating: p.overall_rating,
       })),
       manager_history: managerHistory,
       gm_history: gmHistory,

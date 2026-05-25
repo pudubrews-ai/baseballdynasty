@@ -95,7 +95,12 @@ interface TeamDetail extends TeamSummary {
 
 type TeamTab = 'roster' | 'minors' | 'financials' | 'history';
 
-export default function Teams() {
+interface TeamsProps {
+  defaultTeamId?: number;
+  defaultTab?: TeamTab;
+}
+
+export default function Teams({ defaultTeamId, defaultTab }: TeamsProps = {}) {
   const [teams, setTeams] = useState<TeamSummary[]>([]);
   const [selectedTeamId, setSelectedTeamId] = useState<number | null>(null);
   const [teamDetail, setTeamDetail] = useState<TeamDetail | null>(null);
@@ -107,18 +112,32 @@ export default function Teams() {
     getTeams().then(data => setTeams(data as TeamSummary[])).catch(console.error);
   }, []);
 
-  const handleTeamClick = async (teamId: number) => {
+  // Unified navigate: load team detail + specific tab data in one shot
+  const handleTeamNavigate = async (teamId: number, tab: TeamTab) => {
     setSelectedTeamId(teamId);
-    setActiveTab('roster');
+    setActiveTab(tab);
     try {
       const detail = await getTeam(teamId);
       setTeamDetail(detail as TeamDetail);
-      const roster = await getTeamRoster(teamId);
-      setTabData(roster);
+      switch (tab) {
+        case 'roster': setTabData(await getTeamRoster(teamId)); break;
+        case 'minors': setTabData(await getTeamMinors(teamId)); break;
+        case 'history': setTabData(await getTeamHistory(teamId)); break;
+        case 'financials': setTabData(await getTeamFinancials(teamId)); break;
+      }
     } catch (err) {
       console.error(err);
     }
   };
+
+  // Auto-navigate if launched from another tab (e.g. "View Full History →" in YourFranchise)
+  useEffect(() => {
+    if (defaultTeamId) {
+      handleTeamNavigate(defaultTeamId, defaultTab ?? 'roster');
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleTeamClick = (teamId: number) => handleTeamNavigate(teamId, 'roster');
 
   const handleTabChange = async (tab: TeamTab) => {
     setActiveTab(tab);

@@ -118,17 +118,88 @@ function RatingBar({ value, max = 99 }: { value: number; max?: number }) {
   );
 }
 
-interface Props {
-  ownedTeamId: number | null;
+interface SeasonRecord {
+  season_number: number;
+  wins: number;
+  losses: number;
+  division_finish: number | null;
+  division: string;
+  playoff_round: string;
+  made_playoffs: boolean;
+  won_championship: boolean;
+  manager_name: string | null;
 }
 
-export default function YourFranchise({ ownedTeamId }: Props) {
+interface AllTimePlayer {
+  id: number;
+  first_name: string;
+  last_name: string;
+  position: string;
+  overall_rating: number;
+}
+
+interface TeamHistory {
+  season_records: SeasonRecord[];
+  roster_history: AllTimePlayer[];
+}
+
+interface PlayerCard {
+  id: number;
+  first_name: string;
+  last_name: string;
+  age: number;
+  position: string;
+  overall_rating: number;
+  team_name: string | null;
+  contact: number | null;
+  power: number | null;
+  speed: number | null;
+  pitching_velocity: number | null;
+  pitching_control: number | null;
+  career_hits: number;
+  career_hr: number;
+  career_rbi: number;
+  career_ip: number;
+  career_k: number;
+  career_wins: number;
+  annual_salary: number;
+  contract_years_remaining: number;
+  is_injured: boolean;
+  injury_type: string | null;
+  origin: string | null;
+}
+
+function playoffLabel(r: SeasonRecord): string {
+  if (r.won_championship) return '🏆 Won Championship';
+  if (!r.made_playoffs) return 'Missed Playoffs';
+  switch (r.playoff_round) {
+    case 'DS': return 'Lost Division Series';
+    case 'CS': return 'Lost Championship Series';
+    case 'WS': return 'Lost World Series';
+    default: return 'Playoff Exit';
+  }
+}
+
+interface Props {
+  ownedTeamId: number | null;
+  onNavigateToTeamHistory?: (teamId: number) => void;
+}
+
+export default function YourFranchise({ ownedTeamId, onNavigateToTeamHistory }: Props) {
   // Browse Any Org: pure client state — NEVER POST to change owned team (CISO V5-3)
   const [browseTeamId, setBrowseTeamId] = useState<number | null>(null);
   const [allTeams, setAllTeams] = useState<TeamOption[]>([]);
   const [dashboard, setDashboard] = useState<FranchiseDashboard | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Franchise History section
+  const [historyData, setHistoryData] = useState<TeamHistory | null>(null);
+
+  // Find a Player search
+  const [playerQuery, setPlayerQuery] = useState('');
+  const [openPlayer, setOpenPlayer] = useState<PlayerCard | null>(null);
+  const [playerCardLoading, setPlayerCardLoading] = useState(false);
 
   const viewingTeamId = browseTeamId ?? ownedTeamId;
 
@@ -163,6 +234,18 @@ export default function YourFranchise({ ownedTeamId }: Props) {
         setError(e.message);
         setLoading(false);
       });
+  }, [viewingTeamId]);
+
+  // Load team history (season records + all-time roster) for currently viewed team
+  useEffect(() => {
+    if (!viewingTeamId) { setHistoryData(null); return; }
+    setHistoryData(null);
+    setPlayerQuery('');
+    setOpenPlayer(null);
+    fetch(`/api/teams/${viewingTeamId}/history`)
+      .then(r => r.ok ? r.json() : null)
+      .then((data: TeamHistory | null) => { if (data) setHistoryData(data); })
+      .catch(() => {});
   }, [viewingTeamId]);
 
   // Empty state: no owned franchise
@@ -469,8 +552,22 @@ export default function YourFranchise({ ownedTeamId }: Props) {
 
           {/* History Snapshot */}
           <div data-testid="franchise-history-snapshot" style={{ background: '#1e293b', borderRadius: '8px', padding: '16px' }}>
-            <h3 style={{ margin: '0 0 12px', fontSize: '15px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Franchise History</h3>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: '12px', fontSize: '14px' }}>
+            {/* Heading + View Full History link */}
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+              <h3 style={{ margin: 0, fontSize: '15px', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Franchise History</h3>
+              {onNavigateToTeamHistory && viewingTeamId && (
+                <button
+                  data-testid="franchise-history-view-full"
+                  onClick={() => onNavigateToTeamHistory(viewingTeamId)}
+                  style={{ background: 'none', border: 'none', color: '#3b82f6', fontSize: '13px', cursor: 'pointer', padding: 0 }}
+                >
+                  View Full History →
+                </button>
+              )}
+            </div>
+
+            {/* Four summary stats */}
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: '12px', fontSize: '14px', marginBottom: '20px' }}>
               <div>
                 <div style={{ color: '#64748b', fontSize: '12px' }}>Seasons</div>
                 <div style={{ fontSize: '22px', fontWeight: 'bold' }}>{dashboard.history_snapshot.seasons_played}</div>
@@ -490,7 +587,189 @@ export default function YourFranchise({ ownedTeamId }: Props) {
                 <div style={{ fontSize: '22px', fontWeight: 'bold' }}>{dashboard.history_snapshot.career_wins}</div>
               </div>
             </div>
+
+            {/* Season-by-season records table */}
+            {historyData && historyData.season_records.length > 0 && (
+              <div style={{ overflowX: 'auto', marginBottom: '20px' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid #334155', color: '#64748b', textAlign: 'left' }}>
+                      <th style={{ padding: '4px 8px' }}>Season</th>
+                      <th style={{ padding: '4px 8px' }}>W-L</th>
+                      <th style={{ padding: '4px 8px' }}>Division Finish</th>
+                      <th style={{ padding: '4px 8px' }}>Playoff Result</th>
+                      <th style={{ padding: '4px 8px' }}>Manager</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...historyData.season_records].reverse().map(r => (
+                      <tr key={r.season_number} style={{ borderBottom: '1px solid #1e3a5f' }}>
+                        <td style={{ padding: '4px 8px', color: '#94a3b8' }}>{r.season_number}</td>
+                        <td style={{ padding: '4px 8px', fontWeight: 'bold' }}>{r.wins}–{r.losses}</td>
+                        <td style={{ padding: '4px 8px', color: '#94a3b8' }}>
+                          {r.division_finish != null ? `${ordinal(r.division_finish)} in ${r.division}` : '—'}
+                        </td>
+                        <td style={{ padding: '4px 8px', color: r.won_championship ? '#f59e0b' : r.made_playoffs ? '#22c55e' : '#64748b' }}>
+                          {playoffLabel(r)}
+                        </td>
+                        <td style={{ padding: '4px 8px', color: '#94a3b8' }}>{r.manager_name ?? '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {historyData && historyData.season_records.length === 0 && (
+              <p style={{ color: '#64748b', fontSize: '13px', marginBottom: '20px' }}>No completed seasons yet.</p>
+            )}
+
+            {/* Find a Player */}
+            {historyData && historyData.roster_history.length > 0 && (
+              <div>
+                <div style={{ color: '#64748b', fontSize: '12px', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '8px' }}>
+                  Find a Player ({historyData.roster_history.length} all-time)
+                </div>
+                <input
+                  data-testid="franchise-player-search"
+                  type="text"
+                  placeholder="Search by name…"
+                  value={playerQuery}
+                  onChange={e => setPlayerQuery(e.target.value)}
+                  style={{
+                    width: '100%', boxSizing: 'border-box',
+                    background: '#0f172a', border: '1px solid #334155', borderRadius: '6px',
+                    color: '#e2e8f0', padding: '8px 10px', fontSize: '13px',
+                    outline: 'none',
+                  }}
+                />
+                {playerQuery.length >= 2 && (() => {
+                  const q = playerQuery.toLowerCase();
+                  const hits = historyData.roster_history.filter(
+                    p => `${p.first_name} ${p.last_name}`.toLowerCase().includes(q)
+                  ).slice(0, 8);
+                  return hits.length > 0 ? (
+                    <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: '6px', marginTop: '4px' }}>
+                      {hits.map(p => (
+                        <button
+                          key={p.id}
+                          data-testid={`franchise-player-result-${p.id}`}
+                          onClick={() => {
+                            setPlayerCardLoading(true);
+                            setPlayerQuery('');
+                            fetch(`/api/players/${p.id}`)
+                              .then(r => r.ok ? r.json() : null)
+                              .then((card: PlayerCard | null) => { setOpenPlayer(card); setPlayerCardLoading(false); })
+                              .catch(() => setPlayerCardLoading(false));
+                          }}
+                          style={{
+                            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                            width: '100%', background: 'none', border: 'none', borderBottom: '1px solid #1e3a5f',
+                            color: '#e2e8f0', padding: '8px 12px', cursor: 'pointer', textAlign: 'left',
+                            fontSize: '13px',
+                          }}
+                        >
+                          <span>{p.first_name} {p.last_name}</span>
+                          <span style={{ color: '#64748b', fontSize: '12px' }}>{p.position} · {p.overall_rating} OVR</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <div style={{ color: '#64748b', fontSize: '12px', padding: '6px 2px' }}>No matches found.</div>
+                  );
+                })()}
+                {playerCardLoading && (
+                  <div style={{ color: '#94a3b8', fontSize: '12px', padding: '6px 2px' }}>Loading player…</div>
+                )}
+              </div>
+            )}
           </div>
+
+          {/* Player card modal */}
+          {openPlayer && (
+            <div
+              data-testid="franchise-player-card-modal"
+              style={{
+                position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000,
+              }}
+              onClick={e => { if (e.target === e.currentTarget) setOpenPlayer(null); }}
+            >
+              <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '24px', maxWidth: '480px', width: '100%' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '16px' }}>
+                  <div>
+                    <h3 style={{ margin: '0 0 4px', fontSize: '20px' }}>{openPlayer.first_name} {openPlayer.last_name}</h3>
+                    <div style={{ color: '#94a3b8', fontSize: '13px' }}>
+                      {openPlayer.position}
+                      {openPlayer.team_name && ` · ${openPlayer.team_name}`}
+                      {` · Age ${openPlayer.age}`}
+                      {openPlayer.origin && ` · ${openPlayer.origin}`}
+                    </div>
+                  </div>
+                  <button onClick={() => setOpenPlayer(null)} style={{ background: 'none', border: 'none', color: '#64748b', fontSize: '20px', cursor: 'pointer', lineHeight: 1 }}>✕</button>
+                </div>
+
+                {/* Overall + key attributes */}
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px', marginBottom: '16px' }}>
+                  <div style={{ textAlign: 'center', background: '#0f172a', borderRadius: '6px', padding: '10px' }}>
+                    <div style={{ fontSize: '28px', fontWeight: 'bold', color: openPlayer.overall_rating >= 80 ? '#22c55e' : openPlayer.overall_rating >= 65 ? '#f59e0b' : '#ef4444' }}>
+                      {openPlayer.overall_rating}
+                    </div>
+                    <div style={{ fontSize: '11px', color: '#64748b' }}>OVR</div>
+                  </div>
+                  {openPlayer.contact != null && (
+                    <div style={{ textAlign: 'center', background: '#0f172a', borderRadius: '6px', padding: '10px' }}>
+                      <div style={{ fontSize: '20px', fontWeight: 'bold' }}>{openPlayer.contact}</div>
+                      <div style={{ fontSize: '11px', color: '#64748b' }}>Contact</div>
+                    </div>
+                  )}
+                  {openPlayer.power != null && (
+                    <div style={{ textAlign: 'center', background: '#0f172a', borderRadius: '6px', padding: '10px' }}>
+                      <div style={{ fontSize: '20px', fontWeight: 'bold' }}>{openPlayer.power}</div>
+                      <div style={{ fontSize: '11px', color: '#64748b' }}>Power</div>
+                    </div>
+                  )}
+                  {openPlayer.pitching_velocity != null && (
+                    <div style={{ textAlign: 'center', background: '#0f172a', borderRadius: '6px', padding: '10px' }}>
+                      <div style={{ fontSize: '20px', fontWeight: 'bold' }}>{openPlayer.pitching_velocity}</div>
+                      <div style={{ fontSize: '11px', color: '#64748b' }}>Velocity</div>
+                    </div>
+                  )}
+                  {openPlayer.pitching_control != null && (
+                    <div style={{ textAlign: 'center', background: '#0f172a', borderRadius: '6px', padding: '10px' }}>
+                      <div style={{ fontSize: '20px', fontWeight: 'bold' }}>{openPlayer.pitching_control}</div>
+                      <div style={{ fontSize: '11px', color: '#64748b' }}>Control</div>
+                    </div>
+                  )}
+                  {openPlayer.speed != null && (
+                    <div style={{ textAlign: 'center', background: '#0f172a', borderRadius: '6px', padding: '10px' }}>
+                      <div style={{ fontSize: '20px', fontWeight: 'bold' }}>{openPlayer.speed}</div>
+                      <div style={{ fontSize: '11px', color: '#64748b' }}>Speed</div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Career stats */}
+                <div style={{ background: '#0f172a', borderRadius: '6px', padding: '12px', marginBottom: '12px' }}>
+                  <div style={{ fontSize: '11px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '8px' }}>Career Stats</div>
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', fontSize: '13px' }}>
+                    {openPlayer.career_hr > 0 && <div><span style={{ color: '#64748b' }}>HR </span>{openPlayer.career_hr}</div>}
+                    {openPlayer.career_hits > 0 && <div><span style={{ color: '#64748b' }}>H </span>{openPlayer.career_hits}</div>}
+                    {openPlayer.career_rbi > 0 && <div><span style={{ color: '#64748b' }}>RBI </span>{openPlayer.career_rbi}</div>}
+                    {openPlayer.career_wins > 0 && <div><span style={{ color: '#64748b' }}>W </span>{openPlayer.career_wins}</div>}
+                    {openPlayer.career_k > 0 && <div><span style={{ color: '#64748b' }}>K </span>{openPlayer.career_k}</div>}
+                    {openPlayer.career_ip > 0 && <div><span style={{ color: '#64748b' }}>IP </span>{openPlayer.career_ip.toFixed(1)}</div>}
+                  </div>
+                </div>
+
+                {/* Contract */}
+                <div style={{ display: 'flex', gap: '16px', fontSize: '13px', color: '#94a3b8' }}>
+                  <span>Salary: {fmt$(openPlayer.annual_salary)}</span>
+                  <span>Years left: {openPlayer.contract_years_remaining}</span>
+                  {openPlayer.is_injured && <span style={{ color: '#ef4444' }}>🤕 Injured{openPlayer.injury_type ? ` (${openPlayer.injury_type})` : ''}</span>}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
