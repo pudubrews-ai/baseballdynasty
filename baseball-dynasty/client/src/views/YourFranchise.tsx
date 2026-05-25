@@ -3,6 +3,7 @@
 // Browse Any Org: pure client-side view toggle — never POST to change owned team (CISO V5-3).
 
 import React, { useState, useEffect } from 'react';
+import { ordinal } from '../utils';
 
 interface TeamOption {
   id: number;
@@ -245,7 +246,7 @@ export default function YourFranchise({ ownedTeamId }: Props) {
             </h2>
             <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap', color: '#94a3b8', fontSize: '13px' }}>
               <span>{dashboard.record.wins}W - {dashboard.record.losses}L ({dashboard.record.win_pct.toFixed(3)})</span>
-              <span>{dashboard.standings_position === 1 ? '1st' : `${dashboard.standings_position}${['th','st','nd','rd'][Math.min(3, ((dashboard.standings_position % 100) - 20) % 10) || 0] ?? 'th'}`} in {dashboard.division}</span>
+              <span>{ordinal(dashboard.standings_position)} in {dashboard.division}</span>
               <span style={{ textTransform: 'capitalize' }}>{dashboard.market_size} market</span>
               {dashboard.streaks.winning_streak >= 5 && (
                 <span style={{ color: '#22c55e' }}>W{dashboard.streaks.winning_streak} streak</span>

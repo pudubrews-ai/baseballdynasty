@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { getTeams, getTeam, getTeamRoster, getTeamMinors, getTeamHistory, getTeamFinancials } from '../api.js';
 import { useLeagueState } from '../hooks/useLeagueState.js';
+import { ordinal } from '../utils';
 
 interface WaiverEntry {
   player_id: number;
@@ -433,7 +434,7 @@ export default function Teams() {
                         <span style={{ color: r.won_championship ? '#f59e0b' : '#64748b' }}>
                           {r.won_championship ? 'Champion' : r.playoff_round !== 'missed' ? `${r.playoff_round}` : 'Missed playoffs'}
                         </span>
-                        {r.division_finish && <span style={{ color: '#94a3b8' }}>Div {r.division_finish}</span>}
+                        {r.division_finish && <span style={{ color: '#94a3b8' }}>Div {ordinal(r.division_finish)}</span>}
                       </div>
                     ))}
                   </div>
