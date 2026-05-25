@@ -7,6 +7,7 @@ import { runAnnualDraft } from './draft.js';
 import { callSeasonNarrative } from '../services/llm.js';
 import { insertTransactionNewsItem, insertFrontOfficeNewsItem } from './news.js';
 import { getFranchiseState, resetGmConfidence } from './franchise.js';
+import { classifySale, checkRelocationThreat, setRelocationThreat, resolveRelocation } from './sales.js';
 
 const GM_PHILOSOPHIES: Array<'win-now' | 'rebuild' | 'balanced'> = ['win-now', 'rebuild', 'balanced'];
 const GM_RISK_TOLERANCES: Array<'conservative' | 'moderate' | 'aggressive'> = ['conservative', 'moderate', 'aggressive'];
@@ -21,7 +22,7 @@ export async function runOffseason(league: LeagueRow, isTurbo: boolean): Promise
 
   console.log(`[offseason] Starting from step: ${currentStep}`);
 
-  const steps = ['season_archive', 'retirement', 'development', 'non_tender', 'free_agency', 'hof_voting', 'financial_update', 'front_office', 'annual_draft', 'done'];
+  const steps = ['season_archive', 'retirement', 'development', 'non_tender', 'free_agency', 'hof_voting', 'financial_update', 'front_office', 'relocation_resolve', 'annual_draft', 'done'];
   const startIdx = steps.indexOf(currentStep);
 
   // §1.2 Iter-5: Import pause-check for cooperative offseason cancellation
@@ -55,6 +56,9 @@ export async function runOffseason(league: LeagueRow, isTurbo: boolean): Promise
         break;
       case 'front_office':
         await runFrontOfficeStep(leagueId, league.season_number, league.worldgen_seed ^ league.season_number);
+        break;
+      case 'relocation_resolve':
+        await runRelocationResolveStep(leagueId, league.season_number, league.worldgen_seed);
         break;
       case 'annual_draft':
         await runAnnualDraftStep(league, isTurbo);
@@ -1259,14 +1263,16 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
       const newLast = ['Thompson', 'Anderson', 'Taylor', 'Moore', 'Jackson'][Math.floor(rng() * 5)] ?? 'Thompson';
       const newPersonality = OWNER_PERSONALITIES[Math.floor(rng() * OWNER_PERSONALITIES.length)] ?? 'moderate';
 
-      const saleReason = `Sold franchise after Season ${seasonNumber}. New ownership group takes control.`;
-      const saleHeadline = `${team.owner_name} sells franchise, ${team.city} ${team.name} — ${saleReason}`;
+      // Step 14: Classify the sale type and compute sale price
+      const saleClassification = classifySale(team, leagueId, seasonNumber, false, seed);
+      const saleReason = `Sold franchise after Season ${seasonNumber} (${saleClassification.saleType} sale, $${saleClassification.salePrice}M). New ownership group takes control.`;
+      const saleHeadline = `${team.owner_name} sells franchise, ${team.city} ${team.name} — ${saleClassification.saleType} sale`;
       const soldFoeResult = db.prepare(
         'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, reason, hired_person_context, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)'
       ).run(
         leagueId, seasonNumber, team.id, 'owner_sold_team',
         team.owner_name, `${newFirst} ${newLast}`,
-        `${team.owner_name} sells the franchise to ${newFirst} ${newLast}.`,
+        `${team.owner_name} sells the franchise to ${newFirst} ${newLast} for $${saleClassification.salePrice}M (${saleClassification.saleType} sale).`,
         saleReason, Date.now()
       );
 
@@ -1280,7 +1286,10 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
         sourceTable: 'front_office_events',
         sourceId: soldFoeResult.lastInsertRowid as number,
         headlineText: saleHeadline,
-        detailsJson: JSON.stringify({ reason: saleReason, eventType: 'owner_sold_team', teamId: team.id }),
+        detailsJson: JSON.stringify({
+          reason: saleReason, eventType: 'owner_sold_team', teamId: team.id,
+          saleType: saleClassification.saleType, salePrice: saleClassification.salePrice,
+        }),
       });
 
       // D6a: transaction parity row
@@ -1290,6 +1299,11 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
 
       db.prepare('UPDATE teams SET owner_name = ?, owner_personality = ? WHERE id = ?')
         .run(`${newFirst} ${newLast}`, newPersonality, team.id);
+
+      // Step 14: Check if new owner triggers a relocation threat (H-1: flag only, resolve at season end)
+      if (checkRelocationThreat(team, leagueId, seasonNumber)) {
+        setRelocationThreat(team.id, leagueId, seasonNumber, 0);
+      }
     }
 
     // §5.9: 0.5% owner death (weighted by age)
@@ -1298,7 +1312,9 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
       const heirFirst = ['Robert', 'Henry', 'Arthur', 'Charles', 'Winston'][Math.floor(rng() * 5)] ?? 'Robert';
       const heirLast = team.owner_name.split(' ')[1] ?? 'Heir'; // Same surname for heir
 
-      const deathReason = `Passed away during Season ${seasonNumber}. Succeeded by ${heirFirst} ${heirLast}.`;
+      // Step 14: Classify as succession sale (owner death)
+      const deathSaleClassification = classifySale(team, leagueId, seasonNumber, true, seed);
+      const deathReason = `Passed away during Season ${seasonNumber}. Succeeded by ${heirFirst} ${heirLast}. Franchise valued at $${deathSaleClassification.salePrice}M (succession).`;
       const deathHeadline = `${team.owner_name} passes away, ${team.city} ${team.name} — ${deathReason}`;
       const diedFoeResult = db.prepare(
         'INSERT INTO front_office_events (league_id, season_number, team_id, event_type, departing_person, incoming_person, narrative, reason, hired_person_context, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)'
@@ -1319,7 +1335,10 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
         sourceTable: 'front_office_events',
         sourceId: diedFoeResult.lastInsertRowid as number,
         headlineText: deathHeadline,
-        detailsJson: JSON.stringify({ reason: deathReason, eventType: 'owner_died', teamId: team.id }),
+        detailsJson: JSON.stringify({
+          reason: deathReason, eventType: 'owner_died', teamId: team.id,
+          saleType: deathSaleClassification.saleType, salePrice: deathSaleClassification.salePrice,
+        }),
       });
 
       // D6a: transaction parity row
@@ -1329,11 +1348,49 @@ async function runFrontOfficeStep(leagueId: number, seasonNumber: number, seed: 
 
       const heirPersonality = OWNER_PERSONALITIES[Math.floor(rng() * OWNER_PERSONALITIES.length)] ?? 'moderate';
       db.prepare('UPDATE teams SET owner_name = ?, owner_personality = ? WHERE id = ?').run(`${heirFirst} ${heirLast}`, heirPersonality, team.id);
+
+      // Step 14: Check relocation threat after succession (heir may face same market pressures)
+      if (checkRelocationThreat(team, leagueId, seasonNumber)) {
+        setRelocationThreat(team.id, leagueId, seasonNumber, 0);
+      }
     }
   }
 
   // NOTE: W/L reset moved to finalizeOffseason() — must happen AFTER annual_draft reads standings (§2.6)
   console.log(`[offseason] Front office changes complete`);
+}
+
+// Step 14: Relocation resolution — fires at season end for all teams with active threats (H-1)
+async function runRelocationResolveStep(leagueId: number, seasonNumber: number, worldgenSeed: number): Promise<void> {
+  const db = getDb();
+  const threatenedTeams = prepared(
+    'SELECT * FROM teams WHERE league_id = ? AND relocation_threat_active = 1'
+  ).all(leagueId) as TeamRow[];
+
+  if (threatenedTeams.length === 0) {
+    console.log(`[offseason] Relocation resolve: no threatened teams for season ${seasonNumber}`);
+    return;
+  }
+
+  for (const team of threatenedTeams) {
+    resolveRelocation(team, leagueId, seasonNumber, worldgenSeed);
+  }
+
+  // Also check for NEW threats arising mid-offseason (teams that just sold but weren't flagged yet)
+  // Re-run checkRelocationThreat for all teams — the function guards against double-flagging.
+  const allTeams = prepared(
+    'SELECT * FROM teams WHERE league_id = ? AND relocation_threat_active = 0'
+  ).all(leagueId) as TeamRow[];
+
+  let newThreats = 0;
+  for (const team of allTeams) {
+    if (checkRelocationThreat(team, leagueId, seasonNumber)) {
+      setRelocationThreat(team.id, leagueId, seasonNumber, 0);
+      newThreats++;
+    }
+  }
+
+  console.log(`[offseason] Relocation resolve: resolved ${threatenedTeams.length} threat(s), flagged ${newThreats} new threat(s) for season ${seasonNumber}`);
 }
 
 // Step 5: Annual draft
