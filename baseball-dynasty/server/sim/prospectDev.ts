@@ -97,8 +97,9 @@ function synthesizeMinorStats(
 ): void {
   const minorLeaguers = db.prepare(
     `SELECT * FROM players
-     WHERE team_id = ? AND minor_level IS NOT NULL AND is_drafted = 1`
-  ).all(team.id) as PlayerRow[];
+     WHERE team_id = ? AND minor_level IS NOT NULL AND is_drafted = 1
+       AND rehab_games_remaining = 0`
+  ).all(team.id) as PlayerRow[]; // Step 10 F-3: exclude rehab players from stat synthesis
 
   for (const player of minorLeaguers) {
     const statRng = seedFor(`minor_stat_${player.id}_${currentGameNumber}`, worldgenSeed);

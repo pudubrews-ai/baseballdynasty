@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { getPlayerLeaders, getPlayer, searchPlayers } from '../api.js';
+import { getPlayerLeaders, getPlayer, searchPlayers, getProspects } from '../api.js';
 import { useLeagueState } from '../hooks/useLeagueState.js';
 
 // §2.6: Updated StatLeader interface to match new API shape {hitting, pitching}
@@ -36,6 +36,12 @@ interface PlayerCard {
   career_ip: number;
   career_k: number;
   career_wins: number;
+  // P5: personality / v0.4.0 fields
+  trade_demand_active?: boolean;
+  memorial?: boolean;
+  gambling_ban?: boolean;
+  ped_offenses?: number;
+  retired_number?: number | null;
 }
 
 // §2.6: Updated Leaders interface to match {hitting: [...], pitching: [...]}
@@ -44,16 +50,32 @@ interface Leaders {
   pitching: StatLeader[];
 }
 
+// P2.2: Top Prospects interface for Players tab
+interface ProspectRow {
+  rank: number;
+  player_id: number;
+  name: string;
+  position: string;
+  age: number;
+  level: string | null;
+  team_name: string | null;
+  overall: number;
+  potential: string;
+}
+
 export default function Players() {
   const { state } = useLeagueState();
   const [leaders, setLeaders] = useState<Leaders>({ hitting: [], pitching: [] });
+  const [prospects, setProspects] = useState<ProspectRow[]>([]);
   const [selectedPlayer, setSelectedPlayer] = useState<PlayerCard | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<unknown[]>([]);
   const [activeCategory, setActiveCategory] = useState<string>('AVG');
+  const [showProspects, setShowProspects] = useState(false);
 
   useEffect(() => {
     getPlayerLeaders().then(data => setLeaders(data as Leaders)).catch(console.error);
+    getProspects().then(data => setProspects(data as ProspectRow[])).catch(console.error);
   }, [state?.currentGameNumber]);
 
   const handleSearch = async (q: string) => {
@@ -93,6 +115,21 @@ export default function Players() {
   return (
     <div>
       <h2 style={{ marginTop: 0 }}>Players</h2>
+      {/* P2.2: Top Prospects toggle — additive to stat leaders */}
+      <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+        <button
+          onClick={() => setShowProspects(false)}
+          style={{ background: !showProspects ? '#3b82f6' : '#334155', color: 'white', border: 'none', padding: '4px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}
+        >
+          Stat Leaders
+        </button>
+        <button
+          onClick={() => setShowProspects(true)}
+          style={{ background: showProspects ? '#3b82f6' : '#334155', color: 'white', border: 'none', padding: '4px 12px', borderRadius: '4px', cursor: 'pointer', fontSize: '12px' }}
+        >
+          Top Prospects
+        </button>
+      </div>
 
       {/* Search */}
       <div style={{ marginBottom: '16px' }}>
@@ -123,53 +160,99 @@ export default function Players() {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px' }}>
-        {/* Stat leaders */}
+        {/* Stat leaders / Top Prospects */}
         <div>
-          <div style={{ display: 'flex', gap: '6px', marginBottom: '12px', flexWrap: 'wrap' }}>
-            {CATEGORIES.map(cat => (
-              <button
-                key={cat.key}
-                onClick={() => setActiveCategory(cat.key)}
-                style={{
-                  background: activeCategory === cat.key ? '#3b82f6' : '#334155',
-                  color: 'white', border: 'none', padding: '4px 10px',
-                  borderRadius: '4px', cursor: 'pointer', fontSize: '12px'
-                }}
-              >
-                {cat.label}
-              </button>
-            ))}
-          </div>
+          {!showProspects ? (
+            <>
+              <div style={{ display: 'flex', gap: '6px', marginBottom: '12px', flexWrap: 'wrap' }}>
+                {CATEGORIES.map(cat => (
+                  <button
+                    key={cat.key}
+                    onClick={() => setActiveCategory(cat.key)}
+                    style={{
+                      background: activeCategory === cat.key ? '#3b82f6' : '#334155',
+                      color: 'white', border: 'none', padding: '4px 10px',
+                      borderRadius: '4px', cursor: 'pointer', fontSize: '12px'
+                    }}
+                  >
+                    {cat.label}
+                  </button>
+                ))}
+              </div>
 
-          <table data-testid="player-leaders-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
-            <thead>
-              <tr style={{ background: '#1e293b', color: '#94a3b8' }}>
-                <th style={{ padding: '6px', textAlign: 'left' }}>#</th>
-                <th style={{ padding: '6px', textAlign: 'left' }}>Player</th>
-                <th style={{ padding: '6px', textAlign: 'left' }}>Team</th>
-                <th style={{ padding: '6px', textAlign: 'right' }}>{activeCat?.label}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {/* §2.6: Render using new data shape */}
-              {activeLeaders.map((leader, idx) => (
-                <tr
-                  key={`${leader.player_name}-${idx}`}
-                  style={{ borderBottom: '1px solid #1e293b' }}
-                >
-                  <td style={{ padding: '6px', color: '#64748b' }}>{idx + 1}</td>
-                  <td style={{ padding: '6px' }}>{leader.player_name}</td>
-                  <td style={{ padding: '6px', color: '#94a3b8', fontSize: '12px' }}>{leader.team_name}</td>
-                  <td style={{ padding: '6px', textAlign: 'right', fontWeight: 'bold' }}>
-                    {activeCat.format(leader.stat_value)}
-                  </td>
-                </tr>
-              ))}
-              {activeLeaders.length === 0 && (
-                <tr><td colSpan={4} style={{ padding: '12px', color: '#64748b', textAlign: 'center' }}>No data yet</td></tr>
+              <table data-testid="player-leaders-table" style={{ width: '100%', borderCollapse: 'collapse', fontSize: '13px' }}>
+                <thead>
+                  <tr style={{ background: '#1e293b', color: '#94a3b8' }}>
+                    <th style={{ padding: '6px', textAlign: 'left' }}>#</th>
+                    <th style={{ padding: '6px', textAlign: 'left' }}>Player</th>
+                    <th style={{ padding: '6px', textAlign: 'left' }}>Team</th>
+                    <th style={{ padding: '6px', textAlign: 'right' }}>{activeCat?.label}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {/* §2.6: Render using new data shape */}
+                  {activeLeaders.map((leader, idx) => (
+                    <tr
+                      key={`${leader.player_name}-${idx}`}
+                      style={{ borderBottom: '1px solid #1e293b' }}
+                    >
+                      <td style={{ padding: '6px', color: '#64748b' }}>{idx + 1}</td>
+                      <td style={{ padding: '6px' }}>{leader.player_name}</td>
+                      <td style={{ padding: '6px', color: '#94a3b8', fontSize: '12px' }}>{leader.team_name}</td>
+                      <td style={{ padding: '6px', textAlign: 'right', fontWeight: 'bold' }}>
+                        {activeCat.format(leader.stat_value)}
+                      </td>
+                    </tr>
+                  ))}
+                  {activeLeaders.length === 0 && (
+                    <tr><td colSpan={4} style={{ padding: '12px', color: '#64748b', textAlign: 'center' }}>No data yet</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </>
+          ) : (
+            /* P2.2: Top Prospects leaderboard in Players tab */
+            <div data-testid="prospects-leaderboard">
+              <h3 style={{ marginTop: 0, marginBottom: '8px', fontSize: '14px', color: '#f1f5f9' }}>
+                Top 50 Prospects
+              </h3>
+              {prospects.length === 0 ? (
+                <p style={{ color: '#64748b', fontSize: '13px' }}>No prospects ranked yet</p>
+              ) : (
+                <div style={{ fontSize: '12px' }}>
+                  {prospects.map(p => (
+                    <div
+                      key={p.player_id}
+                      data-testid={`prospect-row-${p.player_id}`}
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '2rem 1fr 3rem 2rem 3rem 3rem 3rem 3rem',
+                        padding: '3px 0',
+                        borderBottom: '1px solid #1e293b',
+                        gap: '4px',
+                      }}
+                    >
+                      <span style={{ color: '#64748b' }}>{p.rank}</span>
+                      <span>{p.name}</span>
+                      <span style={{ color: '#94a3b8' }}>{p.position}</span>
+                      <span>{p.age}</span>
+                      <span style={{ color: '#60a5fa' }}>{p.level ?? '—'}</span>
+                      <span>{p.overall}</span>
+                      <span style={{
+                        color: p.potential === 'A' ? '#10b981'
+                          : p.potential === 'B' ? '#3b82f6'
+                          : p.potential === 'C' ? '#f59e0b'
+                          : '#94a3b8',
+                      }}>
+                        {p.potential}
+                      </span>
+                      <span style={{ fontSize: '10px', color: '#64748b' }}>{p.team_name ?? 'FA'}</span>
+                    </div>
+                  ))}
+                </div>
               )}
-            </tbody>
-          </table>
+            </div>
+          )}
         </div>
 
         {/* Player card */}
@@ -179,12 +262,50 @@ export default function Players() {
             style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '16px' }}
           >
             <h3 style={{ marginTop: 0, marginBottom: '4px' }}>
+              {selectedPlayer.memorial && <span style={{ color: '#9ca3af', fontSize: '14px', marginRight: '6px' }}>✝</span>}
               {selectedPlayer.first_name} {selectedPlayer.last_name}
+              {selectedPlayer.retired_number != null && (
+                <span style={{ color: '#f59e0b', fontSize: '12px', marginLeft: '6px' }}>#{selectedPlayer.retired_number} (Retired)</span>
+              )}
             </h3>
             <div style={{ color: '#94a3b8', fontSize: '13px', marginBottom: '12px' }}>
               {selectedPlayer.position} · Age {selectedPlayer.age}
               {selectedPlayer.team_name && <span> · {selectedPlayer.team_name}</span>}
             </div>
+            {/* P5: trade demand badge (spec §9) */}
+            {selectedPlayer.trade_demand_active && (
+              <div
+                data-testid="player-trade-demand-badge"
+                style={{
+                  display: 'inline-block',
+                  background: '#7c3aed22', border: '1px solid #7c3aed',
+                  color: '#a78bfa', fontSize: '11px', fontWeight: 700,
+                  padding: '2px 8px', borderRadius: '4px', marginBottom: '8px',
+                }}
+              >
+                TRADE DEMAND
+              </div>
+            )}
+            {/* NF-5: gambling ban overlay marker */}
+            {selectedPlayer.gambling_ban && (
+              <div style={{
+                display: 'inline-block', background: '#dc262622', border: '1px solid #dc2626',
+                color: '#f87171', fontSize: '11px', fontWeight: 700,
+                padding: '2px 8px', borderRadius: '4px', marginBottom: '8px', marginLeft: '4px',
+              }}>
+                [GAMBLING BAN]
+              </div>
+            )}
+            {/* NF-5: PED flag */}
+            {(selectedPlayer.ped_offenses ?? 0) > 0 && (
+              <div style={{
+                display: 'inline-block', background: '#d9770622', border: '1px solid #d97706',
+                color: '#fbbf24', fontSize: '11px', fontWeight: 700,
+                padding: '2px 8px', borderRadius: '4px', marginBottom: '8px', marginLeft: '4px',
+              }}>
+                [PED ×{selectedPlayer.ped_offenses}]
+              </div>
+            )}
 
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', fontSize: '13px', marginBottom: '12px' }}>
               <div style={{ background: '#0f172a', borderRadius: '6px', padding: '8px' }}>

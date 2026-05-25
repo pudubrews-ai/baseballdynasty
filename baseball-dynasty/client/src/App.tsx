@@ -8,6 +8,8 @@ import Players from './views/Players.js';
 import Timeline from './views/Timeline.js';
 import News from './views/News.js';
 import Watch from './views/Watch.js';
+import HallOfFame from './views/HallOfFame.js';
+import MinorsStandings from './views/MinorsStandings.js';
 import FranchiseSelection from './views/FranchiseSelection.js';
 import { createLeague, deleteLeague } from './api.js';
 
@@ -60,7 +62,7 @@ function NewsTicker({ lastNewsId }: { lastNewsId: number }) {
   );
 }
 
-type TabName = 'league' | 'teams' | 'games' | 'draft' | 'players' | 'timeline' | 'news' | 'watch';
+type TabName = 'league' | 'teams' | 'games' | 'draft' | 'players' | 'timeline' | 'news' | 'watch' | 'halloffame' | 'minors';
 
 interface FranchiseStateResponse {
   ownedTeamId: number | null;
@@ -172,6 +174,8 @@ function AppContent() {
     { id: 'players', label: 'Players' },
     { id: 'timeline', label: 'Timeline' },
     { id: 'news', label: 'News' },
+    { id: 'halloffame', label: 'Hall of Fame' },
+    { id: 'minors', label: 'Minors' },
     { id: 'watch', label: '▶ Watch' },
   ];
 
@@ -227,6 +231,8 @@ function AppContent() {
                 tab.id === 'news' ? 'news-tab'
                 : tab.id === 'watch' ? 'watch-tab'
                 : tab.id === 'timeline' ? 'timeline-tab'
+                : tab.id === 'halloffame' ? 'halloffame-tab'
+                : tab.id === 'minors' ? 'minors-tab'
                 : `nav-${tab.id}`
               }
               onClick={() => {
@@ -279,6 +285,8 @@ function AppContent() {
                 {activeTab === 'players' && <Players />}
                 {activeTab === 'timeline' && <Timeline />}
                 {activeTab === 'news' && <News />}
+                {activeTab === 'halloffame' && <HallOfFame />}
+                {activeTab === 'minors' && <MinorsStandings />}
                 {activeTab === 'watch' && <Watch />}
               </>
             )}

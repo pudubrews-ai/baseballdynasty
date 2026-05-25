@@ -71,8 +71,12 @@ export function getTeamMinors(id: number): Promise<unknown[]> {
   return apiFetch(`/api/teams/${id}/minors`);
 }
 
-export function getTeamHistory(id: number): Promise<unknown[]> {
+export function getTeamHistory(id: number): Promise<unknown> {
   return apiFetch(`/api/teams/${id}/history`);
+}
+
+export function getTeamFinancials(id: number): Promise<unknown> {
+  return apiFetch(`/api/teams/${id}/financials`);
 }
 
 export function getPlayer(id: number): Promise<unknown> {
@@ -101,4 +105,12 @@ export function getTimeline(): Promise<unknown[]> {
 
 export function getTransactions(): Promise<unknown[]> {
   return apiFetch('/api/transactions');
+}
+
+export function getMinorsStandings(): Promise<unknown> {
+  return apiFetch('/api/minors/standings');
+}
+
+export function getProspects(): Promise<unknown[]> {
+  return apiFetch('/api/players/prospects');
 }

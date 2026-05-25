@@ -6,6 +6,8 @@
 import { getDb, prepared, type PlayerRow, type TeamRow } from '../db.js';
 import { seedFor, randInt, randTriangular, shuffle } from './prng.js';
 import type { NotableEvent } from '../../shared/types.js';
+import { assignInjury } from './injury.js';
+import { chemistryWinProbEffect } from './personality.js';
 
 export interface BatterBoxLine {
   playerId: number;
@@ -56,8 +58,9 @@ const POSITIONS_ORDER = ['C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'DH'];
 // D6: Select lineup — top 9 position players by overall, one per position
 // AB-11: use is_on_25man=1 for the active 25-man roster (not is_on_mlb_roster)
 export function selectLineup(team: TeamRow): PlayerRow[] {
+  // Step 12 (G-1): exclude suspended players from lineup — keep is_on_25man=1 for cap accounting
   const roster = prepared(
-    'SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position NOT IN (\'SP\',\'RP\',\'CL\') ORDER BY overall_rating DESC'
+    "SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position NOT IN ('SP','RP','CL') AND suspension_games_remaining = 0 ORDER BY overall_rating DESC"
   ).all(team.id) as PlayerRow[];
 
   const lineup: PlayerRow[] = [];
@@ -97,8 +100,9 @@ export function selectLineup(team: TeamRow): PlayerRow[] {
 // D6: Select starting pitcher — rotates by team game count mod 5
 // AB-11: use is_on_25man=1 for active 25-man roster
 export function selectStartingPitcher(team: TeamRow): PlayerRow | null {
+  // Step 12 (G-1): exclude suspended pitchers
   const starters = prepared(
-    'SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position = \'SP\' ORDER BY overall_rating DESC LIMIT 5'
+    "SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position = 'SP' AND suspension_games_remaining = 0 ORDER BY overall_rating DESC LIMIT 5"
   ).all(team.id) as PlayerRow[];
 
   if (starters.length === 0) return null;
@@ -125,12 +129,12 @@ function winProbability(homeTeam: TeamRow, awayTeam: TeamRow, gameId: number): n
   const homeStarterRating = homeStarter?.overall_rating ?? 50;
   const awayStarterRating = awayStarter?.overall_rating ?? 50;
 
-  // Use mean overall of RP+CL for bullpen_avg (per D6)
+  // Use mean overall of RP+CL for bullpen_avg (per D6) — Step 12 (G-1): exclude suspended
   const homeBullpen = prepared(
-    "SELECT overall_rating FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL')"
+    "SELECT overall_rating FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL') AND suspension_games_remaining = 0"
   ).all(homeTeam.id) as Array<{ overall_rating: number }>;
   const awayBullpen = prepared(
-    "SELECT overall_rating FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL')"
+    "SELECT overall_rating FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL') AND suspension_games_remaining = 0"
   ).all(awayTeam.id) as Array<{ overall_rating: number }>;
 
   const homeBullpenAvg = homeBullpen.length > 0
@@ -145,6 +149,33 @@ function winProbability(homeTeam: TeamRow, awayTeam: TeamRow, gameId: number): n
     + (homeLineupAvg - awayLineupAvg) * 0.004
     + (homeBullpenAvg - awayBullpenAvg) * 0.002
     + 0.04; // home field advantage
+
+  // Step 11/13 (O-7): morale_effect_bp — sum of active unexpired morale effects for each team
+  // morale_effect_bp is in basis points; morale_effect_bp / 10000 = fractional probability
+  // Expired when current_game_number > morale_effect_until_game
+  const homeMorale = prepared(
+    `SELECT COALESCE(AVG(morale_effect_bp), 0) as avg_bp
+     FROM players
+     WHERE team_id = ? AND is_on_25man = 1
+       AND morale_effect_bp != 0
+       AND (morale_effect_until_game IS NULL OR morale_effect_until_game >= ?)`
+  ).get(homeTeam.id, gameId) as { avg_bp: number } | undefined;
+  const awayMorale = prepared(
+    `SELECT COALESCE(AVG(morale_effect_bp), 0) as avg_bp
+     FROM players
+     WHERE team_id = ? AND is_on_25man = 1
+       AND morale_effect_bp != 0
+       AND (morale_effect_until_game IS NULL OR morale_effect_until_game >= ?)`
+  ).get(awayTeam.id, gameId) as { avg_bp: number } | undefined;
+
+  prob += (homeMorale?.avg_bp ?? 0) / 10000;
+  prob -= (awayMorale?.avg_bp ?? 0) / 10000; // away morale hurts home team
+
+  // Step 13: Chemistry win-prob effect (server-computed, never client-writable)
+  const homeChemEffect = chemistryWinProbEffect(homeTeam.chemistry_score ?? 50);
+  const awayChemEffect = chemistryWinProbEffect(awayTeam.chemistry_score ?? 50);
+  prob += homeChemEffect / 10000;
+  prob -= awayChemEffect / 10000;
 
   // Clamp to [0.15, 0.85]
   return Math.max(0.15, Math.min(0.85, prob));
@@ -259,12 +290,12 @@ export async function simulateGame(
     return;
   }
 
-  // Get bullpens
+  // Get bullpens — Step 12 (G-1): exclude suspended relievers
   const homeBullpen = prepared(
-    "SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL') ORDER BY overall_rating DESC"
+    "SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL') AND suspension_games_remaining = 0 ORDER BY overall_rating DESC"
   ).all(homeTeam.id) as PlayerRow[];
   const awayBullpen = prepared(
-    "SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL') ORDER BY overall_rating DESC"
+    "SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL') AND suspension_games_remaining = 0 ORDER BY overall_rating DESC"
   ).all(awayTeam.id) as PlayerRow[];
 
   // Generate batter box lines
@@ -324,11 +355,12 @@ export async function simulateGame(
     p.save = p.playerId === savePitcherId;
   }
 
-  // Generate notable events
+  // Generate notable events (gameNumber passed for injury seeding and season-ending duration)
+  const totalSeasonGames = 500; // 20 teams × 50 games / 2
   const notableEvents = generateNotableEvents(
     rng, homeBatterLines, awayBatterLines, homeTeam, awayTeam,
     homeScore, awayScore, homePitcherLines, awayPitcherLines,
-    isWalkOff, leagueId, seasonNumber
+    isWalkOff, leagueId, seasonNumber, gameNumber, totalSeasonGames
   );
 
   // §5.8: In-game injury truncation
@@ -425,16 +457,26 @@ export async function simulateGame(
 
     const actualGameId = gameResult.lastInsertRowid as number;
 
-    // AB-10 Part A: Vacate 25-man slot for injured players immediately on game write.
+    // AB-10 Part A + Step 10: Vacate 25-man slot and set all injury fields atomically.
     // This fires whether called from runGameTick (engine) or directly from tests.
     // Guard with is_on_25man=1 so we never double-injure or touch minor leaguers.
+    // engine.ts write site is suppressed for is_on_25man=0 (already updated here).
     for (const ev of notableEvents) {
       if (ev.type === 'injury' && ev.playerId) {
+        const ilGames = ev.recoveryGames ?? 7;
+        const injuryType = ev.injuryType ?? 'hamstring';
+        const injuryTier = ev.injuryTier ?? 'standard_il';
+        const rehabGames = ev.rehabGames ?? 0;
         db.prepare(
           `UPDATE players
-           SET is_injured = 1, is_on_25man = 0, injury_return_game = ?
+           SET is_injured = 1, is_on_25man = 0,
+               injury_return_game = ?,
+               injury_type = ?,
+               injury_tier = ?,
+               rehab_games_remaining = ?,
+               career_injuries = career_injuries + 1
            WHERE id = ? AND is_on_25man = 1`
-        ).run(gameNumber + (ev.recoveryGames ?? 7), ev.playerId);
+        ).run(gameNumber + ilGames, injuryType, injuryTier, rehabGames, ev.playerId);
       }
     }
 
@@ -721,7 +763,9 @@ function generateNotableEvents(
   awayPitcherLines: PitcherBoxLine[],
   isWalkOff: boolean,
   leagueId: number,
-  seasonNumber: number
+  seasonNumber: number,
+  gameNumber: number,
+  totalSeasonGames: number
 ): NotableEvent[] {
   const events: NotableEvent[] = [];
 
@@ -768,16 +812,27 @@ function generateNotableEvents(
     });
   }
 
-  // In-game injury (based on injury_prone attribute)
+  // In-game injury (based on injury_prone attribute) — Step 10: include tier/type/rehab
   for (const batter of [...homeBatterLines, ...awayBatterLines]) {
-    const player = prepared('SELECT * FROM players WHERE id = ?').get(batter.playerId) as PlayerRow | undefined;
+    const player = prepared('SELECT id, injury_prone, position, team_id FROM players WHERE id = ?').get(batter.playerId) as {
+      id: number; injury_prone: number; position: string; team_id: number | null;
+    } | undefined;
     if (player && player.injury_prone >= 7 && rng() < 0.05) {
+      // Find the team's medical staff rating (home or away)
+      const playerTeam = player.team_id === homeTeam.id ? homeTeam : awayTeam;
+      const medStaff = (playerTeam as TeamRow & { medical_staff_rating?: number }).medical_staff_rating ?? 5;
+      const seasonGamesRemaining = Math.max(1, totalSeasonGames - gameNumber);
+      const injury = assignInjury(player.position, medStaff, gameNumber, player.id, seasonGamesRemaining);
+
       events.push({
         type: 'injury',
         playerId: batter.playerId,
         playerName: batter.playerName,
-        description: `${batter.playerName} left the game with an injury`,
-        recoveryGames: 3 + Math.floor(rng() * 13), // AB-10 Part A: 3-15 game IL stint
+        description: `${batter.playerName} left the game with a ${injury.type} injury (${injury.tier})`,
+        recoveryGames: injury.ilGames, // kept for backward compat (old write sites use this)
+        injuryType: injury.type,
+        injuryTier: injury.tier,
+        rehabGames: injury.rehabGames,
       });
     }
   }

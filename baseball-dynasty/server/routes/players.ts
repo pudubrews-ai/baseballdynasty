@@ -95,6 +95,52 @@ playersRouter.get('/leaders', async (req: Request, res: Response, next: NextFunc
   } catch (err) { next(err); }
 });
 
+// GET /api/players/prospects — league-wide top 50 by composite score
+// Static SQL only: weights are constants in the ORDER BY expression (check-no-template-sql.mjs gate)
+playersRouter.get('/prospects', async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const league = getActiveLeague();
+    if (!league) { res.json([]); return; }
+
+    // Potential letter → numeric: A=90, B=75, C=60, D=45
+    // Composite: potential_score*0.4 + current_overall*0.3 + (overall_rating as recent_performance proxy)*0.3
+    // Static parameterized query — weights are literals, no interpolation.
+    const prospects = prepared(
+      `SELECT p.id, p.first_name, p.last_name, p.position, p.age, p.minor_level,
+              p.overall_rating, p.potential, p.team_id,
+              t.city || ' ' || t.name AS team_name,
+              CASE p.potential WHEN 'A' THEN 90 WHEN 'B' THEN 75 WHEN 'C' THEN 60 ELSE 45 END AS potential_score,
+              (CASE p.potential WHEN 'A' THEN 90 WHEN 'B' THEN 75 WHEN 'C' THEN 60 ELSE 45 END * 0.4
+               + p.overall_rating * 0.3
+               + p.overall_rating * 0.3) AS composite_score
+       FROM players p
+       LEFT JOIN teams t ON t.id = p.team_id
+       WHERE p.league_id = ? AND p.minor_level IS NOT NULL AND p.is_drafted = 1
+         AND p.rehab_games_remaining = 0
+       ORDER BY composite_score DESC
+       LIMIT 50`
+    ).all(league.id) as Array<{
+      id: number; first_name: string; last_name: string; position: string; age: number;
+      minor_level: string | null; overall_rating: number; potential: string;
+      team_id: number | null; team_name: string | null;
+      potential_score: number; composite_score: number;
+    }>;
+
+    res.json(prospects.map((p, idx) => ({
+      rank: idx + 1,
+      player_id: p.id,
+      name: `${p.first_name} ${p.last_name}`,
+      position: p.position,
+      age: p.age,
+      level: p.minor_level,
+      team_id: p.team_id,
+      team_name: p.team_name,
+      overall: p.overall_rating,
+      potential: p.potential,
+    })));
+  } catch (err) { next(err); }
+});
+
 playersRouter.get('/search', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const league = getActiveLeague();
@@ -168,7 +214,10 @@ playersRouter.get('/:id', async (req: Request, res: Response, next: NextFunction
               coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country,
               is_drafted, career_hits, career_hr, career_rbi, career_ip, career_k, career_wins,
               is_on_25man, options_remaining, service_time_days, first_mlb_call_up_game, free_agent_eligible,
-              manipulation_delay_until_game, prospect_visible, waiver_state, dfa_team_id, claim_game_window_end
+              manipulation_delay_until_game, prospect_visible, waiver_state, dfa_team_id, claim_game_window_end,
+              injury_type, injury_tier, rehab_games_remaining, career_injuries, is_injured, injury_return_game,
+              trade_demand_active, memorial, gambling_ban, ped_offenses, retired_number,
+              suspension_games_remaining, suspension_type, is_malcontent, loyalty_discount_eligible
        FROM players WHERE id = ?`
     ).get(idResult.data) as PlayerRow | undefined;
     if (!player) { res.status(404).json({ error: 'Player not found' }); return; } // §2.16.2
@@ -215,6 +264,38 @@ playersRouter.get('/:id', async (req: Request, res: Response, next: NextFunction
       career_k: player.career_k,
       career_wins: player.career_wins,
       season_stats: seasonStats,
+      // Step 10: injury fields
+      is_injured: player.is_injured === 1,
+      injury_type: player.injury_type ?? null,
+      injury_tier: player.injury_tier ?? null,
+      rehab_games_remaining: player.rehab_games_remaining ?? 0,
+      career_injuries: player.career_injuries ?? 0,
+      injury_return_game: player.injury_return_game ?? null,
+      // Step 13 + 8: personality + suspension + memorial fields (NF-5, P5)
+      trade_demand_active: (player as any).trade_demand_active === 1,
+      is_malcontent: (player as any).is_malcontent === 1,
+      loyalty_discount_eligible: (player as any).loyalty_discount_eligible === 1,
+      suspension_games_remaining: (player as any).suspension_games_remaining ?? 0,
+      suspension_type: (player as any).suspension_type ?? null,
+      ped_offenses: (player as any).ped_offenses ?? 0,
+      gambling_ban: (player as any).gambling_ban === 1,
+      memorial: (player as any).memorial === 1,
+      retired_number: (player as any).retired_number ?? null,
+      // injury_history derived from transactions (notable_events type=injury)
+      injury_history: league
+        ? (prepared(
+            `SELECT t.season_number, t.narrative, t.created_at, t.team_id,
+                    tm.city || ' ' || tm.name AS team_name
+             FROM transactions t
+             LEFT JOIN teams tm ON tm.id = t.team_id
+             WHERE t.league_id = ? AND t.player_id = ? AND t.transaction_type = 'injury_il'
+             ORDER BY t.created_at DESC
+             LIMIT 20`
+          ).all(league.id, player.id) as Array<{
+            season_number: number; narrative: string | null; created_at: number;
+            team_id: number | null; team_name: string | null;
+          }>)
+        : [],
     });
   } catch (err) { next(err); }
 });

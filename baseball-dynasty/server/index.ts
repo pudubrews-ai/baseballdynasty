@@ -207,6 +207,10 @@ import { frontOfficeRouter } from './routes/frontOffice.js';
 import { watchRouter } from './routes/watch.js';
 import { franchiseRouter } from './routes/franchise.js';
 import { directivesRouter } from './routes/directives.js';
+// v0.4.0: new routes
+import { hallOfFameRouter } from './routes/halloffame.js';
+import { coachesRouter } from './routes/coaches.js';
+import { minorsRouter } from './routes/minors.js';
 
 app.use('/api/teams', teamsRouter);
 app.use('/api/players', playersRouter);
@@ -220,6 +224,10 @@ app.use('/api/front-office-events', frontOfficeRouter);
 app.use('/api/watch', watchRouter);
 app.use('/api/franchise', franchiseRouter);
 app.use('/api/directive', directivesRouter);
+// v0.4.0: new routes
+app.use('/api/halloffame', hallOfFameRouter);
+app.use('/api/coaches', coachesRouter);
+app.use('/api/minors', minorsRouter);
 
 // §2.9 / §3.2: Draft order endpoint — branches on phase (expansion vs annual)
 app.get('/api/draft/order', async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
@@ -258,6 +266,11 @@ app.get('/api/transactions', async (_req: Request, res: Response, next: NextFunc
 import { scrubError } from './util/scrub.js';
 
 app.use((err: unknown, _req: Request, res: Response, _next: NextFunction): void => {
+  // P6: body-parse SyntaxError → 400, never 500
+  if (err instanceof SyntaxError && 'status' in err && (err as { status: number }).status === 400 && 'body' in err) {
+    res.status(400).json({ error: 'invalid_json' });
+    return;
+  }
   console.error('[server]', scrubError(err));
   res.status(500).json({ error: 'internal_error' });
 });

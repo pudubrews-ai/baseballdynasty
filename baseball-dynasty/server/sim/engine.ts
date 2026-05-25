@@ -17,6 +17,9 @@ import { forceMinimumTrades } from './tradeDeadline.js';
 import { getLlmStatus, resetNewsCallsThisSeason } from '../services/llm.js';
 import { insertGameNewsItem, insertNewsItem, insertMilestoneNewsItem, fillPendingHeadlines, fillPendingTransactionFlavors } from './news.js';
 import { scrubError } from '../util/scrub.js';
+import { rollSuspensions } from './suspensions.js';
+import { rollMalcontent, rollTradeDemand, markPersonalityRollsDone } from './personality.js';
+import { runDispatcher } from './dispatcher.js';
 import type { LeagueStateSnapshot, SimSpeed } from '../../shared/types.js';
 import type { NewLeagueBodyType } from '../../shared/schemas.js';
 
@@ -404,6 +407,43 @@ async function runGameTick(league: LeagueRow): Promise<void> {
     return;
   }
 
+  // Step 12 + 13: Per-season rolls at game 1 — suspensions, malcontent, trade demand.
+  // Seeded rolls: re-rolling with same seed is idempotent; gated by personality_rolls_done_season.
+  if (nextGame.gameNumber === 1) {
+    try {
+      rollSuspensions(league.id, league.season_number, nextGame.gameNumber, league.worldgen_seed);
+    } catch (err) {
+      console.warn('[engine] Suspension roll error:', scrubError(err).message);
+    }
+    try {
+      const allTeams = prepared('SELECT * FROM teams WHERE league_id = ?').all(league.id) as TeamRow[];
+      for (const team of allTeams) {
+        rollMalcontent(league.id, league.season_number, nextGame.gameNumber, league.worldgen_seed, team);
+        rollTradeDemand(league.id, league.season_number, nextGame.gameNumber, league.worldgen_seed, team);
+      }
+      markPersonalityRollsDone(league.id, league.season_number);
+    } catch (err) {
+      console.warn('[engine] Personality roll error:', scrubError(err).message);
+    }
+  }
+
+  // Step 15: Dispatcher — ordered synchronous event handler (B-1).
+  // Priority 1 (Tragedy) fires BEFORE simulateGame; if it fires, pause and defer the game.
+  // Priorities 2-4 (gambling sweep, PED-3rd sweep, relocation threat) also run here.
+  // Priorities 5-6 (injury/suspension, cascade) are delegated to runRosterMaintenance below.
+  try {
+    const dispatchResult = runDispatcher(
+      league, nextGame.gameNumber, nextGame.homeTeamId, nextGame.awayTeamId
+    );
+    if (dispatchResult.tragedyFired) {
+      // Pause synchronously (setSimSpeed called here to avoid circular import with tragedy.ts)
+      await setSimSpeed('paused');
+      return;
+    }
+  } catch (err) {
+    console.warn('[engine] Dispatcher error:', scrubError(err).message);
+  }
+
   // Check trade deadline
   if (shouldFireTradeDeadline(league.id, league.season_number)) {
     fireTradeDeadline(league.id, league.season_number);
@@ -476,17 +516,15 @@ async function runGameTick(league: LeagueRow): Promise<void> {
                 gameNumber: nextGame.gameNumber,
                 playerId: ev.playerId,
                 teamId: teamId ?? nextGame.homeTeamId,
+                ...(ev.description ? { headlineText: ev.description } : {}),
                 sourceTable: 'game_log',
                 sourceId: gameRow.id,
               });
             } else if (ev.type === 'injury') {
-              // AB-10 Part A: vacate the 25-man slot so call-up Trigger 1 fires.
-              // Guard with is_on_25man=1 so we never double-injure or touch minor leaguers.
-              prepared(
-                `UPDATE players
-                 SET is_injured = 1, is_on_25man = 0, injury_return_game = ?
-                 WHERE id = ? AND is_on_25man = 1`
-              ).run(nextGame.gameNumber + (ev.recoveryGames ?? 7), ev.playerId);
+              // Step 10 (L6 double-write fix): game.ts already wrote injury fields atomically
+              // inside the game transaction (is_injured, is_on_25man, injury_type, injury_tier,
+              // rehab_games_remaining, career_injuries, injury_return_game). Do NOT write again here.
+              // Only insert the news item.
               insertNewsItem({
                 leagueId: league.id,
                 seasonNumber: league.season_number,

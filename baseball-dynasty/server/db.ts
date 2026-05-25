@@ -124,6 +124,8 @@ export interface LeagueRow {
   created_at: number;
   // v0.2.0 new columns
   spring_cuts_done_season: number | null;
+  // v0.4.0 new columns
+  memorial_patch_season: number | null;
 }
 
 export interface TeamRow {
@@ -169,6 +171,19 @@ export interface TeamRow {
   last_gm_firing_check_game: number;
   last_service_time_update_game: number;
   deadline_trades_this_season: number;
+  // v0.4.0 new columns
+  medical_staff_rating: number;
+  chemistry_score: number;
+  franchise_value: number;
+  stadium_deal_active: number;
+  relocation_threat_active: number;
+  original_city: string | null;
+  stadium_capacity: number;
+  founded_season: number;
+  luxury_tax_paid: number;
+  last_cascade_check_game: number;
+  last_chemistry_calc_game: number;
+  personality_rolls_done_season: number | null;
 }
 
 export interface PlayerRow {
@@ -224,6 +239,27 @@ export interface PlayerRow {
   last_send_down_game: number | null;
   is_injured: number;
   injury_return_game: number | null;
+  // v0.4.0 new columns
+  injury_type: string | null;
+  injury_tier: string | null;
+  rehab_games_remaining: number;
+  career_injuries: number;
+  suspension_games_remaining: number;
+  suspension_type: string | null;
+  ped_offenses: number;
+  gambling_ban: number;
+  is_malcontent: number;
+  trade_demand_active: number;
+  loyalty_discount_eligible: number;
+  memorial: number;
+  tragedy_victim: number;
+  retired_number: number | null;
+  seasons_with_current_team: number;
+  promo_eval_streak: number;
+  morale_effect_bp: number;
+  morale_effect_until_game: number | null;
+  // migration 013: career peak rating (nullable — may be null for pre-013 rows until dev step runs)
+  career_overall: number | null;
 }
 
 export interface GameLogRow {
@@ -247,6 +283,96 @@ export interface GameLogRow {
   losing_pitcher_id: number | null;
   save_pitcher_id: number | null;
   is_complete: number;
+}
+
+// v0.4.0 new table row interfaces
+export interface FranchiseSeasonHistoryRow {
+  id: number;
+  league_id: number;
+  team_id: number;
+  season_number: number;
+  wins: number;
+  losses: number;
+  division_finish: number | null;
+  playoff_round: string | null;
+  made_playoffs: number;
+  won_championship: number;
+  attendance_avg: number;
+  revenue: number;
+  payroll_actual: number;
+  payroll_budget: number;
+  luxury_tax_paid: number;
+  manager_name: string | null;
+  gm_name: string | null;
+  city_label: string | null;
+}
+
+export interface FranchisePlayerSeasonRow {
+  id: number;
+  league_id: number;
+  team_id: number;
+  player_id: number;
+  season_number: number;
+  games_played: number;
+  at_bats: number;
+  hits: number;
+  home_runs: number;
+  rbi: number;
+  walks: number;
+  innings_pitched: number;
+  earned_runs: number;
+  strikeouts_pitching: number;
+  wins: number;
+  losses: number;
+}
+
+export interface CoachingCandidateRow {
+  id: number;
+  league_id: number;
+  player_id: number;
+  specialty: string;
+  coaching_rating: number;
+  available: number;
+  available_since: number;
+  hired_team_id: number | null;
+  hired_season: number | null;
+  created_at: number;
+}
+
+export interface HallOfFameRow {
+  id: number;
+  league_id: number;
+  player_id: number;
+  induction_season: number;
+  vote_share: number;
+  veterans_committee: number;
+  ped_flag: number;
+  wing: string;
+  memorial: number;
+  career_stats_at_induction: string | null;
+  created_at: number;
+}
+
+export interface HofBallotRow {
+  id: number;
+  league_id: number;
+  player_id: number;
+  ballot_since_season: number;
+  years_on_ballot: number;
+  best_vote_share: number;
+  current_vote_share: number;
+  ped_flag: number;
+}
+
+export interface MinorLeagueStandingsRow {
+  id: number;
+  league_id: number;
+  team_id: number;
+  season_number: number;
+  level: string;
+  wins: number;
+  losses: number;
+  last_updated_game: number;
 }
 
 export function closeDb(): void {

@@ -9,6 +9,7 @@
 import { getDb, prepared, type TeamRow, type PlayerRow } from '../db.js';
 import { getArchetype } from './archetypes.js';
 import { insertTransactionNewsItem } from './news.js';
+import { resolveTradeDemandOnTrade } from './personality.js';
 
 const TRADE_WINDOW_START = 30;
 const TRADE_WINDOW_END = 37;
@@ -132,10 +133,14 @@ function executeTrade(
   db.prepare(
     'UPDATE players SET team_id = ?, is_on_mlb_roster = 1, is_on_25man = 1, minor_level = NULL WHERE id = ?'
   ).run(buyer.id, veteran.id);
+  // NF-3: clear trade demand on trade and restore any penalty ratings
+  resolveTradeDemandOnTrade(db, veteran.id);
 
   // Transfer prospects from buyer to seller (preserve minor state, do NOT set is_on_25man=1)
   for (const prospect of prospects) {
     db.prepare('UPDATE players SET team_id = ?, is_on_25man = 0 WHERE id = ?').run(seller.id, prospect.id);
+    // NF-3: also clear trade demand on prospects moving teams
+    resolveTradeDemandOnTrade(db, prospect.id);
   }
 
   const narrative = `${buyer.city} ${buyer.name} acquire ${veteran.position} from ${seller.city} ${seller.name}`;

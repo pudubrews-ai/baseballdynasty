@@ -177,7 +177,7 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
     'INSERT INTO leagues (name, season_number, phase, sim_speed, current_game_date, current_game_number, last_pick_id, last_game_id, worldgen_seed, archived, created_at) VALUES (?, 1, ?, ?, 0, 0, 0, 0, ?, 0, ?)'
   );
   const insertTeam = db.prepare(
-    `INSERT INTO teams (league_id, name, city, state_province, region, market_size, conference, division, color, wins, losses, runs_scored, runs_allowed, games_played, payroll_budget, current_payroll, revenue, gm_name, gm_philosophy, gm_risk_tolerance, gm_focus, gm_archetype, manager_name, manager_style, manager_tactics, manager_motivation, manager_communication, owner_name, owner_personality, owner_age, job_security, abbreviation) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 5, ?)`
+    `INSERT INTO teams (league_id, name, city, state_province, region, market_size, conference, division, color, wins, losses, runs_scored, runs_allowed, games_played, payroll_budget, current_payroll, revenue, gm_name, gm_philosophy, gm_risk_tolerance, gm_focus, gm_archetype, manager_name, manager_style, manager_tactics, manager_motivation, manager_communication, owner_name, owner_personality, owner_age, job_security, abbreviation, franchise_value, stadium_capacity, founded_season) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 5, ?, ?, ?, 1)`
   );
   const insertPlayer = db.prepare(
     `INSERT INTO players (league_id, team_id, first_name, last_name, age, position, overall_rating, potential, potential_revealed, contact, power, speed, fielding, arm, pitching_velocity, pitching_control, pitching_stamina, is_on_mlb_roster, is_on_25man, annual_salary, contract_years_remaining, service_time, service_time_days, injury_prone, coachability, work_ethic, leadership, origin, birthplace_city, birthplace_country, is_drafted, career_hits, career_hr, career_rbi, career_ip, career_k, options_remaining) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`
@@ -268,6 +268,16 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
 
       const abbreviation = generateAbbreviation(nickname, city.name, takenAbbrevs);
 
+      // v0.4.0: franchise_value and stadium_capacity by market size
+      const startingFranchiseValue =
+        city.market_size === 'mega' ? 400
+        : city.market_size === 'large' ? 250
+        : city.market_size === 'medium' ? 150 : 100;
+      const stadiumCapacity =
+        city.market_size === 'mega' ? 48000
+        : city.market_size === 'large' ? 42000
+        : city.market_size === 'medium' ? 36000 : 30000;
+
       const teamResult = insertTeam.run(
         leagueId,
         nickname,
@@ -293,7 +303,10 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
         `${ownerFirst} ${ownerLast}`,
         ownerPersonality,
         ownerAge,
-        abbreviation
+        abbreviation,
+        startingFranchiseValue,
+        stadiumCapacity
+        // founded_season = 1 is hardcoded in the INSERT statement (last literal)
       );
       teamIds.push(teamResult.lastInsertRowid as number);
     }
