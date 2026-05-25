@@ -197,6 +197,12 @@ async function runSeasonArchiveStep(leagueId: number, seasonNumber: number, worl
       const wonChampionship = playoffRound === 'champion' ? 1 : 0;
       const attendanceAvg = computeAttendanceAvg(team.market_size, team.wins, team.losses, team.id);
 
+      // Compute actual payroll from live player salaries (avoids cumulative drift
+      // from team.current_payroll which can accumulate across seasons)
+      const actualPayroll = (db.prepare(
+        'SELECT COALESCE(SUM(annual_salary), 0) AS total FROM players WHERE team_id = ? AND contract_years_remaining > 0 AND annual_salary > 0'
+      ).get(team.id) as { total: number }).total;
+
       // Insert/upsert franchise_season_history (idempotent via INSERT OR REPLACE)
       db.prepare(
         `INSERT OR REPLACE INTO franchise_season_history
@@ -208,7 +214,7 @@ async function runSeasonArchiveStep(leagueId: number, seasonNumber: number, worl
         leagueId, team.id, seasonNumber,
         team.wins, team.losses, divisionFinish, playoffRound,
         madePlayoffs, wonChampionship, attendanceAvg,
-        team.revenue ?? 0, team.current_payroll ?? 0, team.payroll_budget ?? 0,
+        team.revenue ?? 0, actualPayroll, team.payroll_budget ?? 0,
         team.luxury_tax_paid ?? 0,
         team.manager_name ?? null,
         team.gm_name ?? null,
@@ -1080,6 +1086,19 @@ async function runFreeAgencyStep(leagueId: number, seasonNumber?: number): Promi
     'SELECT * FROM players WHERE league_id = ? AND team_id IS NULL ORDER BY overall_rating DESC LIMIT 50'
   ).all(leagueId) as PlayerRow[];
 
+  // Recompute current_payroll from actual player salaries before FA bidding
+  // (prevents cumulative drift from multi-season accumulation where dequeued FAs
+  // leave stale salary amounts in current_payroll)
+  db.prepare(
+    `UPDATE teams SET current_payroll = (
+       SELECT COALESCE(SUM(p.annual_salary), 0)
+       FROM players p
+       WHERE p.team_id = teams.id
+         AND p.contract_years_remaining > 0
+         AND p.annual_salary > 0
+     ) WHERE league_id = ?`
+  ).run(leagueId);
+  // Re-fetch teams after payroll recompute so bidding uses fresh values
   const teams = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
 
   // D20: bid = overall * 0.15M * needs_multiplier, capped at remaining payroll budget
@@ -1533,7 +1552,11 @@ async function finalizeOffseason(leagueId: number, previousSeason: number): Prom
     ).run(newSeason, 'regular_season', leagueId);
 
     // Reset W/L/runs/games_played for the new season — must happen AFTER annual_draft (§2.6)
-    db.prepare('UPDATE teams SET wins = 0, losses = 0, runs_scored = 0, runs_allowed = 0, games_played = 0 WHERE league_id = ?').run(leagueId);
+    // Also reset all last_xxx_game counters so game-loop timers fire correctly in season N+1.
+    // Without this, the counters retain end-of-season values from the prior season while
+    // games_played resets to 0, causing cascade eval, chemistry, call-up, and firing checks
+    // to silently stop firing for the entire new season.
+    db.prepare('UPDATE teams SET wins = 0, losses = 0, runs_scored = 0, runs_allowed = 0, games_played = 0, last_call_up_check_game = 0, last_firing_check_game = 0, last_gm_firing_check_game = 0, last_service_time_update_game = 0, last_cascade_check_game = 0, last_chemistry_calc_game = 0 WHERE league_id = ?').run(leagueId);
 
     // D21: Remaining undrafted players from original pool become free agents
     db.prepare(

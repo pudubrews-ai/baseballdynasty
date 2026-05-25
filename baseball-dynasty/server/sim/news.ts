@@ -279,16 +279,20 @@ function proceduralHeadline(
     case 'call_up':    return `${p}${t} called up to the MLB roster.`;
     case 'send_down':  return `${p}${t} optioned to the minor leagues.`;
     case 'dfa':        return `${p}${t} designated for assignment.`;
-    case 'waiver_claim': return 'Player claimed off waivers.';
-    case 'trade':      return playerName ? `${p} traded.` : 'Trade completed.';
-    case 'free_agent_signing': return 'Free agent signs with new team.';
-    case 'release': return 'Player released.';
-    case 'non_tender': return 'Player non-tendered.';
-    case 'manager_fired': return 'Manager fired; interim takes over.';
-    case 'gm_fired': return 'GM fired; interim installed.';
-    case 'manager_resigned': return 'Manager resigns.';
-    case 'owner_sold_team': return 'Franchise ownership changes hands.';
-    case 'owner_died': return 'Owner passes away; heir takes control.';
+    case 'waiver_claim': return `${p}${t} claimed off waivers.`;
+    case 'trade':      return playerName
+      ? (teamName ? `${p} traded to ${teamName}.` : `${p} traded.`)
+      : 'Trade completed.';
+    case 'free_agent_signing': return playerName
+      ? `${p} signs with ${teamName ?? 'a new team'}.`
+      : `Free agent signs with ${teamName ?? 'a new team'}.`;
+    case 'release': return `${p}${t} released.`;
+    case 'non_tender': return `${p}${t} non-tendered.`;
+    case 'manager_fired': return teamName ? `Manager fired, ${teamName}; interim takes over.` : 'Manager fired; interim takes over.';
+    case 'gm_fired': return teamName ? `GM fired, ${teamName}; interim installed.` : 'GM fired; interim installed.';
+    case 'manager_resigned': return teamName ? `Manager resigns from ${teamName}.` : 'Manager resigns.';
+    case 'owner_sold_team': return teamName ? `${teamName} ownership changes hands.` : 'Franchise ownership changes hands.';
+    case 'owner_died': return teamName ? `${teamName} owner passes away; heir takes control.` : 'Owner passes away; heir takes control.';
     case 'injury':     return `${p}${t} placed on the injured list.`;
     case 'milestone': return playerName ? `${playerName} reaches a career milestone.` : 'A player reaches a career milestone.';
     default: return `${badge} event occurred.`;
@@ -440,7 +444,7 @@ export async function fillPendingTransactionFlavors(leagueId: number): Promise<v
       if (result.ok && result.flavors.has(row.id)) {
         flavor = result.flavors.get(row.id)!;
       } else {
-        flavor = sanitizeNarrative(proceduralTransactionNarrative(row.transaction_type, row.team_id, teamNameMap));
+        flavor = sanitizeNarrative(proceduralTransactionNarrative(row.transaction_type, row.team_id, teamNameMap, row.player_id, playerNameMap));
       }
       updateStmt.run(flavor, row.id);
     }
@@ -449,7 +453,7 @@ export async function fillPendingTransactionFlavors(leagueId: number): Promise<v
     const updateStmt = db.prepare('UPDATE transactions SET narrative = ? WHERE id = ?');
     for (const row of pending) {
       updateStmt.run(
-        sanitizeNarrative(proceduralTransactionNarrative(row.transaction_type, row.team_id, teamNameMap)),
+        sanitizeNarrative(proceduralTransactionNarrative(row.transaction_type, row.team_id, teamNameMap, row.player_id, playerNameMap)),
         row.id
       );
     }
@@ -459,15 +463,18 @@ export async function fillPendingTransactionFlavors(leagueId: number): Promise<v
 function proceduralTransactionNarrative(
   txType: string,
   teamId: number | null,
-  teamNameMap: Map<number, string>
+  teamNameMap: Map<number, string>,
+  playerId: number | null,
+  playerNameMap: Map<number, string>
 ): string {
   const team = teamId ? (teamNameMap.get(teamId) ?? 'A team') : 'A team';
+  const player = playerId ? (playerNameMap.get(playerId) ?? 'a player') : 'a player';
   switch (txType) {
     case 'trade': return `${team} completes a trade.`;
-    case 'free_agent_signing': return `${team} signs a free agent.`;
-    case 'release': return `Player released.`;
-    case 'waiver_claim': return `${team} claims a player off waivers.`;
-    case 'non_tender': return `${team} non-tenders a player.`;
+    case 'free_agent_signing': return `${team} signs ${player}.`;
+    case 'release': return `${team} releases ${player}.`;
+    case 'waiver_claim': return `${team} claims ${player} off waivers.`;
+    case 'non_tender': return `${team} non-tenders ${player}.`;
     default: return `Transaction completed.`;
   }
 }
