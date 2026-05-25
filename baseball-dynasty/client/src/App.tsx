@@ -11,6 +11,7 @@ import Watch from './views/Watch.js';
 import HallOfFame from './views/HallOfFame.js';
 import MinorsStandings from './views/MinorsStandings.js';
 import FranchiseSelection from './views/FranchiseSelection.js';
+import YourFranchise from './views/YourFranchise.js';
 import { createLeague, deleteLeague } from './api.js';
 
 // News ticker: shows last 5 events, scrolls as new ones arrive
@@ -62,7 +63,7 @@ function NewsTicker({ lastNewsId }: { lastNewsId: number }) {
   );
 }
 
-type TabName = 'league' | 'teams' | 'games' | 'draft' | 'players' | 'timeline' | 'news' | 'watch' | 'halloffame' | 'minors';
+type TabName = 'league' | 'teams' | 'games' | 'draft' | 'players' | 'timeline' | 'news' | 'watch' | 'halloffame' | 'minors' | 'yourfranchise';
 
 interface FranchiseStateResponse {
   ownedTeamId: number | null;
@@ -177,6 +178,7 @@ function AppContent() {
     { id: 'halloffame', label: 'Hall of Fame' },
     { id: 'minors', label: 'Minors' },
     { id: 'watch', label: '▶ Watch' },
+    { id: 'yourfranchise', label: '★ Your Franchise' },
   ];
 
   return (
@@ -233,6 +235,7 @@ function AppContent() {
                 : tab.id === 'timeline' ? 'timeline-tab'
                 : tab.id === 'halloffame' ? 'halloffame-tab'
                 : tab.id === 'minors' ? 'minors-tab'
+                : tab.id === 'yourfranchise' ? 'your-franchise-tab-nav'
                 : `nav-${tab.id}`
               }
               onClick={() => {
@@ -288,6 +291,9 @@ function AppContent() {
                 {activeTab === 'halloffame' && <HallOfFame />}
                 {activeTab === 'minors' && <MinorsStandings />}
                 {activeTab === 'watch' && <Watch />}
+                {activeTab === 'yourfranchise' && (
+                  <YourFranchise ownedTeamId={franchiseState?.ownedTeamId ?? null} />
+                )}
               </>
             )}
           </ErrorBoundary>
