@@ -5,10 +5,11 @@ import { getDb, prepared, type LeagueRow, type TeamRow, type PlayerRow } from '.
 import { seedFor, randInt, randNormal } from './prng.js';
 import { runAnnualDraft } from './draft.js';
 import { callSeasonNarrative } from '../services/llm.js';
-import { insertTransactionNewsItem, insertFrontOfficeNewsItem } from './news.js';
+import { insertTransactionNewsItem, insertFrontOfficeNewsItem, insertNewsItem } from './news.js';
 import { getFranchiseState, resetGmConfidence } from './franchise.js';
 import { classifySale, checkRelocationThreat, setRelocationThreat, resolveRelocation } from './sales.js';
 import { assignInjury } from './injury.js';
+import { computeAttendanceRate } from './attendanceCalc.js';
 
 const GM_PHILOSOPHIES: Array<'win-now' | 'rebuild' | 'balanced'> = ['win-now', 'rebuild', 'balanced'];
 const GM_RISK_TOLERANCES: Array<'conservative' | 'moderate' | 'aggressive'> = ['conservative', 'moderate', 'aggressive'];
@@ -23,7 +24,15 @@ export async function runOffseason(league: LeagueRow, isTurbo: boolean): Promise
 
   console.log(`[offseason] Starting from step: ${currentStep}`);
 
-  const steps = ['season_archive', 'retirement', 'development', 'non_tender', 'free_agency', 'hof_voting', 'financial_update', 'front_office', 'relocation_resolve', 'annual_draft', 'done'];
+  // v0.5.0: Updated step order per Orchestrator Decision (Section 5.0)
+  // arbitration REPLACES non_tender; new steps added for Rule 5, international, awards, rivalries, stadium
+  const steps = [
+    'season_archive', 'retirement', 'development',
+    'arbitration', 'free_agency',
+    'international_signing', 'annual_draft', 'rule5_protect', 'rule5_draft',
+    'award_voting', 'rivalry_update', 'stadium_resolve', 'financial_update',
+    'front_office', 'relocation_resolve', 'done',
+  ];
   const startIdx = steps.indexOf(currentStep);
 
   // §1.2 Iter-5: Import pause-check for cooperative offseason cancellation
@@ -44,13 +53,35 @@ export async function runOffseason(league: LeagueRow, isTurbo: boolean): Promise
         await runDevelopmentStep(leagueId, league.worldgen_seed ^ league.season_number);
         break;
       case 'non_tender':
-        await runNonTenderStep(leagueId, league.season_number);
+        // Legacy step name — now handled by 'arbitration'; skip if reached via old checkpoint
+        await runArbitrationStep(leagueId, league.season_number, league.worldgen_seed ^ league.season_number);
+        break;
+      case 'arbitration':
+        await runArbitrationStep(leagueId, league.season_number, league.worldgen_seed ^ league.season_number);
         break;
       case 'free_agency':
         await runFreeAgencyStep(leagueId, league.season_number);
         break;
       case 'hof_voting':
         await runHofVotingStep(leagueId, league.season_number, league.worldgen_seed);
+        break;
+      case 'international_signing':
+        await runInternationalSigningStep(leagueId, league.season_number, league.worldgen_seed ^ league.season_number);
+        break;
+      case 'rule5_protect':
+        await runRule5ProtectStep(leagueId, league.season_number, league.worldgen_seed ^ league.season_number);
+        break;
+      case 'rule5_draft':
+        await runRule5DraftStep(leagueId, league.season_number, league.worldgen_seed ^ league.season_number);
+        break;
+      case 'award_voting':
+        await runAwardVotingStep(leagueId, league.season_number, league.worldgen_seed ^ league.season_number);
+        break;
+      case 'rivalry_update':
+        await runRivalryUpdateStep(leagueId, league.season_number);
+        break;
+      case 'stadium_resolve':
+        await runStadiumResolveStep(leagueId, league.season_number, league.worldgen_seed ^ league.season_number);
         break;
       case 'financial_update':
         await runFinancialUpdateStep(leagueId, league.season_number, league.worldgen_seed ^ league.season_number);
@@ -954,106 +985,937 @@ function runProspectPromotionStep(leagueId: number, db: ReturnType<typeof getDb>
   console.log(`[offseason] Prospect promotion: ${promoted} players promoted`);
 }
 
-// Step 3: Non-tender — analytics/small-market GMs non-tender high-arb players
-// Per §6 [AB-12]: runs before free_agency; at least one non-tender forced if zero natural.
-async function runNonTenderStep(leagueId: number, seasonNumber: number): Promise<void> {
+// Step 3 (v0.5.0): Arbitration — REPLACES runNonTenderStep (Section 5a)
+// Derives arb_year from service_time, computes arb salary, makes non-tender/tender decisions,
+// and processes opt-out clauses. The legacy force-non-tender block is REMOVED (X-F4a).
+async function runArbitrationStep(leagueId: number, seasonNumber: number, seed: number): Promise<void> {
   const { getArchetype } = await import('./archetypes.js');
-  const teams = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
   const db = getDb();
+  const rng = seedFor('arbitration', seed);
   let totalNonTenders = 0;
+  let totalTendered = 0;
 
-  const nonTenderTx = db.transaction(() => {
+  // PINNED position multipliers (Section 5a.2)
+  const POSITION_MULTIPLIERS: Record<string, number> = {
+    'C': 1.3, 'SS': 1.25, '2B': 1.15, 'CF': 1.15, 'SP': 1.2, 'RP': 0.9,
+    '3B': 1.05, 'LF': 1.05, 'RF': 1.05, '1B': 1.0, 'DH': 1.0, 'CL': 0.9,
+  };
+
+  const arbTx = db.transaction(() => {
+    const teams = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
+
     for (const team of teams) {
       if (team.interim_gm === 1) continue;
-
       const archetype = getArchetype(team.gm_archetype ?? 'balanced');
-      if (!archetype.nontender_arb_year || !archetype.nontender_salary_threshold) continue;
 
-      // Non-tender players with arb-year >= 3 (approx: service_time_days >= 3*30=90)
-      // and salary > threshold
-      const candidates = prepared(
-        `SELECT * FROM players
-         WHERE team_id = ? AND is_on_mlb_roster = 1
-           AND service_time_days >= ? AND annual_salary > ?
-         ORDER BY annual_salary DESC`
-      ).all(
-        team.id,
-        archetype.nontender_arb_year * 30,
-        archetype.nontender_salary_threshold
-      ) as PlayerRow[];
+      // Get all players with 3-5 years of service time (arb eligible)
+      const players = prepared(
+        `SELECT * FROM players WHERE team_id = ? AND is_on_mlb_roster = 1`
+      ).all(team.id) as PlayerRow[];
 
-      for (const player of candidates) {
-        // Non-tender: release to FA pool
-        db.prepare(
-          'UPDATE players SET team_id = NULL, is_on_mlb_roster = 0, is_on_25man = 0, minor_level = NULL WHERE id = ?'
-        ).run(player.id);
+      for (const player of players) {
+        const st = player.service_time ?? 0;
 
-        const ntResult = db.prepare(
-          `INSERT INTO transactions
-             (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
-           VALUES (?, ?, 'non_tender', ?, ?, NULL, ?)`
-        ).run(leagueId, seasonNumber, team.id, player.id, Date.now());
+        // Derive arb_year (Section 5a.1 - PINNED mapping)
+        let arbYear: number | null = null;
+        if (st === 3) arbYear = 1;
+        else if (st === 4) arbYear = 2;
+        else if (st === 5) arbYear = 3;
+        // else: not arb eligible (< 3 = too young, >= 6 = FA eligible)
 
-        // §1.1(e): Insert non-tender news item
-        insertTransactionNewsItem({
-          leagueId,
-          seasonNumber,
-          gameNumber: 0,
-          eventType: 'non_tender',
-          teamId: team.id,
-          playerId: player.id,
-          sourceTable: 'transactions',
-          sourceId: ntResult.lastInsertRowid as number,
-        });
+        // Guard (X-F4c): never write arb_year outside {1,2,3} or null
+        if (arbYear !== null && ![1, 2, 3].includes(arbYear)) arbYear = null;
 
-        totalNonTenders++;
+        // Update arb_year column
+        db.prepare('UPDATE players SET arb_year = ? WHERE id = ?').run(arbYear, player.id);
+
+        if (arbYear === null) continue; // not arb eligible
+
+        // Compute market value and arb salary
+        const posMult = POSITION_MULTIPLIERS[player.position] ?? 1.0;
+        const ageMod = Math.max(0.7, 1.0 - Math.max(0, player.age - 30) * 0.05);
+        const marketValue = player.overall_rating * posMult * ageMod * 10000;
+
+        const arbSalary = arbYear === 1 ? marketValue * 0.40
+          : arbYear === 2 ? marketValue * 0.60
+          : marketValue * 0.80;
+
+        // Non-tender decision
+        const gmType = team.gm_archetype ?? 'balanced';
+        let shouldNonTender = false;
+        if (gmType === 'analytics') {
+          // Analytics GM: non-tender if arb_salary > market_value * 1.1
+          shouldNonTender = arbSalary > marketValue * 1.1;
+        } else if (gmType === 'old-school') {
+          // Old-school GM: non-tender only if arb_salary > market_value * 1.5
+          shouldNonTender = arbSalary > marketValue * 1.5;
+        } else {
+          // Balanced
+          shouldNonTender = arbSalary > marketValue * 1.25;
+        }
+
+        if (shouldNonTender) {
+          // Non-tender: player becomes free agent
+          db.prepare(
+            'UPDATE players SET team_id = NULL, is_on_mlb_roster = 0, is_on_25man = 0, is_on_40man = 0, minor_level = NULL, arb_year = NULL WHERE id = ?'
+          ).run(player.id);
+
+          const ntResult = db.prepare(
+            `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
+             VALUES (?, ?, 'non_tender', ?, ?, NULL, ?)`
+          ).run(leagueId, seasonNumber, team.id, player.id, Date.now());
+
+          insertTransactionNewsItem({
+            leagueId, seasonNumber, gameNumber: 0, eventType: 'non_tender',
+            teamId: team.id, playerId: player.id,
+            sourceTable: 'transactions', sourceId: ntResult.lastInsertRowid as number,
+          });
+          totalNonTenders++;
+        } else {
+          // Tender: offer arb salary or multi-year deal
+          // Multi-year option: 2-3 year deal at arb_salary * 0.9 per year (slight discount)
+          const offerMultiYear = player.overall_rating >= 65 && rng() < 0.3;
+          const contractYears = offerMultiYear ? (rng() < 0.5 ? 2 : 3) : 1;
+          const annualSalary = Math.round(offerMultiYear ? arbSalary * 0.9 : arbSalary);
+
+          // Opt-out clause for stars on multi-year deals (Section 5a.5)
+          let hasOptOut = 0;
+          let optOutAfterYear: number | null = null;
+          if (offerMultiYear && player.overall_rating >= 80) {
+            const optOutChance = (team.gm_archetype ?? 'balanced') === 'analytics' ? 0.4 : 0.2;
+            if (rng() < optOutChance) {
+              hasOptOut = 1;
+              optOutAfterYear = contractYears >= 3 ? (rng() < 0.5 ? 2 : 3) : 2;
+            }
+          }
+
+          db.prepare(
+            `UPDATE players SET annual_salary = ?, contract_years_remaining = ?,
+             has_opt_out = ?, opt_out_after_year = ?
+             WHERE id = ?`
+          ).run(annualSalary, contractYears, hasOptOut, optOutAfterYear, player.id);
+          totalTendered++;
+        }
       }
     }
 
-    // Force at least one non-tender if zero natural candidates (eval G23)
-    if (totalNonTenders === 0) {
-      // Find highest-salary player with service_time_days >= 4*30 AND age >= 30
-      // on any small/medium market team
-      const forcedCandidate = db.prepare(
-        `SELECT p.* FROM players p
-         JOIN teams t ON t.id = p.team_id
-         WHERE t.league_id = ? AND t.market_size IN ('small','medium') AND t.interim_gm = 0
-           AND p.is_on_mlb_roster = 1 AND p.service_time_days >= 120 AND p.age >= 30
-         ORDER BY p.annual_salary DESC
-         LIMIT 1`
-      ).get(leagueId) as PlayerRow | undefined;
+    // Process existing opt-outs (offseason only — spec line 516)
+    const optOutPlayers = prepared(
+      `SELECT p.*, t.gm_archetype
+       FROM players p JOIN teams t ON t.id = p.team_id
+       WHERE p.league_id = ? AND p.has_opt_out = 1 AND p.opted_out = 0
+         AND p.contract_years_remaining > 0`
+    ).all(leagueId) as Array<PlayerRow & { gm_archetype: string }>;
 
-      if (forcedCandidate) {
-        db.prepare(
-          'UPDATE players SET team_id = NULL, is_on_mlb_roster = 0, is_on_25man = 0, minor_level = NULL WHERE id = ?'
-        ).run(forcedCandidate.id);
+    for (const player of optOutPlayers) {
+      const posMult = POSITION_MULTIPLIERS[player.position] ?? 1.0;
+      const ageMod = Math.max(0.7, 1.0 - Math.max(0, player.age - 30) * 0.05);
+      const marketValue = player.overall_rating * posMult * ageMod * 10000;
+      const remainingContractValue = player.annual_salary * player.contract_years_remaining;
 
-        const forcedNtResult = db.prepare(
-          `INSERT INTO transactions
-             (league_id, season_number, transaction_type, team_id, player_id, narrative, created_at)
-           VALUES (?, ?, 'non_tender', ?, ?, NULL, ?)`
-        ).run(leagueId, seasonNumber, forcedCandidate.team_id, forcedCandidate.id, Date.now());
+      // Opt-out fires if market_value > remaining_contract_value * 1.2
+      if (marketValue > remainingContractValue * 1.2) {
+        // Loyalty modifier: leadership >= 70 reduces opt-out chance by 50%
+        const loyaltyModifier = (player.leadership ?? 0) >= 70 ? 0.5 : 1.0;
+        if (rng() < loyaltyModifier) {
+          // Fire opt-out
+          db.prepare(
+            `UPDATE players SET opted_out = 1, team_id = NULL, is_on_mlb_roster = 0,
+             is_on_25man = 0, is_on_40man = 0, minor_level = NULL WHERE id = ?`
+          ).run(player.id);
 
-        // §1.1(e): Insert forced non-tender news item
-        insertTransactionNewsItem({
-          leagueId,
-          seasonNumber,
-          gameNumber: 0,
-          eventType: 'non_tender',
-          teamId: forcedCandidate.team_id,
-          playerId: forcedCandidate.id,
-          sourceTable: 'transactions',
-          sourceId: forcedNtResult.lastInsertRowid as number,
-        });
-
-        totalNonTenders++;
-        console.log(`[offseason] Forced non-tender: ${forcedCandidate.first_name} ${forcedCandidate.last_name}`);
+          const headlineText = `${player.first_name} ${player.last_name} exercises opt-out clause, re-enters free agency`;
+          insertNewsItem({
+            leagueId, seasonNumber, gameNumber: 0,
+            eventType: 'opt_out',
+            teamId: player.team_id,
+            playerId: player.id,
+            headlineText,
+          });
+        }
       }
     }
   });
 
-  nonTenderTx();
-  console.log(`[offseason] Non-tender step: ${totalNonTenders} players non-tendered`);
+  arbTx();
+  console.log(`[offseason] Arbitration step: ${totalNonTenders} non-tendered, ${totalTendered} tendered`);
+}
+
+// =========================================================
+// v0.5.0 Step: International Signing (Feature 3, Section 5b)
+// =========================================================
+async function runInternationalSigningStep(leagueId: number, seasonNumber: number, seed: number): Promise<void> {
+  const { getArchetype } = await import('./archetypes.js');
+  const db = getDb();
+  const rng = seedFor('intl_signing', seed);
+  // Use existing name pools from worldgen
+  const { NAME_POOLS: namePools } = await import('../data/names.js');
+
+  const intlTx = db.transaction(() => {
+    const teams = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
+
+    // 1. Generate 30-50 international prospects
+    const prospectCount = randInt(rng, 30, 50);
+    const originDist = [
+      { key: 'dominican', weight: 35 },
+      { key: 'venezuela', weight: 25 },
+      { key: 'cuba', weight: 15 },
+      { key: 'japan', weight: 10 },
+      { key: 'south_korea', weight: 5 },
+      { key: 'other', weight: 10 },
+    ] as const;
+    const totalWeight = 100;
+
+    // Origin country pick by weighted distribution
+    function pickOrigin(): 'dominican' | 'venezuela' | 'cuba' | 'japan' | 'south_korea' | 'other' {
+      let r = rng() * totalWeight;
+      for (const { key, weight } of originDist) {
+        r -= weight;
+        if (r <= 0) return key;
+      }
+      return 'dominican';
+    }
+
+    // Name helper — pick from the name pool using the international pool (use us pool as fallback)
+    function pickName(origin: string): string {
+      const pool = (namePools as Record<string, { first: string[]; last: string[] } | undefined>)[origin]
+        ?? (namePools as Record<string, { first: string[]; last: string[] } | undefined>)['us']
+        ?? { first: ['Carlos'], last: ['Rodriguez'] };
+      const first = pool.first[Math.floor(rng() * pool.first.length)] ?? 'Carlos';
+      const last = pool.last[Math.floor(rng() * pool.last.length)] ?? 'Rodriguez';
+      return `${first} ${last}`;
+    }
+
+    const prospects: Array<{
+      id: number; name: string; age: number; origin_country: string;
+      true_overall: number; potential: string; signed: number;
+    }> = [];
+
+    for (let pi = 0; pi < prospectCount; pi++) {
+      const age = rng() < 0.5 ? 16 : 17;
+      const origin = pickOrigin();
+      const name = pickName(origin);
+      const trueOverall = randInt(rng, 30, 75); // raw talent range
+      const potential = rng() < 0.1 ? 'A' : rng() < 0.25 ? 'B' : rng() < 0.55 ? 'C' : 'D';
+
+      // scouted_overall is computed per-team when evaluating bids; store with a "neutral" scout value
+      // Each team will apply their own scout accuracy — use the midpoint as stored value
+      const scoutedOverall = Math.max(20, Math.min(99, trueOverall + Math.round((rng() - 0.5) * 20)));
+
+      const result = db.prepare(
+        `INSERT INTO international_prospects
+           (league_id, season_number, name, age, origin_country, scouted_overall, true_overall, potential, signed, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`
+      ).run(leagueId, seasonNumber, name, age, origin, scoutedOverall, trueOverall, potential, Date.now());
+
+      prospects.push({
+        id: result.lastInsertRowid as number,
+        name, age, origin_country: origin, true_overall: trueOverall, potential, signed: 0,
+      });
+    }
+
+    // Sort prospects by stored scouted_overall DESC (bid order per X-F3a)
+    prospects.sort((a, b) => b.true_overall - a.true_overall);
+
+    // 2. Bid resolution prospect-by-prospect
+    for (const prospect of prospects) {
+      let bestBid = 0;
+      let bestTeamId: number | null = null;
+
+      for (const team of teams) {
+        if (team.interim_gm === 1) continue;
+        const archetype = getArchetype(team.gm_archetype ?? 'balanced');
+        const pool = team.international_bonus_pool ?? 0;
+        if (pool <= 0) continue; // exhausted pool — hard cap
+
+        // Team-specific scouted overall (apply scouting accuracy)
+        const scoutingRating = team.scouting_rating ?? 5;
+        const noiseRange = scoutingRating >= 7 ? 10 : 20; // high rating → ±5-10, low → ±15-20
+        const noise = Math.round((rng() - 0.5) * noiseRange);
+        const teamScout = Math.max(20, Math.min(99, prospect.true_overall + noise));
+
+        // Bid based on archetype
+        let bidAmount: number;
+        const isAnalytics = (team.gm_archetype ?? 'balanced') === 'analytics';
+        const isMegaLarge = team.market_size === 'mega' || team.market_size === 'large';
+
+        if (isAnalytics) {
+          // Analytics: weight high-upside (potential A/B)
+          const potentialWeight = prospect.potential === 'A' ? 2.0 : prospect.potential === 'B' ? 1.5 : 1.0;
+          bidAmount = Math.round(teamScout * 5000 * potentialWeight);
+        } else {
+          // Old-school: target current rating
+          bidAmount = Math.round(teamScout * 4000);
+        }
+
+        // Mega/large market teams outbid for top prospects
+        if (isMegaLarge && prospect.true_overall >= 60) bidAmount = Math.round(bidAmount * 1.3);
+        // Small market: target undervalued
+        if (team.market_size === 'small' && prospect.true_overall <= 50) bidAmount = Math.round(bidAmount * 1.2);
+
+        // Hard cap: never exceed remaining pool
+        bidAmount = Math.min(bidAmount, pool);
+
+        if (bidAmount > bestBid) {
+          bestBid = bidAmount;
+          bestTeamId = team.id;
+        }
+      }
+
+      if (bestTeamId === null || bestBid <= 0) continue;
+
+      const signingTeam = teams.find(t => t.id === bestTeamId);
+      if (!signingTeam) continue;
+
+      // Hard cap check: ensure signing team has enough pool (in-memory, updated per signing)
+      if ((signingTeam.international_bonus_pool ?? 0) < bestBid) continue;
+
+      // Debit the team's international_bonus_pool — update in-memory value to prevent over-spend
+      signingTeam.international_bonus_pool = (signingTeam.international_bonus_pool ?? 0) - bestBid;
+      db.prepare('UPDATE teams SET international_bonus_pool = ? WHERE id = ?')
+        .run(signingTeam.international_bonus_pool, bestTeamId);
+      // Update prospect as signed
+      db.prepare('UPDATE international_prospects SET signed = 1, signing_team_id = ? WHERE id = ?')
+        .run(bestTeamId, prospect.id);
+
+      // Insert prospect into players table (Section 5b.5)
+      const nameParts = prospect.name.split(' ');
+      const firstName = nameParts[0] ?? 'Carlos';
+      const lastName = nameParts.slice(1).join(' ') || 'Rodriguez';
+
+      // Displayed overall starts as scouted proxy
+      const displayOverall = Math.max(20, Math.min(70, prospect.true_overall + Math.round((rng() - 0.5) * 15)));
+
+      const playerResult = db.prepare(
+        `INSERT INTO players
+           (league_id, team_id, first_name, last_name, age, position, overall_rating, potential,
+            potential_revealed, contact, power, speed, fielding, arm, pitching_velocity,
+            pitching_control, pitching_stamina, is_on_mlb_roster, is_on_25man, is_on_40man,
+            annual_salary, contract_years_remaining, service_time, service_time_days,
+            injury_prone, coachability, work_ethic, leadership, origin, birthplace_city,
+            birthplace_country, is_drafted, career_hits, career_hr, career_rbi, career_ip,
+            career_k, career_wins, options_remaining, is_international_signee, signing_bonus,
+            true_overall, signed_age, years_in_org, bats, throws, vs_lefty_modifier, vs_righty_modifier)
+         VALUES (?, ?, ?, ?, ?, 'OF', ?, ?, 0,
+            ?, ?, ?, ?, ?, ?,
+            ?, ?, 0, 0, 0,
+            0, 0, 0, 0,
+            ?, ?, ?, ?, ?, '',
+            ?, 1, 0, 0, 0, 0,
+            0, 0, 3, 1, ?,
+            ?, ?, 0, 'R', 'R', ?, ?)`
+      ).run(
+        leagueId, bestTeamId, firstName, lastName, prospect.age,
+        displayOverall, prospect.potential,
+        // contact, power, speed, fielding, arm
+        displayOverall, displayOverall, displayOverall, displayOverall, displayOverall,
+        // pitching velocity/control/stamina
+        30, 30, 30,
+        // injury_prone, coachability, work_ethic, leadership, origin
+        randInt(rng, 3, 7), randInt(rng, 1, 10), randInt(rng, 1, 10), randInt(rng, 1, 10),
+        prospect.origin_country,
+        // birthplace_country
+        prospect.origin_country,
+        // signing_bonus
+        bestBid,
+        // true_overall, signed_age
+        prospect.true_overall, prospect.age,
+        // vs_lefty_modifier, vs_righty_modifier
+        randInt(rng, -10, 10), randInt(rng, -10, 10)
+      );
+
+      const newPlayerId = playerResult.lastInsertRowid as number;
+
+      // Insert news item
+      const headlineText = `${firstName} ${lastName} (${prospect.origin_country}, age ${prospect.age}) signed as international prospect for $${(bestBid / 1_000_000).toFixed(1)}M`;
+      insertNewsItem({
+        leagueId, seasonNumber, gameNumber: 0,
+        eventType: 'international_signing',
+        teamId: bestTeamId,
+        playerId: newPlayerId,
+        headlineText,
+      });
+    }
+  });
+
+  intlTx();
+  console.log(`[offseason] International signing step complete for season ${seasonNumber}`);
+}
+
+// =========================================================
+// v0.5.0 Step: Rule 5 Protect (Feature 2, Section 5c)
+// =========================================================
+async function runRule5ProtectStep(leagueId: number, seasonNumber: number, seed: number): Promise<void> {
+  const { getArchetype } = await import('./archetypes.js');
+  const db = getDb();
+  const rng = seedFor('rule5_protect', seed);
+
+  const rule5ProtectTx = db.transaction(() => {
+    const teams = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
+
+    for (const team of teams) {
+      if (team.interim_gm === 1) continue;
+      const isAnalytics = (team.gm_archetype ?? 'balanced') === 'analytics';
+
+      // Find eligible-to-protect prospects (not yet on 40-man, on this team's minor league)
+      const minorLeaguers = prepared(
+        `SELECT * FROM players WHERE team_id = ? AND is_on_40man = 0 AND is_on_mlb_roster = 0
+         ORDER BY overall_rating DESC LIMIT 30`
+      ).all(team.id) as PlayerRow[];
+
+      // Check current 40-man count
+      const current40man = (prepared(
+        'SELECT COUNT(*) as cnt FROM players WHERE team_id = ? AND is_on_40man = 1'
+      ).get(team.id) as { cnt: number }).cnt;
+      let slots40man = 40 - current40man;
+
+      for (const player of minorLeaguers) {
+        if (slots40man <= 0) break;
+
+        // Determine if this player is Rule 5 eligible
+        const signedAge = player.signed_age ?? 18;
+        const yio = player.years_in_org ?? 0;
+        const isEligible = (signedAge <= 20 && yio >= 4) || (signedAge >= 21 && yio >= 3);
+
+        if (!isEligible) continue;
+
+        // Analytics GM: aggressively protect top prospects (any overall >= 50)
+        // Old-school GM: slower to protect (only overall >= 60)
+        const protectThreshold = isAnalytics ? 50 : 60;
+        if (player.overall_rating < protectThreshold) {
+          // Also protect based on RNG (simulate GM judgment)
+          if (rng() > 0.3) continue;
+        }
+
+        // Add to 40-man
+        db.prepare('UPDATE players SET is_on_40man = 1 WHERE id = ?').run(player.id);
+        slots40man--;
+      }
+    }
+  });
+
+  rule5ProtectTx();
+  console.log(`[offseason] Rule 5 protect step complete for season ${seasonNumber}`);
+}
+
+// =========================================================
+// v0.5.0 Step: Rule 5 Draft (Feature 2, Section 5c)
+// =========================================================
+async function runRule5DraftStep(leagueId: number, seasonNumber: number, seed: number): Promise<void> {
+  const db = getDb();
+  const rng = seedFor('rule5_draft', seed);
+
+  const rule5DraftTx = db.transaction(() => {
+    const teams = prepared(
+      `SELECT t.*, fs.wins + fs.losses as gp, fs.wins
+       FROM teams t
+       LEFT JOIN franchise_season_history fs ON fs.team_id = t.id AND fs.season_number = ? - 1
+       WHERE t.league_id = ?
+       ORDER BY COALESCE(fs.wins * 1.0 / NULLIF(fs.wins + fs.losses, 0), 0) ASC` // reverse standings order
+    ).all(seasonNumber, leagueId) as TeamRow[];
+
+    let pickNumber = 0;
+
+    for (const team of teams) {
+      if (team.interim_gm === 1) continue;
+
+      // Check 25-man capacity (X-F2b)
+      const on25man = (prepared(
+        'SELECT COUNT(*) as cnt FROM players WHERE team_id = ? AND is_on_25man = 1'
+      ).get(team.id) as { cnt: number }).cnt;
+      if (on25man >= 25) continue; // no 25-man slot available
+
+      // Find eligible players from OTHER teams' minor leagues
+      const eligible = prepared(
+        `SELECT p.* FROM players p
+         JOIN teams t2 ON t2.id = p.team_id
+         WHERE t2.league_id = ? AND p.team_id != ? AND p.is_on_40man = 0
+           AND p.is_on_mlb_roster = 0
+           AND (
+             (p.signed_age <= 20 AND p.years_in_org >= 4)
+             OR
+             (p.signed_age >= 21 AND p.years_in_org >= 3)
+           )
+         ORDER BY p.overall_rating DESC
+         LIMIT 20`
+      ).all(leagueId, team.id) as PlayerRow[];
+
+      if (eligible.length === 0) continue;
+
+      // Select 0-3 players (GM decides based on archetype)
+      const isAnalytics = (team.gm_archetype ?? 'balanced') === 'analytics';
+      const isSmallMkt = team.market_size === 'small';
+      const maxSelections = isSmallMkt ? 3 : isAnalytics ? 2 : 1;
+      const numSelections = Math.min(maxSelections, eligible.length, Math.round(rng() * maxSelections));
+
+      for (let si = 0; si < numSelections; si++) {
+        const player = eligible[si];
+        if (!player) break;
+
+        const originalTeamId = player.team_id;
+        if (!originalTeamId) continue;
+
+        pickNumber++;
+
+        // Transfer player to selecting team's 25-man
+        db.prepare(
+          `UPDATE players SET team_id = ?, is_on_mlb_roster = 1, is_on_25man = 1, is_on_40man = 1,
+           rule5_drafted = 1, rule5_from_team_id = ?, minor_level = NULL WHERE id = ?`
+        ).run(team.id, originalTeamId, player.id);
+
+        // $100K to original team
+        db.prepare(
+          'UPDATE teams SET revenue = revenue + 100000 WHERE id = ?'
+        ).run(originalTeamId);
+
+        // Insert transaction (note: transactions table has no from_team_id/amount columns; use details_json)
+        db.prepare(
+          `INSERT INTO transactions (league_id, season_number, transaction_type, team_id, player_id,
+           details_json, narrative, created_at)
+           VALUES (?, ?, 'rule5_draft', ?, ?, ?, ?, ?)`
+        ).run(
+          leagueId, seasonNumber, team.id, player.id,
+          JSON.stringify({ from_team_id: originalTeamId, amount: 100000 }),
+          `${player.first_name} ${player.last_name} selected in Rule 5 Draft`,
+          Date.now()
+        );
+
+        // Insert news item
+        const headlineText = `${player.first_name} ${player.last_name} selected in Rule 5 Draft by ${team.city} ${team.name}`;
+        insertNewsItem({
+          leagueId, seasonNumber, gameNumber: 0,
+          eventType: 'rule5_draft',
+          teamId: team.id,
+          playerId: player.id,
+          headlineText,
+        });
+      }
+    }
+  });
+
+  rule5DraftTx();
+  console.log(`[offseason] Rule 5 draft step complete for season ${seasonNumber}`);
+}
+
+// =========================================================
+// v0.5.0 Step: Award Voting (Feature 6, Section 5d)
+// =========================================================
+async function runAwardVotingStep(leagueId: number, seasonNumber: number, seed: number): Promise<void> {
+  const { getArchetype } = await import('./archetypes.js');
+  const db = getDb();
+  const rng = seedFor('award_voting', seed);
+
+  const awardTx = db.transaction(() => {
+    const teams = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
+
+    // Award types per conference
+    const conferences = ['American', 'National'];
+    const awardTypes = ['mvp', 'cy_young', 'roy'] as const;
+
+    for (const conference of conferences) {
+      // Get teams in this conference
+      const confTeams = teams.filter(t => t.conference === conference);
+      const confTeamIds = confTeams.map(t => t.id);
+      if (confTeamIds.length === 0) continue;
+
+      for (const awardType of awardTypes) {
+        // Compute stat totals from season_stats for this conference
+        let candidates: Array<{
+          player_id: number; first_name: string; last_name: string; team_id: number | null;
+          ops: number; hr: number; rbi: number; era: number; wins: number; strikeouts: number;
+          whip: number; service_time: number; team_wins: number; overall_score: number;
+        }> = [];
+
+        if (awardType === 'mvp' || awardType === 'roy') {
+          // Position players: OPS (40%), RBI (20%), HR (20%), team wins (20%)
+          candidates = db.prepare(
+            `SELECT p.id as player_id, p.first_name, p.last_name, p.team_id, p.service_time,
+                    ss.at_bats, ss.hits, ss.home_runs as hr, ss.rbi, ss.walks,
+                    t.wins as team_wins,
+                    CASE WHEN ss.at_bats > 0
+                         THEN (CAST(ss.hits AS REAL) / ss.at_bats) + (CAST(ss.home_runs + ss.walks AS REAL) / (ss.at_bats + ss.walks))
+                         ELSE 0 END as ops
+             FROM season_stats ss
+             JOIN players p ON p.id = ss.player_id
+             JOIN teams t ON t.id = p.team_id
+             WHERE ss.league_id = ? AND ss.season_number = ? AND t.id IN (${confTeamIds.map(() => '?').join(',')})
+               AND p.position NOT IN ('SP','RP','CL')
+               AND ss.at_bats >= 50
+             ORDER BY ops DESC LIMIT 30`
+          ).all(leagueId, seasonNumber, ...confTeamIds) as any[];
+
+          // ROY eligibility: service_time < 1
+          if (awardType === 'roy') {
+            candidates = candidates.filter(c => (c.service_time ?? 0) < 1);
+          }
+
+          // Score: OPS 40%, RBI 20%, HR 20%, team wins 20%
+          const maxRBI = Math.max(...candidates.map(c => c.rbi ?? 0), 1);
+          const maxHR = Math.max(...candidates.map(c => c.hr ?? 0), 1);
+          const maxTeamWins = Math.max(...candidates.map(c => c.team_wins ?? 0), 1);
+          for (const c of candidates) {
+            c.overall_score = (c.ops ?? 0) * 0.4 + ((c.rbi ?? 0) / maxRBI) * 0.2 + ((c.hr ?? 0) / maxHR) * 0.2 + ((c.team_wins ?? 0) / maxTeamWins) * 0.2;
+          }
+        } else {
+          // Cy Young: ERA (35%), wins (20%), SO (25%), WHIP (20%)
+          candidates = db.prepare(
+            `SELECT p.id as player_id, p.first_name, p.last_name, p.team_id, p.service_time,
+                    ss.wins, ss.strikeouts_pitching as strikeouts,
+                    CASE WHEN ss.innings_pitched > 0 THEN CAST(ss.earned_runs AS REAL) * 9 / ss.innings_pitched ELSE 99 END as era,
+                    CASE WHEN ss.innings_pitched > 0 THEN (CAST(ss.hits AS REAL) + ss.walks) / ss.innings_pitched ELSE 99 END as whip,
+                    t.wins as team_wins, 0 as hr, 0 as rbi, 0 as ops
+             FROM season_stats ss
+             JOIN players p ON p.id = ss.player_id
+             JOIN teams t ON t.id = p.team_id
+             WHERE ss.league_id = ? AND ss.season_number = ? AND t.id IN (${confTeamIds.map(() => '?').join(',')})
+               AND p.position = 'SP'
+               AND ss.innings_pitched >= 20
+             ORDER BY era ASC LIMIT 20`
+          ).all(leagueId, seasonNumber, ...confTeamIds) as any[];
+
+          const maxWins = Math.max(...candidates.map(c => c.wins ?? 0), 1);
+          const maxK = Math.max(...candidates.map(c => c.strikeouts ?? 0), 1);
+          const minERA = Math.min(...candidates.map(c => c.era ?? 99), 99);
+          const minWHIP = Math.min(...candidates.map(c => c.whip ?? 99), 99);
+          for (const c of candidates) {
+            const eraScore = minERA > 0 ? minERA / Math.max(c.era ?? 99, 0.1) : 0;
+            const whipScore = minWHIP > 0 ? minWHIP / Math.max(c.whip ?? 99, 0.1) : 0;
+            c.overall_score = eraScore * 0.35 + ((c.wins ?? 0) / maxWins) * 0.20 + ((c.strikeouts ?? 0) / maxK) * 0.25 + whipScore * 0.20;
+          }
+        }
+
+        if (candidates.length === 0) continue;
+
+        // Sort by score DESC, then player_id ASC for tie-breaking (deterministic X-F6a)
+        candidates.sort((a, b) => {
+          const scoreDiff = (b.overall_score ?? 0) - (a.overall_score ?? 0);
+          if (Math.abs(scoreDiff) > 0.0001) return scoreDiff;
+          return a.player_id - b.player_id;
+        });
+
+        // 20 voters (X-F6c — not 30): one per franchise in the whole league
+        // Old-school voters: favor counting stats; analytics: favor efficiency
+        let voteTally = new Map<number, number>();
+
+        const voters = teams.slice(0, 20); // 20 voters
+        for (const voter of voters) {
+          if (voter.interim_gm === 1) continue;
+          const isAnalyticsVoter = (voter.gm_archetype ?? 'balanced') === 'analytics';
+          const isOldSchoolVoter = (voter.gm_archetype ?? 'balanced') === 'old-school';
+
+          // Rank candidates by voter preference
+          const ranked = [...candidates];
+          if (isOldSchoolVoter) {
+            // Old-school: weight counting stats (HR, RBI, wins)
+            ranked.sort((a, b) => {
+              const aCount = (a.hr ?? 0) + (a.rbi ?? 0) + (a.wins ?? 0) * 3;
+              const bCount = (b.hr ?? 0) + (b.rbi ?? 0) + (b.wins ?? 0) * 3;
+              if (bCount !== aCount) return bCount - aCount;
+              return a.player_id - b.player_id;
+            });
+          } else if (isAnalyticsVoter) {
+            // Analytics: weight efficiency
+            ranked.sort((a, b) => {
+              const scoreDiff = (b.overall_score ?? 0) - (a.overall_score ?? 0);
+              if (Math.abs(scoreDiff) > 0.0001) return scoreDiff;
+              return a.player_id - b.player_id;
+            });
+          }
+          // Vote for top 3
+          const voteWeights = [5, 3, 1];
+          for (let vi = 0; vi < Math.min(3, ranked.length); vi++) {
+            const c = ranked[vi];
+            if (!c) continue;
+            voteTally.set(c.player_id, (voteTally.get(c.player_id) ?? 0) + (voteWeights[vi] ?? 1));
+          }
+        }
+
+        // Sort by vote tally DESC, player_id ASC for determinism
+        const sortedVotes = [...voteTally.entries()].sort((a, b) => {
+          if (b[1] !== a[1]) return b[1] - a[1];
+          return a[0] - b[0];
+        });
+
+        if (sortedVotes.length === 0) continue;
+
+        // Winner must be an active player (re-rank on retirement — X-F6b/CISO V5-9)
+        let winnerId: number | null = null;
+        for (const [pid] of sortedVotes) {
+          const pRow = prepared('SELECT id, team_id FROM players WHERE id = ?').get(pid) as { id: number; team_id: number | null } | undefined;
+          if (pRow && pRow.team_id !== null) {
+            winnerId = pid;
+            break;
+          }
+        }
+        if (winnerId === null) continue;
+
+        const totalVotes = sortedVotes.reduce((s, [, v]) => s + v, 0);
+        const winnerVotes = voteTally.get(winnerId) ?? 0;
+        const voteShare = totalVotes > 0 ? winnerVotes / totalVotes : 0;
+
+        // Insert/upsert award winner (idempotent — UPSERT on UNIQUE constraint)
+        db.prepare(
+          `INSERT OR REPLACE INTO award_winners
+             (league_id, season_number, award_type, league, player_id, vote_share)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        ).run(leagueId, seasonNumber, awardType, conference, winnerId, voteShare);
+
+        // Insert award winner news item (LLM flavor — use pending)
+        const winner = candidates.find(c => c.player_id === winnerId);
+        const winnerName = winner ? `${winner.first_name} ${winner.last_name}` : 'Unknown';
+        const awardName = awardType === 'mvp' ? 'MVP' : awardType === 'cy_young' ? 'Cy Young' : 'Rookie of the Year';
+        insertNewsItem({
+          leagueId, seasonNumber, gameNumber: 0,
+          eventType: 'award_winner',
+          teamId: winner?.team_id ?? null,
+          playerId: winnerId,
+          headlineText: `${winnerName} wins the ${conference} League ${awardName}`,
+        });
+      }
+    }
+  });
+
+  awardTx();
+  console.log(`[offseason] Award voting step complete for season ${seasonNumber}`);
+}
+
+// =========================================================
+// v0.5.0 Step: Rivalry Update (Feature 5, Section 5e)
+// =========================================================
+async function runRivalryUpdateStep(leagueId: number, seasonNumber: number): Promise<void> {
+  const db = getDb();
+
+  // No-op cleanly when season_number === 1
+  if (seasonNumber <= 1) {
+    console.log(`[offseason] Rivalry update: skipped (season ${seasonNumber})`);
+    return;
+  }
+
+  const rivalryTx = db.transaction(() => {
+    const teams = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
+    const lookbackSeason = Math.max(1, seasonNumber - 5);
+
+    // Helper: canonicalize pair to (smaller_id, larger_id)
+    function canonical(a: number, b: number): [number, number] {
+      return a < b ? [a, b] : [b, a];
+    }
+
+    function upsertRivalry(teamA: number, teamB: number, deltaScore: number, originType: string): void {
+      const [aId, bId] = canonical(teamA, teamB);
+      const existing = db.prepare(
+        'SELECT * FROM rivalries WHERE league_id = ? AND team_a_id = ? AND team_b_id = ?'
+      ).get(leagueId, aId, bId) as { id: number; rivalry_score: number } | undefined;
+
+      if (existing) {
+        const newScore = Math.min(100, Math.max(0, existing.rivalry_score + deltaScore));
+        db.prepare(
+          'UPDATE rivalries SET rivalry_score = ?, last_updated_season = ? WHERE id = ?'
+        ).run(newScore, seasonNumber, existing.id);
+      } else if (deltaScore > 0) {
+        db.prepare(
+          `INSERT INTO rivalries (league_id, team_a_id, team_b_id, rivalry_score, formed_season, last_updated_season, origin_type)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        ).run(leagueId, aId, bId, Math.min(100, deltaScore), seasonNumber, seasonNumber, originType);
+      }
+    }
+
+    // 1. Playoff series: +20 for each pair that met in playoffs this season
+    const playoffSeries = prepared(
+      `SELECT team1_id, team2_id FROM playoff_series WHERE league_id = ? AND season_number = ?`
+    ).all(leagueId, seasonNumber) as Array<{ team1_id: number; team2_id: number }>;
+
+    for (const series of playoffSeries) {
+      upsertRivalry(series.team1_id, series.team2_id, 20, 'playoff_series');
+    }
+
+    // 2. Division block: from franchise_season_history over last 5 seasons
+    // Count how many times team X won division while team Y finished 2nd in same division
+    const divHistory = prepared(
+      `SELECT team_id, division_finish, season_number,
+              (SELECT t2.division FROM teams t2 WHERE t2.id = fsh.team_id) as division
+       FROM franchise_season_history fsh
+       WHERE fsh.league_id = ? AND fsh.season_number >= ?
+         AND fsh.division_finish IN (1, 2)`
+    ).all(leagueId, lookbackSeason) as Array<{
+      team_id: number; division_finish: number; season_number: number; division: string;
+    }>;
+
+    // Group by division + season, check if there's a 1st and 2nd place team
+    const divMap = new Map<string, Array<{ team_id: number; finish: number }>>();
+    for (const row of divHistory) {
+      const key = `${row.division}:${row.season_number}`;
+      if (!divMap.has(key)) divMap.set(key, []);
+      divMap.get(key)!.push({ team_id: row.team_id, finish: row.division_finish });
+    }
+
+    // For each division-season pair where there's a 1st and 2nd place:
+    // count how many times the same 1st-2nd pair occurred
+    const blockCounts = new Map<string, number>();
+    for (const [, entries] of divMap) {
+      const first = entries.find(e => e.finish === 1);
+      const second = entries.find(e => e.finish === 2);
+      if (first && second) {
+        const [a, b] = canonical(first.team_id, second.team_id);
+        const key = `${a}:${b}`;
+        blockCounts.set(key, (blockCounts.get(key) ?? 0) + 1);
+      }
+    }
+
+    for (const [key, count] of blockCounts) {
+      if (count >= 3) {
+        const parts = key.split(':');
+        const aId = parseInt(parts[0] ?? '0', 10);
+        const bId = parseInt(parts[1] ?? '0', 10);
+        if (aId > 0 && bId > 0) {
+          upsertRivalry(aId, bId, 10, 'division_block');
+        }
+      }
+    }
+
+    // 3. Decay: -5 for every existing rivalry with no meaningful interaction this season
+    const allRivalries = prepared(
+      'SELECT * FROM rivalries WHERE league_id = ?'
+    ).all(leagueId) as Array<{ id: number; team_a_id: number; team_b_id: number; rivalry_score: number; last_updated_season: number }>;
+
+    for (const rivalry of allRivalries) {
+      if (rivalry.last_updated_season < seasonNumber) {
+        const newScore = Math.max(0, rivalry.rivalry_score - 5);
+        db.prepare('UPDATE rivalries SET rivalry_score = ?, last_updated_season = ? WHERE id = ?')
+          .run(newScore, seasonNumber, rivalry.id);
+      }
+    }
+  });
+
+  rivalryTx();
+  console.log(`[offseason] Rivalry update complete for season ${seasonNumber}`);
+}
+
+// =========================================================
+// v0.5.0 Step: Stadium Resolve (Feature 11, Section 5f)
+// =========================================================
+async function runStadiumResolveStep(leagueId: number, seasonNumber: number, seed: number): Promise<void> {
+  const { getArchetype } = await import('./archetypes.js');
+  const db = getDb();
+  const rng = seedFor('stadium_resolve', seed);
+
+  // UPGRADE constants per spec §11
+  const UPGRADE_DEFS: Record<string, { cost: number; capacity_delta: number; revenue_delta: number; build_time: number }> = {
+    premium_seating: { cost: 20_000_000, capacity_delta: 2000, revenue_delta: 5_000_000, build_time: 1 },
+    scoreboard:      { cost: 10_000_000, capacity_delta: 0,    revenue_delta: 0,          build_time: 1 }, // +3% attendance rate effect (not tracked as revenue_delta)
+    concessions:     { cost: 8_000_000,  capacity_delta: 0,    revenue_delta: 3_000_000,  build_time: 1 },
+    new_stadium_small:  { cost: 150_000_000, capacity_delta: 0, revenue_delta: 20_000_000, build_time: 3 }, // capacity ×1.5 computed separately
+    new_stadium_medium: { cost: 300_000_000, capacity_delta: 0, revenue_delta: 40_000_000, build_time: 3 }, // capacity ×1.4 computed separately
+  };
+
+  const stadiumTx = db.transaction(() => {
+    const teams = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
+    const relocatingTeams = new Set(
+      (prepared('SELECT id FROM teams WHERE league_id = ? AND relocation_threat_active = 1').all(leagueId) as Array<{ id: number }>)
+        .map(t => t.id)
+    );
+
+    for (const team of teams) {
+      // Gate: if team is relocating this offseason, cancel in-progress upgrade (X-F11a)
+      if (relocatingTeams.has(team.id) && team.stadium_upgrade_in_progress === 1) {
+        db.prepare(`UPDATE teams SET stadium_upgrade_in_progress = 0, stadium_upgrade_complete_season = NULL, stadium_upgrade_type = NULL WHERE id = ?`)
+          .run(team.id);
+        // Forfeit cost logged as transaction (simplified: just clear the upgrade)
+        console.log(`[offseason] Stadium upgrade cancelled for team ${team.id} (relocation)`);
+        continue;
+      }
+
+      // 1. Complete in-progress upgrades (X-F11b: use PRE-increment season_number)
+      if (team.stadium_upgrade_in_progress === 1) {
+        const completeSeason = team.stadium_upgrade_complete_season ?? (seasonNumber + 1);
+        if (completeSeason <= seasonNumber) {
+          const upgradeType = team.stadium_upgrade_type;
+          if (upgradeType) {
+            const upgDef = UPGRADE_DEFS[upgradeType];
+            if (upgDef) {
+              // Apply capacity delta
+              let newCapacity = team.stadium_capacity;
+              if (upgradeType === 'new_stadium_small') newCapacity = Math.round(team.stadium_capacity * 1.5);
+              else if (upgradeType === 'new_stadium_medium') newCapacity = Math.round(team.stadium_capacity * 1.4);
+              else newCapacity = team.stadium_capacity + upgDef.capacity_delta;
+
+              db.prepare(
+                `UPDATE teams SET stadium_capacity = ?, stadium_upgrade_in_progress = 0,
+                 stadium_upgrade_complete_season = NULL, stadium_upgrade_type = NULL,
+                 new_stadium_honeymoon_seasons_remaining = ?
+                 WHERE id = ?`
+              ).run(newCapacity, upgradeType.startsWith('new_stadium') ? 2 : 0, team.id);
+
+              // Mark complete in stadium_upgrades table
+              db.prepare(
+                `UPDATE stadium_upgrades SET season_completed = ? WHERE team_id = ? AND season_completed IS NULL`
+              ).run(seasonNumber, team.id);
+
+              insertNewsItem({
+                leagueId, seasonNumber, gameNumber: 0,
+                eventType: 'stadium_upgrade_complete',
+                teamId: team.id,
+                headlineText: `${team.city} ${team.name} complete stadium upgrade: ${upgradeType.replace('_', ' ')}`,
+              });
+            }
+          }
+        }
+      }
+
+      // Decrement honeymoon counter
+      if ((team.new_stadium_honeymoon_seasons_remaining ?? 0) > 0) {
+        db.prepare('UPDATE teams SET new_stadium_honeymoon_seasons_remaining = new_stadium_honeymoon_seasons_remaining - 1 WHERE id = ?').run(team.id);
+      }
+
+      // 2. New upgrade decisions (only if no upgrade in progress, not relocating)
+      if (team.stadium_upgrade_in_progress === 1 || relocatingTeams.has(team.id)) continue;
+      if (team.interim_gm === 1) continue;
+
+      const archetype = getArchetype(team.gm_archetype ?? 'balanced');
+      const isAnalytics = (team.gm_archetype ?? 'balanced') === 'analytics';
+      const isOldSchool = (team.gm_archetype ?? 'balanced') === 'old-school';
+      const isPatientOwner = team.owner_personality === 'patient';
+      const isMeddlingOwner = team.owner_personality === 'meddling' || team.owner_personality === 'win-now';
+
+      // Only decide upgrade if RNG says it's time (20% chance per offseason)
+      if (rng() > 0.2) continue;
+
+      // Pick upgrade type
+      const upgradeType = (['premium_seating', 'scoreboard', 'concessions'] as const)[Math.floor(rng() * 3)] ?? 'scoreboard';
+      const upgDef = UPGRADE_DEFS[upgradeType];
+      if (!upgDef) continue;
+
+      // ROI check
+      const roiSeasons = upgDef.revenue_delta > 0 ? upgDef.cost / upgDef.revenue_delta : 999;
+
+      let approve = false;
+      if (isAnalytics && roiSeasons <= 5) approve = true;
+      else if (isOldSchool) approve = rng() < 0.6; // always approves prestige
+      else if (isPatientOwner) approve = roiSeasons <= 7;
+      else if (isMeddlingOwner) approve = upgDef.revenue_delta >= 2_000_000; // prefer payroll but accepts high revenue
+      else approve = roiSeasons <= 6;
+
+      if (!approve) continue;
+
+      // Ensure franchise_value can cover the cost
+      if ((team.franchise_value ?? 0) * 1_000_000 < upgDef.cost) continue;
+
+      // Start upgrade
+      db.prepare(
+        `UPDATE teams SET stadium_upgrade_in_progress = 1, stadium_upgrade_complete_season = ?,
+         stadium_upgrade_type = ? WHERE id = ?`
+      ).run(seasonNumber + upgDef.build_time, upgradeType, team.id);
+
+      // Insert stadium_upgrades record
+      db.prepare(
+        `INSERT INTO stadium_upgrades
+           (league_id, team_id, upgrade_type, cost, season_started, capacity_delta, revenue_delta)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).run(leagueId, team.id, upgradeType, upgDef.cost, seasonNumber, upgDef.capacity_delta, upgDef.revenue_delta);
+    }
+  });
+
+  stadiumTx();
+  console.log(`[offseason] Stadium resolve step complete for season ${seasonNumber}`);
 }
 
 // Step 4 (was 3): Free agency — D20
@@ -1556,7 +2418,20 @@ async function finalizeOffseason(leagueId: number, previousSeason: number): Prom
     // Without this, the counters retain end-of-season values from the prior season while
     // games_played resets to 0, causing cascade eval, chemistry, call-up, and firing checks
     // to silently stop firing for the entire new season.
-    db.prepare('UPDATE teams SET wins = 0, losses = 0, runs_scored = 0, runs_allowed = 0, games_played = 0, last_call_up_check_game = 0, last_firing_check_game = 0, last_gm_firing_check_game = 0, last_service_time_update_game = 0, last_cascade_check_game = 0, last_chemistry_calc_game = 0 WHERE league_id = ?').run(leagueId);
+    // v0.5.0: also reset winning_streak and losing_streak (new columns)
+    db.prepare('UPDATE teams SET wins = 0, losses = 0, runs_scored = 0, runs_allowed = 0, games_played = 0, last_call_up_check_game = 0, last_firing_check_game = 0, last_gm_firing_check_game = 0, last_service_time_update_game = 0, last_cascade_check_game = 0, last_chemistry_calc_game = 0, winning_streak = 0, losing_streak = 0 WHERE league_id = ?').run(leagueId);
+
+    // v0.5.0 (Section 2.6b): Per-player reset — CRITICAL load-bearing rule #1
+    // Must reset per-season counters and increment years_in_org
+    // arb_year is NOT reset here — it is RECOMPUTED each offseason in arbitration step
+    db.prepare(`UPDATE players SET
+      appearances_this_season = 0,
+      consecutive_days_used = 0,
+      streak_type = NULL,
+      streak_games_remaining = 0,
+      rule5_return_checked = 0,
+      years_in_org = years_in_org + 1
+    WHERE league_id = ?`).run(leagueId);
 
     // D21: Remaining undrafted players from original pool become free agents
     db.prepare(

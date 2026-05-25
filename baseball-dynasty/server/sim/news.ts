@@ -15,7 +15,7 @@ import {
   type TxFlavorInput,
 } from '../services/llm.js';
 
-export type NewsBadge = 'ROSTER' | 'TRANSACTION' | 'FRONT OFFICE' | 'INJURY' | 'MILESTONE' | 'GAME';
+export type NewsBadge = 'ROSTER' | 'TRANSACTION' | 'FRONT OFFICE' | 'INJURY' | 'MILESTONE' | 'GAME' | 'RIVALRY';
 
 export type NewsEventType =
   | 'call_up'
@@ -33,7 +33,19 @@ export type NewsEventType =
   | 'owner_died'
   | 'injury'
   | 'milestone'
-  | 'game_result';
+  | 'game_result'
+  // v0.5.0 new types
+  | 'rule5_draft'
+  | 'international_signing'
+  | 'opt_out'
+  | 'record_watch'
+  | 'milestone_achieved'
+  | 'award_leader_change'
+  | 'award_winner'
+  | 'streak_hot'
+  | 'streak_cold'
+  | 'rivalry_game'
+  | 'stadium_upgrade_complete';
 
 const BADGE_MAP: Record<NewsEventType, NewsBadge> = {
   call_up: 'ROSTER',
@@ -52,6 +64,18 @@ const BADGE_MAP: Record<NewsEventType, NewsBadge> = {
   injury: 'INJURY',
   milestone: 'MILESTONE',
   game_result: 'GAME',
+  // v0.5.0 new types
+  rule5_draft: 'TRANSACTION',
+  international_signing: 'TRANSACTION',
+  opt_out: 'TRANSACTION',
+  record_watch: 'MILESTONE',
+  milestone_achieved: 'MILESTONE',
+  award_leader_change: 'FRONT OFFICE',
+  award_winner: 'FRONT OFFICE',
+  streak_hot: 'MILESTONE',
+  streak_cold: 'MILESTONE',
+  rivalry_game: 'RIVALRY',
+  stadium_upgrade_complete: 'FRONT OFFICE',
 };
 
 // Insert a news item. Game results are inserted with headline_text immediately.
@@ -295,6 +319,17 @@ function proceduralHeadline(
     case 'owner_died': return teamName ? `${teamName} owner passes away; heir takes control.` : 'Owner passes away; heir takes control.';
     case 'injury':     return `${p}${t} placed on the injured list.`;
     case 'milestone': return playerName ? `${playerName} reaches a career milestone.` : 'A player reaches a career milestone.';
+    case 'rule5_draft': return playerName ? `${p} selected in Rule 5 Draft.` : 'Rule 5 Draft selection made.';
+    case 'international_signing': return playerName ? `${p} signed as international prospect.` : 'International prospect signed.';
+    case 'opt_out': return playerName ? `${p} exercises opt-out clause, re-enters free agency.` : 'Player exercises opt-out clause.';
+    case 'record_watch': return playerName ? `Record Watch — ${p} chasing a milestone.` : 'Record Watch in progress.';
+    case 'milestone_achieved': return playerName ? `${p} achieves a major milestone!` : 'Major milestone achieved!';
+    case 'award_leader_change': return playerName ? `${p} takes award lead.` : 'Award race leader changes.';
+    case 'award_winner': return playerName ? `${p} wins award.` : 'Award winner announced.';
+    case 'streak_hot': return playerName ? `${p} is on a hot streak!` : 'Player is on a hot streak!';
+    case 'streak_cold': return playerName ? `${p} is in a cold streak.` : 'Player is in a cold streak.';
+    case 'rivalry_game': return teamName ? `Rivalry matchup: ${teamName}.` : 'Rivalry game scheduled.';
+    case 'stadium_upgrade_complete': return teamName ? `${teamName} completes stadium upgrade.` : 'Stadium upgrade complete.';
     default: return `${badge} event occurred.`;
   }
 }
