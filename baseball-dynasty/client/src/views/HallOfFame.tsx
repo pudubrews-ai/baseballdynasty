@@ -151,13 +151,15 @@ export default function HallOfFame() {
             )}
           </div>
 
-          {/* Manager/GM wing */}
-          {managerGmInductees.length > 0 && (
-            <div
-              data-testid="halloffame-manager-wing"
-              style={{ background: '#1e293b', borderRadius: '8px', padding: '16px' }}
-            >
-              <h3 style={{ marginTop: 0, color: '#a78bfa' }}>Managers &amp; GMs</h3>
+          {/* Manager/GM wing — always rendered (testid must be present in DOM per spec §3 / P2.3) */}
+          <div
+            data-testid="halloffame-manager-wing"
+            style={{ background: '#1e293b', borderRadius: '8px', padding: '16px' }}
+          >
+            <h3 style={{ marginTop: 0, color: '#a78bfa' }}>Managers &amp; GMs</h3>
+            {managerGmInductees.length === 0 ? (
+              <p style={{ color: '#64748b', fontSize: '13px' }}>No manager inductees yet</p>
+            ) : (
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(240px, 1fr))', gap: '12px' }}>
                 {managerGmInductees.map(inductee => (
                   <div
@@ -171,8 +173,8 @@ export default function HallOfFame() {
                   </div>
                 ))}
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </>
       )}
     </div>

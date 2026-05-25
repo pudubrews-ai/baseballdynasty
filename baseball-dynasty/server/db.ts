@@ -258,6 +258,8 @@ export interface PlayerRow {
   promo_eval_streak: number;
   morale_effect_bp: number;
   morale_effect_until_game: number | null;
+  // migration 013: career peak rating (nullable — may be null for pre-013 rows until dev step runs)
+  career_overall: number | null;
 }
 
 export interface GameLogRow {

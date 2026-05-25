@@ -8,7 +8,7 @@
 import { getDb, prepared, type TeamRow, type PlayerRow } from '../db.js';
 import { seedFor } from './prng.js';
 import { insertNewsItem } from './news.js';
-import { setGmConfidence } from './franchise.js';
+import { setGmConfidence, getFranchiseState } from './franchise.js';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Chemistry calculation (per team, every 10 games, single aggregate query)
@@ -147,9 +147,12 @@ export function checkMalcontentPressure(
   ).all(leagueId, team.id) as Array<{ id: number }>;
 
   if (malcontents.length > 0) {
-    // Pressure builds after 10 games — signal GM confidence hit
+    // Pressure builds after 10 games — signal GM confidence hit (owned franchise only)
     if (team.games_played % 10 === 0) {
-      setGmConfidence(leagueId, -5);
+      const fs = getFranchiseState(leagueId);
+      if (fs && fs.owned_team_id === team.id) {
+        setGmConfidence(leagueId, -5);
+      }
     }
   }
 }

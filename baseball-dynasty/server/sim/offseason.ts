@@ -8,6 +8,7 @@ import { callSeasonNarrative } from '../services/llm.js';
 import { insertTransactionNewsItem, insertFrontOfficeNewsItem } from './news.js';
 import { getFranchiseState, resetGmConfidence } from './franchise.js';
 import { classifySale, checkRelocationThreat, setRelocationThreat, resolveRelocation } from './sales.js';
+import { assignInjury } from './injury.js';
 
 const GM_PHILOSOPHIES: Array<'win-now' | 'rebuild' | 'balanced'> = ['win-now', 'rebuild', 'balanced'];
 const GM_RISK_TOLERANCES: Array<'conservative' | 'moderate' | 'aggressive'> = ['conservative', 'moderate', 'aggressive'];
@@ -752,7 +753,8 @@ async function runRetirementStep(leagueId: number, seasonNumber: number): Promis
     const leadership = player.leadership ?? 0;
     const coachability = player.coachability ?? 0;
     if (leadership >= 70 && coachability >= 65) {
-      const careerOverall = player.overall_rating; // use retirement rating as career overall proxy
+      // P3: use career_overall (peak rating) if available, fall back to current overall_rating
+      const careerOverall = player.career_overall ?? player.overall_rating;
       // Coaching rating = leadership × 0.5 + coachability × 0.3 + career_overall × 0.2
       let coachingRating = Math.round(leadership * 0.5 + coachability * 0.3 + careerOverall * 0.2);
       // Former stars (career overall 80+): +10 bonus
@@ -782,6 +784,14 @@ async function runDevelopmentStep(leagueId: number, seed: number): Promise<void>
   const players = prepared('SELECT * FROM players WHERE league_id = ?').all(leagueId) as PlayerRow[];
 
   const db = getDb();
+
+  // Build a map of team_id → medical_staff_rating for the offseason injury rolls
+  const teamRows = prepared('SELECT id, medical_staff_rating FROM teams WHERE league_id = ?').all(leagueId) as Array<{ id: number; medical_staff_rating: number }>;
+  const medStaffByTeam = new Map<number, number>();
+  for (const t of teamRows) {
+    medStaffByTeam.set(t.id, t.medical_staff_rating ?? 5);
+  }
+
   const devTx = db.transaction(() => {
     for (const player of players) {
       const newAge = player.age + 1;
@@ -815,8 +825,21 @@ async function runDevelopmentStep(leagueId: number, seed: number): Promise<void>
 
       let newRating = Math.max(25, Math.min(99, player.overall_rating + ratingChange));
 
-      // 5% injury chance per season
+      // 5% injury chance per season — P1.3 fix: assign full injury type/tier, not just is_injured flag
       const injured = rng() < 0.05 ? 1 : 0;
+      let injType: string | null = null;
+      let injTier: string | null = null;
+      let injReturnGame: number | null = null;
+      let injRehab = 0;
+      if (injured === 1) {
+        const medStaff = player.team_id != null ? (medStaffByTeam.get(player.team_id) ?? 5) : 5;
+        // Offseason injury carries into early next season (up to 162 games remaining)
+        const a = assignInjury(player.position, medStaff, 0, player.id, 162);
+        injType = a.type;
+        injTier = a.tier;
+        injReturnGame = a.ilGames;
+        injRehab = Math.min(a.rehabGames, 15); // enforce CHECK constraint rehab_games_remaining <= 15
+      }
 
       // Potential reveal at 25
       const potentialRevealed = (newAge >= 25 || player.potential_revealed === 1) ? 1 : 0;
@@ -843,9 +866,26 @@ async function runDevelopmentStep(leagueId: number, seed: number): Promise<void>
         }
       }
 
+      // P1.3: include injury fields in update; increment career_injuries when newly injured
+      const careerInjuries = injured === 1 ? (player.career_injuries ?? 0) + 1 : (player.career_injuries ?? 0);
+      // P3: track career_overall as running peak (MAX of existing career_overall and new rating)
+      const existingCareerOverall = player.career_overall ?? player.overall_rating;
+      const newCareerOverall = Math.max(existingCareerOverall, newRating);
       db.prepare(
-        'UPDATE players SET age = ?, overall_rating = ?, potential = ?, is_injured = ?, potential_revealed = ?, contract_years_remaining = ? WHERE id = ?'
-      ).run(newAge, newRating, newPotential, injured, potentialRevealed, newContractYears, player.id);
+        `UPDATE players
+         SET age = ?, overall_rating = ?, potential = ?, is_injured = ?,
+             injury_type = ?, injury_tier = ?, injury_return_game = ?, rehab_games_remaining = ?,
+             career_injuries = ?,
+             career_overall = ?,
+             potential_revealed = ?, contract_years_remaining = ?
+         WHERE id = ?`
+      ).run(
+        newAge, newRating, newPotential, injured,
+        injType, injTier, injReturnGame, injRehab,
+        careerInjuries,
+        newCareerOverall,
+        potentialRevealed, newContractYears, player.id
+      );
     }
   });
 
@@ -1499,6 +1539,11 @@ async function finalizeOffseason(leagueId: number, previousSeason: number): Prom
     db.prepare(
       'UPDATE players SET team_id = NULL WHERE league_id = ? AND is_drafted = 0 AND team_id IS NULL'
     ).run(leagueId);
+
+    // P1.4: Clear stale news pins at season boundary — tragedy pins are within-season only.
+    // current_game_number just reset to 0 above; pins referencing old game numbers would bleed
+    // into the new season if not cleared here.
+    db.prepare('UPDATE news_items SET pinned_until_game = NULL WHERE league_id = ?').run(leagueId);
   });
 
   tx();

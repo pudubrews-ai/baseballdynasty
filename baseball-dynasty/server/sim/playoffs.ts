@@ -197,7 +197,7 @@ export async function runPlayoffs(leagueId: number): Promise<void> {
 
   // Transition to offseason
   prepared('UPDATE leagues SET phase = ? WHERE id = ?').run('offseason', leagueId);
-  prepared('UPDATE leagues SET offseason_step = ? WHERE id = ?').run('retirement', leagueId);
+  prepared('UPDATE leagues SET offseason_step = ? WHERE id = ?').run('season_archive', leagueId);
 }
 
 async function runSeries(

@@ -13,7 +13,7 @@ coachesRouter.get('/available', async (_req: Request, res: Response, next: NextF
     const candidates = prepared(
       `SELECT cc.id, cc.player_id, cc.specialty, cc.coaching_rating, cc.available_since,
               p.first_name || ' ' || p.last_name AS name,
-              p.overall_rating AS career_overall
+              COALESCE(p.career_overall, p.overall_rating) AS career_overall
        FROM coaching_candidates cc
        JOIN players p ON p.id = cc.player_id
        WHERE cc.league_id = ? AND cc.available = 1

@@ -301,17 +301,18 @@ export default function Teams() {
           )}
 
           {/* §1.4.4: snake_case field names for financials */}
+          {/* P2.5/P2.6: All testid containers always rendered when financials tab active */}
           {activeTab === 'financials' && (() => {
             interface FinancialsData {
               revenue_history: Array<{ season_number: number; revenue: number; attendance_avg: number; payroll_actual: number; payroll_budget: number; luxury_tax_paid: number }>;
               franchise_value: number;
               relocation_threat_active: boolean;
             }
-            const fin = (tabData && typeof tabData === 'object' && 'revenue_history' in (tabData as object))
+            const fin = (tabData && typeof tabData === 'object' && !Array.isArray(tabData) && 'revenue_history' in (tabData as object))
               ? (tabData as FinancialsData)
               : null;
             const BAR_MAX_W = 120;
-            const revMax = fin ? Math.max(...fin.revenue_history.map(r => r.revenue), 1) : 1;
+            const revMax = fin && fin.revenue_history.length > 0 ? Math.max(...fin.revenue_history.map(r => r.revenue), 1) : 1;
             return (
               <div style={{ fontSize: '13px', maxHeight: '400px', overflowY: 'auto' }}>
                 {/* Current financials from teamDetail */}
@@ -329,59 +330,69 @@ export default function Teams() {
                     {formatMoney(teamDetail.current_payroll)}
                   </span>
                 </div>
-                {fin && (
-                  <div data-testid="franchise-value-display" style={{ marginBottom: '8px' }}>
-                    <span style={{ color: '#94a3b8' }}>Franchise Value: </span>
+                {/* P2.6: franchise-value-display always rendered when financials tab active */}
+                <div data-testid="franchise-value-display" style={{ marginBottom: '8px' }}>
+                  <span style={{ color: '#94a3b8' }}>Franchise Value: </span>
+                  {fin ? (
                     <span style={{ color: '#f59e0b' }}>${fin.franchise_value}M</span>
-                    {fin.relocation_threat_active && (
-                      <span data-testid="relocation-threat-banner" style={{ marginLeft: '8px', color: '#f87171', fontSize: '11px', fontWeight: 'bold' }}>
-                        RELOCATION THREAT
-                      </span>
-                    )}
+                  ) : (
+                    <span style={{ color: '#64748b' }}>—</span>
+                  )}
+                  {fin?.relocation_threat_active && (
+                    <span data-testid="relocation-threat-banner" style={{ marginLeft: '8px', color: '#f87171', fontSize: '11px', fontWeight: 'bold' }}>
+                      RELOCATION THREAT
+                    </span>
+                  )}
+                </div>
+                {/* Revenue history chart — containers always rendered per spec P2.5 */}
+                <div style={{ marginTop: '12px', borderTop: '1px solid #334155', paddingTop: '8px' }}>
+                  <div style={{ color: '#94a3b8', fontSize: '11px', marginBottom: '6px' }}>Revenue History</div>
+                  <div data-testid="financials-revenue-chart" style={{ display: 'flex', gap: '4px', alignItems: 'flex-end', minHeight: '20px' }}>
+                    {fin && fin.revenue_history.length > 0 ? fin.revenue_history.map(r => (
+                      <div key={r.season_number} title={`S${r.season_number}: ${formatMoney(r.revenue)}`}
+                        style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                        <div style={{ width: '12px', background: '#3b82f6', height: `${Math.round((r.revenue / revMax) * BAR_MAX_W)}px` }} />
+                        <div style={{ fontSize: '9px', color: '#64748b' }}>{r.season_number}</div>
+                      </div>
+                    )) : <span style={{ color: '#64748b', fontSize: '11px' }}>No data yet</span>}
                   </div>
-                )}
-                {/* Revenue history chart */}
-                {fin && fin.revenue_history.length > 0 && (
-                  <div style={{ marginTop: '12px', borderTop: '1px solid #334155', paddingTop: '8px' }}>
-                    <div style={{ color: '#94a3b8', fontSize: '11px', marginBottom: '6px' }}>Revenue History</div>
-                    <div data-testid="financials-revenue-chart" style={{ display: 'flex', gap: '4px', alignItems: 'flex-end' }}>
-                      {fin.revenue_history.map(r => (
-                        <div key={r.season_number} title={`S${r.season_number}: ${formatMoney(r.revenue)}`}
-                          style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                          <div style={{ width: '12px', background: '#3b82f6', height: `${Math.round((r.revenue / revMax) * BAR_MAX_W)}px` }} />
-                          <div style={{ fontSize: '9px', color: '#64748b' }}>{r.season_number}</div>
-                        </div>
-                      ))}
-                    </div>
-                    <div data-testid="financials-attendance-chart" style={{ marginTop: '8px', color: '#94a3b8', fontSize: '11px' }}>
-                      Attendance History
-                    </div>
-                    {fin.revenue_history.map(r => (
-                      <div key={r.season_number} data-testid={`financials-attendance-chart-s${r.season_number}`}
-                        style={{ fontSize: '11px', color: '#64748b' }}>
-                        S{r.season_number}: {r.attendance_avg.toLocaleString()} avg
-                      </div>
-                    ))}
-                    <div data-testid="financials-payroll-chart" style={{ marginTop: '8px', color: '#94a3b8', fontSize: '11px' }}>
-                      Payroll vs Budget History
-                    </div>
-                    {fin.revenue_history.map(r => (
-                      <div key={r.season_number}
-                        style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#64748b' }}>
-                        <span>S{r.season_number}</span>
-                        <span>{formatMoney(r.payroll_actual)} / {formatMoney(r.payroll_budget)}</span>
-                      </div>
-                    ))}
-                    <div data-testid="financials-luxury-tax" style={{ marginTop: '8px', color: '#94a3b8', fontSize: '11px' }}>
-                      Luxury Tax
-                    </div>
-                    {fin.revenue_history.filter(r => r.luxury_tax_paid > 0).map(r => (
-                      <div key={r.season_number} style={{ fontSize: '11px', color: '#f87171' }}>
-                        S{r.season_number}: {formatMoney(r.luxury_tax_paid)}
-                      </div>
-                    ))}
+                  <div data-testid="financials-attendance-chart" style={{ marginTop: '8px', color: '#94a3b8', fontSize: '11px' }}>
+                    Attendance History
                   </div>
-                )}
+                  {fin && fin.revenue_history.map(r => (
+                    <div key={r.season_number}
+                      style={{ fontSize: '11px', color: '#64748b' }}>
+                      S{r.season_number}: {r.attendance_avg.toLocaleString()} avg
+                    </div>
+                  ))}
+                  {(!fin || fin.revenue_history.length === 0) && (
+                    <div style={{ fontSize: '11px', color: '#64748b' }}>No data yet</div>
+                  )}
+                  <div data-testid="financials-payroll-chart" style={{ marginTop: '8px', color: '#94a3b8', fontSize: '11px' }}>
+                    Payroll vs Budget History
+                  </div>
+                  {fin && fin.revenue_history.map(r => (
+                    <div key={r.season_number}
+                      style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: '#64748b' }}>
+                      <span>S{r.season_number}</span>
+                      <span>{formatMoney(r.payroll_actual)} / {formatMoney(r.payroll_budget)}</span>
+                    </div>
+                  ))}
+                  {(!fin || fin.revenue_history.length === 0) && (
+                    <div style={{ fontSize: '11px', color: '#64748b' }}>No data yet</div>
+                  )}
+                  <div data-testid="financials-luxury-tax" style={{ marginTop: '8px', color: '#94a3b8', fontSize: '11px' }}>
+                    Luxury Tax
+                  </div>
+                  {fin && fin.revenue_history.filter(r => r.luxury_tax_paid > 0).map(r => (
+                    <div key={r.season_number} style={{ fontSize: '11px', color: '#f87171' }}>
+                      S{r.season_number}: {formatMoney(r.luxury_tax_paid)}
+                    </div>
+                  ))}
+                  {(!fin || fin.revenue_history.every(r => !r.luxury_tax_paid)) && (
+                    <div style={{ fontSize: '11px', color: '#64748b' }}>None</div>
+                  )}
+                </div>
                 <div style={{ marginTop: '12px', borderTop: '1px solid #334155', paddingTop: '12px' }}>
                   <div style={{ marginBottom: '6px' }}>GM: {teamDetail.gm_name}</div>
                   <div style={{ marginBottom: '6px', color: '#94a3b8', fontSize: '12px' }}>
@@ -394,6 +405,7 @@ export default function Teams() {
             );
           })()}
 
+          {/* P2.4: History tab — franchise-championships and franchise-stat-leaders always rendered */}
           {activeTab === 'history' && (() => {
             interface HistoryData {
               season_records: Array<{ season_number: number; wins: number; losses: number; division_finish: number | null; playoff_round: string; won_championship: boolean; city_label: string | null }>;
@@ -403,14 +415,13 @@ export default function Teams() {
               championships: Array<{ season: number; manager_name: string | null; gm_name: string | null }>;
               stat_leaders: { most_hr: { name: string; value: number } | null; most_hits: { name: string; value: number } | null; most_wins: { name: string; value: number } | null; lowest_era: { name: string; value: number } | null };
             }
-            const hist = (tabData && typeof tabData === 'object' && 'season_records' in (tabData as object))
+            const hist = (tabData && typeof tabData === 'object' && !Array.isArray(tabData) && 'season_records' in (tabData as object))
               ? (tabData as HistoryData)
               : null;
-            if (!hist) return <p style={{ color: '#64748b', fontSize: '12px' }}>No history yet</p>;
             return (
               <div style={{ maxHeight: '450px', overflowY: 'auto', fontSize: '12px' }}>
                 {/* Season records */}
-                {hist.season_records.length > 0 && (
+                {hist && hist.season_records.length > 0 && (
                   <div style={{ marginBottom: '12px' }}>
                     <div style={{ color: '#f59e0b', fontSize: '11px', fontWeight: 'bold', marginBottom: '4px' }}>Season Records</div>
                     {hist.season_records.map(r => (
@@ -420,28 +431,28 @@ export default function Teams() {
                         <span>{r.city_label ? `[${r.city_label}] ` : ''}S{r.season_number}</span>
                         <span>{r.wins}W-{r.losses}L</span>
                         <span style={{ color: r.won_championship ? '#f59e0b' : '#64748b' }}>
-                          {r.won_championship ? '🏆 Champion' : r.playoff_round !== 'missed' ? `${r.playoff_round}` : 'Missed playoffs'}
+                          {r.won_championship ? 'Champion' : r.playoff_round !== 'missed' ? `${r.playoff_round}` : 'Missed playoffs'}
                         </span>
                         {r.division_finish && <span style={{ color: '#94a3b8' }}>Div {r.division_finish}</span>}
                       </div>
                     ))}
                   </div>
                 )}
-                {/* Championships */}
-                {hist.championships.length > 0 && (
-                  <div data-testid="franchise-championships" style={{ marginBottom: '12px' }}>
-                    <div style={{ color: '#f59e0b', fontSize: '11px', fontWeight: 'bold', marginBottom: '4px' }}>Championships</div>
-                    {hist.championships.map(c => (
-                      <div key={c.season} style={{ padding: '3px 0', borderBottom: '1px solid #334155' }}>
-                        <span>Season {c.season}</span>
-                        {c.manager_name && <span style={{ color: '#94a3b8', marginLeft: '8px' }}>Mgr: {c.manager_name}</span>}
-                        {c.gm_name && <span style={{ color: '#94a3b8', marginLeft: '8px' }}>GM: {c.gm_name}</span>}
-                      </div>
-                    ))}
-                  </div>
-                )}
+                {/* Championships — always rendered per spec P2.4 */}
+                <div data-testid="franchise-championships" style={{ marginBottom: '12px' }}>
+                  <div style={{ color: '#f59e0b', fontSize: '11px', fontWeight: 'bold', marginBottom: '4px' }}>Championships</div>
+                  {hist && hist.championships.length > 0 ? hist.championships.map(c => (
+                    <div key={c.season} style={{ padding: '3px 0', borderBottom: '1px solid #334155' }}>
+                      <span>Season {c.season}</span>
+                      {c.manager_name && <span style={{ color: '#94a3b8', marginLeft: '8px' }}>Mgr: {c.manager_name}</span>}
+                      {c.gm_name && <span style={{ color: '#94a3b8', marginLeft: '8px' }}>GM: {c.gm_name}</span>}
+                    </div>
+                  )) : (
+                    <div style={{ color: '#64748b' }}>No championships yet</div>
+                  )}
+                </div>
                 {/* Manager history */}
-                {hist.manager_history.length > 0 && (
+                {hist && hist.manager_history.length > 0 && (
                   <div style={{ marginBottom: '12px' }}>
                     <div style={{ color: '#60a5fa', fontSize: '11px', fontWeight: 'bold', marginBottom: '4px' }}>Manager History</div>
                     {hist.manager_history.map((m, i) => (
@@ -454,7 +465,7 @@ export default function Teams() {
                   </div>
                 )}
                 {/* GM history */}
-                {hist.gm_history.length > 0 && (
+                {hist && hist.gm_history.length > 0 && (
                   <div style={{ marginBottom: '12px' }}>
                     <div style={{ color: '#a78bfa', fontSize: '11px', fontWeight: 'bold', marginBottom: '4px' }}>GM History</div>
                     {hist.gm_history.map((g, i) => (
@@ -467,7 +478,7 @@ export default function Teams() {
                   </div>
                 )}
                 {/* Owner history */}
-                {hist.owner_history.length > 0 && (
+                {hist && hist.owner_history.length > 0 && (
                   <div style={{ marginBottom: '12px' }}>
                     <div style={{ color: '#34d399', fontSize: '11px', fontWeight: 'bold', marginBottom: '4px' }}>Owner History</div>
                     {hist.owner_history.map((o, i) => (
@@ -479,15 +490,21 @@ export default function Teams() {
                     ))}
                   </div>
                 )}
-                {/* Stat leaders */}
+                {/* Stat leaders — always rendered per spec P2.4 */}
                 <div data-testid="franchise-stat-leaders" style={{ marginBottom: '8px' }}>
                   <div style={{ color: '#fb923c', fontSize: '11px', fontWeight: 'bold', marginBottom: '4px' }}>All-Time Stat Leaders</div>
-                  {hist.stat_leaders.most_hr && <div style={{ color: '#94a3b8' }}>HR: {hist.stat_leaders.most_hr.name} ({hist.stat_leaders.most_hr.value})</div>}
-                  {hist.stat_leaders.most_hits && <div style={{ color: '#94a3b8' }}>H: {hist.stat_leaders.most_hits.name} ({hist.stat_leaders.most_hits.value})</div>}
-                  {hist.stat_leaders.most_wins && <div style={{ color: '#94a3b8' }}>W: {hist.stat_leaders.most_wins.name} ({hist.stat_leaders.most_wins.value})</div>}
-                  {hist.stat_leaders.lowest_era && <div style={{ color: '#94a3b8' }}>ERA: {hist.stat_leaders.lowest_era.name} ({hist.stat_leaders.lowest_era.value})</div>}
-                  {!hist.stat_leaders.most_hr && !hist.stat_leaders.most_hits && !hist.stat_leaders.most_wins && !hist.stat_leaders.lowest_era && (
-                    <div style={{ color: '#64748b' }}>No stats recorded yet</div>
+                  {hist ? (
+                    <>
+                      {hist.stat_leaders.most_hr && <div style={{ color: '#94a3b8' }}>HR: {hist.stat_leaders.most_hr.name} ({hist.stat_leaders.most_hr.value})</div>}
+                      {hist.stat_leaders.most_hits && <div style={{ color: '#94a3b8' }}>H: {hist.stat_leaders.most_hits.name} ({hist.stat_leaders.most_hits.value})</div>}
+                      {hist.stat_leaders.most_wins && <div style={{ color: '#94a3b8' }}>W: {hist.stat_leaders.most_wins.name} ({hist.stat_leaders.most_wins.value})</div>}
+                      {hist.stat_leaders.lowest_era && <div style={{ color: '#94a3b8' }}>ERA: {hist.stat_leaders.lowest_era.name} ({hist.stat_leaders.lowest_era.value})</div>}
+                      {!hist.stat_leaders.most_hr && !hist.stat_leaders.most_hits && !hist.stat_leaders.most_wins && !hist.stat_leaders.lowest_era && (
+                        <div style={{ color: '#64748b' }}>No stats recorded yet</div>
+                      )}
+                    </>
+                  ) : (
+                    <div style={{ color: '#64748b' }}>No history yet</div>
                   )}
                 </div>
               </div>
