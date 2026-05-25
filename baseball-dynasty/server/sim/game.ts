@@ -57,8 +57,9 @@ const POSITIONS_ORDER = ['C', '1B', '2B', '3B', 'SS', 'LF', 'CF', 'RF', 'DH'];
 // D6: Select lineup — top 9 position players by overall, one per position
 // AB-11: use is_on_25man=1 for the active 25-man roster (not is_on_mlb_roster)
 export function selectLineup(team: TeamRow): PlayerRow[] {
+  // Step 12 (G-1): exclude suspended players from lineup — keep is_on_25man=1 for cap accounting
   const roster = prepared(
-    'SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position NOT IN (\'SP\',\'RP\',\'CL\') ORDER BY overall_rating DESC'
+    "SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position NOT IN ('SP','RP','CL') AND suspension_games_remaining = 0 ORDER BY overall_rating DESC"
   ).all(team.id) as PlayerRow[];
 
   const lineup: PlayerRow[] = [];
@@ -98,8 +99,9 @@ export function selectLineup(team: TeamRow): PlayerRow[] {
 // D6: Select starting pitcher — rotates by team game count mod 5
 // AB-11: use is_on_25man=1 for active 25-man roster
 export function selectStartingPitcher(team: TeamRow): PlayerRow | null {
+  // Step 12 (G-1): exclude suspended pitchers
   const starters = prepared(
-    'SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position = \'SP\' ORDER BY overall_rating DESC LIMIT 5'
+    "SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position = 'SP' AND suspension_games_remaining = 0 ORDER BY overall_rating DESC LIMIT 5"
   ).all(team.id) as PlayerRow[];
 
   if (starters.length === 0) return null;
@@ -126,12 +128,12 @@ function winProbability(homeTeam: TeamRow, awayTeam: TeamRow, gameId: number): n
   const homeStarterRating = homeStarter?.overall_rating ?? 50;
   const awayStarterRating = awayStarter?.overall_rating ?? 50;
 
-  // Use mean overall of RP+CL for bullpen_avg (per D6)
+  // Use mean overall of RP+CL for bullpen_avg (per D6) — Step 12 (G-1): exclude suspended
   const homeBullpen = prepared(
-    "SELECT overall_rating FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL')"
+    "SELECT overall_rating FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL') AND suspension_games_remaining = 0"
   ).all(homeTeam.id) as Array<{ overall_rating: number }>;
   const awayBullpen = prepared(
-    "SELECT overall_rating FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL')"
+    "SELECT overall_rating FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL') AND suspension_games_remaining = 0"
   ).all(awayTeam.id) as Array<{ overall_rating: number }>;
 
   const homeBullpenAvg = homeBullpen.length > 0
@@ -281,12 +283,12 @@ export async function simulateGame(
     return;
   }
 
-  // Get bullpens
+  // Get bullpens — Step 12 (G-1): exclude suspended relievers
   const homeBullpen = prepared(
-    "SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL') ORDER BY overall_rating DESC"
+    "SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL') AND suspension_games_remaining = 0 ORDER BY overall_rating DESC"
   ).all(homeTeam.id) as PlayerRow[];
   const awayBullpen = prepared(
-    "SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL') ORDER BY overall_rating DESC"
+    "SELECT * FROM players WHERE team_id = ? AND is_on_25man = 1 AND position IN ('RP','CL') AND suspension_games_remaining = 0 ORDER BY overall_rating DESC"
   ).all(awayTeam.id) as PlayerRow[];
 
   // Generate batter box lines

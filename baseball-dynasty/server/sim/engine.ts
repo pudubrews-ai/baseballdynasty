@@ -18,6 +18,7 @@ import { getLlmStatus, resetNewsCallsThisSeason } from '../services/llm.js';
 import { insertGameNewsItem, insertNewsItem, insertMilestoneNewsItem, fillPendingHeadlines, fillPendingTransactionFlavors } from './news.js';
 import { scrubError } from '../util/scrub.js';
 import { rollAndResolveTragedy } from './tragedy.js';
+import { rollSuspensions } from './suspensions.js';
 import type { LeagueStateSnapshot, SimSpeed } from '../../shared/types.js';
 import type { NewLeagueBodyType } from '../../shared/schemas.js';
 
@@ -403,6 +404,16 @@ async function runGameTick(league: LeagueRow): Promise<void> {
     prepared('UPDATE leagues SET phase = ? WHERE id = ?').run('playoffs', league.id);
     console.log('[engine] Regular season complete, transitioning to playoffs');
     return;
+  }
+
+  // Step 12: Suspension rolls — once per season (game 1), seeded by season+worldgen_seed.
+  // Re-rolling with same seed yields same result (deterministic), so idempotent if re-entered.
+  if (nextGame.gameNumber === 1) {
+    try {
+      rollSuspensions(league.id, league.season_number, nextGame.gameNumber, league.worldgen_seed);
+    } catch (err) {
+      console.warn('[engine] Suspension roll error:', scrubError(err).message);
+    }
   }
 
   // Step 11: Tragedy roll — between game ticks, regular season only (L1 — not during playoffs)

@@ -29,6 +29,7 @@ import { resolveDirectives } from './directives.js';
 import { insertNewsItem } from './news.js';
 import { runCascadeEval, updateMinorStandings } from './cascade.js';
 import { seedFor as _seedFor } from './prng.js';
+import { decrementSuspensions } from './suspensions.js';
 
 // AB-NULL §4.3: One-time self-heal for carried-over DBs with stale is_on_25man on null-team players.
 // Called once per runRosterMaintenance invocation — cheap (no-op if already clean).
@@ -140,6 +141,13 @@ export function runRosterMaintenance(
       try {
         const team = prepared('SELECT * FROM teams WHERE id = ?').get(teamId) as TeamRow | undefined;
         if (!team) continue;
+
+        // Step 12: Decrement suspension_games_remaining every game (no cadence gate)
+        try {
+          decrementSuspensions(leagueId, teamId, league.season_number, gameNumber);
+        } catch (err) {
+          console.warn(`[rosterMaintenance] Suspension decrement error for team ${teamId}:`, err);
+        }
 
         // AB-01: 5-game per-team cadence for call-ups/send-downs
         const callUpDue = team.games_played - team.last_call_up_check_game >= 5;
