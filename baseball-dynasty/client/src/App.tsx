@@ -101,6 +101,7 @@ class ErrorBoundary extends React.Component<
 function AppContent() {
   const [activeTab, setActiveTab] = useState<TabName>('league');
   const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [useRealCities, setUseRealCities] = useState(false);
   const [franchiseState, setFranchiseState] = useState<FranchiseStateResponse | null>(null);
   const [showFranchiseSelection, setShowFranchiseSelection] = useState(false);
   const leagueStateValue = useLeagueStatePolling();
@@ -147,19 +148,14 @@ function AppContent() {
   };
 
   const handleNewDynasty = () => {
-    if (!noLeague) {
-      setShowConfirmModal(true);
-    } else {
-      createLeague().then(() => {
-        setActiveTab('draft');
-      }).catch(console.error);
-    }
+    // Always show the setup modal so the real-cities checkbox is always reachable.
+    setShowConfirmModal(true);
   };
 
   const handleConfirmNewDynasty = async () => {
     try {
-      await deleteLeague();
-      await createLeague();
+      if (!noLeague) await deleteLeague();
+      await createLeague({ useRealCities });
       setShowConfirmModal(false);
       setActiveTab('draft');
     } catch (err) {
@@ -299,7 +295,7 @@ function AppContent() {
           </ErrorBoundary>
         </main>
 
-        {/* Confirm new dynasty modal */}
+        {/* New dynasty setup modal */}
         {showConfirmModal && (
           <div
             data-testid="confirm-new-dynasty-modal"
@@ -308,11 +304,37 @@ function AppContent() {
               display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000
             }}
           >
-            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '24px', maxWidth: '400px', width: '100%' }}>
-              <h3 style={{ marginTop: 0 }}>Start New Dynasty?</h3>
-              <p style={{ color: '#94a3b8' }}>
-                This will archive your current league. Continue?
-              </p>
+            <div style={{ background: '#1e293b', border: '1px solid #334155', borderRadius: '8px', padding: '24px', maxWidth: '420px', width: '100%' }}>
+              <h3 style={{ marginTop: 0 }}>{noLeague ? 'Start New Dynasty' : 'Start New Dynasty?'}</h3>
+              {!noLeague && (
+                <p style={{ color: '#94a3b8', marginTop: 0 }}>
+                  This will archive your current league. Continue?
+                </p>
+              )}
+
+              {/* World generation options */}
+              <div style={{ background: '#0f172a', border: '1px solid #334155', borderRadius: '6px', padding: '14px', marginBottom: '20px' }}>
+                <p style={{ margin: '0 0 10px', fontSize: '13px', color: '#64748b', textTransform: 'uppercase', letterSpacing: '0.05em' }}>World Options</p>
+                <label
+                  data-testid="use-real-cities-label"
+                  style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer', userSelect: 'none' }}
+                >
+                  <input
+                    data-testid="use-real-cities-checkbox"
+                    type="checkbox"
+                    checked={useRealCities}
+                    onChange={e => setUseRealCities(e.target.checked)}
+                    style={{ width: '16px', height: '16px', accentColor: '#3b82f6', cursor: 'pointer' }}
+                  />
+                  <span style={{ color: '#e2e8f0', fontSize: '14px' }}>
+                    Use real city names
+                    <span style={{ display: 'block', fontSize: '12px', color: '#64748b', marginTop: '2px' }}>
+                      Real US / Canada / Mexico cities instead of fictional ones
+                    </span>
+                  </span>
+                </label>
+              </div>
+
               <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
                 <button
                   onClick={() => setShowConfirmModal(false)}
@@ -323,9 +345,9 @@ function AppContent() {
                 <button
                   data-testid="delete-league-button"
                   onClick={handleConfirmNewDynasty}
-                  style={{ background: '#dc2626', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer' }}
+                  style={{ background: noLeague ? '#3b82f6' : '#dc2626', color: 'white', border: 'none', padding: '8px 16px', borderRadius: '6px', cursor: 'pointer' }}
                 >
-                  Archive &amp; Start New
+                  {noLeague ? 'Start Dynasty' : 'Archive & Start New'}
                 </button>
               </div>
             </div>

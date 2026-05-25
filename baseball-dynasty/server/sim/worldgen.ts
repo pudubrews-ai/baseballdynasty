@@ -59,6 +59,7 @@ const POTENTIAL_DIST: Array<{ grade: string; pct: number }> = [
 export interface WorldgenOptions {
   seed?: number;
   leagueName?: string;
+  useRealCities?: boolean;
 }
 
 // §2.11: Market-size quota selection — exactly 2 mega + 4 large + 8 medium + 6 small
@@ -166,8 +167,9 @@ export async function generateWorld(options: WorldgenOptions): Promise<{ leagueI
   shuffle(rng, potentialArray);
 
   // Pick 20 cities with market-size quota: exactly 2 mega + 4 large + 8 medium + 6 small (§2.11)
-  // USE_REAL_CITIES=true → draw from real US/Canada/Mexico city pool instead of fictional pool.
-  const cityPool = process.env['USE_REAL_CITIES'] === 'true' ? REAL_CITIES : CITIES;
+  // useRealCities option (from POST body or USE_REAL_CITIES env var) selects the real city pool.
+  const wantRealCities = options.useRealCities ?? (process.env['USE_REAL_CITIES'] === 'true');
+  const cityPool = wantRealCities ? REAL_CITIES : CITIES;
   const selectedCities = selectCitiesWithMarketQuota(rng, [...cityPool]);
 
   // Pick 20 nicknames (no duplicates)

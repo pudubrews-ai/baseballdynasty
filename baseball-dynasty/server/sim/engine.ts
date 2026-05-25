@@ -189,9 +189,10 @@ export async function startNewLeague(options: NewLeagueBodyType): Promise<{ leag
     throw new Error('LEAGUE_EXISTS');
   }
 
-  const wgOptions: { seed?: number; leagueName?: string } = {};
+  const wgOptions: { seed?: number; leagueName?: string; useRealCities?: boolean } = {};
   if (options.seed !== undefined) wgOptions.seed = options.seed;
   if (options.leagueName !== undefined) wgOptions.leagueName = options.leagueName;
+  if (options.useRealCities !== undefined) wgOptions.useRealCities = options.useRealCities;
   const { leagueId, worldgenSeed } = await generateWorld(wgOptions);
 
   currentLeagueId = leagueId;
