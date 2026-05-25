@@ -27,6 +27,7 @@ import { evaluateFirings } from './firings.js';
 import { getFranchiseState, setGmConfidence } from './franchise.js';
 import { resolveDirectives } from './directives.js';
 import { insertNewsItem } from './news.js';
+import { runCascadeEval } from './cascade.js';
 
 // AB-NULL §4.3: One-time self-heal for carried-over DBs with stale is_on_25man on null-team players.
 // Called once per runRosterMaintenance invocation — cheap (no-op if already clean).
@@ -161,6 +162,20 @@ export function runRosterMaintenance(
             ).run(leagueId, league.season_number, teamId);
           } catch (err) {
             console.warn(`[rosterMaintenance] recent_* reset error for team ${teamId}:`, err);
+          }
+        }
+
+        // Step 8: Minor League Cascading — per-team clock (D-1)
+        // Uses SEPARATE last_cascade_check_game clock (not the call-up clock).
+        // Runs BEFORE checkRosterInvariant so settled cascade moves are respected (D-3).
+        // MUST NOT be inside runProspectDev's transaction — sibling transaction only (D-2).
+        const cascadeDue = team.games_played - (team.last_cascade_check_game ?? 0) >= 5;
+        if (cascadeDue) {
+          try {
+            runCascadeEval(leagueId, teamId, league.season_number, gameNumber, team.gm_archetype ?? 'balanced');
+            prepared('UPDATE teams SET last_cascade_check_game = ? WHERE id = ?').run(team.games_played, teamId);
+          } catch (err) {
+            console.warn(`[rosterMaintenance] Cascade eval error for team ${teamId}:`, err);
           }
         }
 
