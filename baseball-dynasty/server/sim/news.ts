@@ -72,8 +72,8 @@ const BADGE_MAP: Record<NewsEventType, NewsBadge> = {
   milestone_achieved: 'MILESTONE',
   award_leader_change: 'FRONT OFFICE',
   award_winner: 'FRONT OFFICE',
-  streak_hot: 'MILESTONE',
-  streak_cold: 'MILESTONE',
+  streak_hot: 'GAME',
+  streak_cold: 'GAME',
   rivalry_game: 'RIVALRY',
   stadium_upgrade_complete: 'FRONT OFFICE',
 };

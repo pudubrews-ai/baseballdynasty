@@ -181,7 +181,7 @@ function AppContent() {
     <LeagueStateContext.Provider value={leagueStateValue}>
       {/* Franchise selection overlay — shown once before first expansion draft */}
       {showFranchiseSelection && !noLeague && (
-        <FranchiseSelection onComplete={handleFranchiseSelectionComplete} />
+        <FranchiseSelection onComplete={handleFranchiseSelectionComplete} onNewDynasty={handleNewDynasty} />
       )}
       <div style={{ fontFamily: 'system-ui, sans-serif', minHeight: '100vh', background: '#0f172a', color: '#e2e8f0' }}>
         {/* Reconnecting banner */}
