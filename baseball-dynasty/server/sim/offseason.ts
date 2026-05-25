@@ -669,6 +669,15 @@ function runVeteransCommittee(db: ReturnType<typeof getDb>, leagueId: number, se
 }
 
 // Step 1: Retirement — players age 40+ retire
+// Determine coaching specialty from player position
+function coachingSpecialty(position: string, speed: number): 'pitching_coach' | 'hitting_coach' | 'bench_coach' | 'third_base_coach' | 'manager' {
+  if (position === 'C' || position === 'SP' || position === 'RP') return 'pitching_coach';
+  if (position === 'SS' || position === '2B') return 'bench_coach';
+  if ((position === 'LF' || position === 'CF' || position === 'RF') && speed >= 70) return 'third_base_coach';
+  if (position === '1B' || position === 'DH') return 'hitting_coach';
+  return 'hitting_coach'; // default fallback for remaining positions (3B, OF without speed)
+}
+
 async function runRetirementStep(leagueId: number, seasonNumber: number): Promise<void> {
   const db = getDb();
 
@@ -676,6 +685,7 @@ async function runRetirementStep(leagueId: number, seasonNumber: number): Promis
     'SELECT * FROM players WHERE league_id = ? AND age >= 40'
   ).all(leagueId) as PlayerRow[];
 
+  let coachingCount = 0;
   for (const player of retirees) {
     // AB-NULL FIX §2.1: also clear is_on_25man and minor_level so retired players don't
     // appear as phantom 25-man members (was creating 717+ ghost rows after 11 seasons).
@@ -689,9 +699,34 @@ async function runRetirementStep(leagueId: number, seasonNumber: number): Promis
       `${player.first_name} ${player.last_name} retires after a distinguished career.`,
       Date.now()
     );
+
+    // Step 6: Player-to-Coach Pipeline
+    // Retired player with leadership >= 70 AND coachability >= 65 enters coaching_candidates
+    const leadership = player.leadership ?? 0;
+    const coachability = player.coachability ?? 0;
+    if (leadership >= 70 && coachability >= 65) {
+      const careerOverall = player.overall_rating; // use retirement rating as career overall proxy
+      // Coaching rating = leadership × 0.5 + coachability × 0.3 + career_overall × 0.2
+      let coachingRating = Math.round(leadership * 0.5 + coachability * 0.3 + careerOverall * 0.2);
+      // Former stars (career overall 80+): +10 bonus
+      if (careerOverall >= 80) coachingRating += 10;
+      coachingRating = Math.min(110, Math.max(0, coachingRating));
+
+      const specialty = coachingSpecialty(player.position, player.speed ?? 0);
+
+      // Idempotent: skip if player already in coaching_candidates
+      const existing = db.prepare('SELECT id FROM coaching_candidates WHERE player_id = ?').get(player.id) as { id: number } | undefined;
+      if (!existing) {
+        db.prepare(
+          `INSERT INTO coaching_candidates (league_id, player_id, specialty, coaching_rating, available, available_since, created_at)
+           VALUES (?, ?, ?, ?, 1, ?, ?)`
+        ).run(leagueId, player.id, specialty, coachingRating, seasonNumber, Date.now());
+        coachingCount++;
+      }
+    }
   }
 
-  console.log(`[offseason] Retirement: ${retirees.length} players retired`);
+  console.log(`[offseason] Retirement: ${retirees.length} players retired, ${coachingCount} entered coaching pool`);
 }
 
 // Step 2: Development — age players, adjust ratings
