@@ -18,9 +18,9 @@ import { callTragedy } from '../services/llm.js';
 // Probability model (per spec §7)
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SEASON_LENGTH = 50;
-const PLAYER_BASE_PROB = 0.0001 / SEASON_LENGTH;   // 0.01% per season → per tick
-const MANAGER_BASE_PROB = 0.00025 / SEASON_LENGTH; // 0.025% per season → per tick
+const LEAGUE_GAMES_PER_SEASON = 500;  // 20 teams × 50 games / 2 = 500 total game ticks per season
+const PLAYER_BASE_PROB = 0.0001 / LEAGUE_GAMES_PER_SEASON;   // 0.01% per player per season
+const MANAGER_BASE_PROB = 0.00025 / LEAGUE_GAMES_PER_SEASON; // 0.025% per manager per season
 
 function playerTragProb(age: number, isOnMlbRoster: boolean): number {
   let p = PLAYER_BASE_PROB;
