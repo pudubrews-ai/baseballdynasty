@@ -207,6 +207,10 @@ import { frontOfficeRouter } from './routes/frontOffice.js';
 import { watchRouter } from './routes/watch.js';
 import { franchiseRouter } from './routes/franchise.js';
 import { directivesRouter } from './routes/directives.js';
+// v0.4.0: new routes
+import { hallOfFameRouter } from './routes/halloffame.js';
+import { coachesRouter } from './routes/coaches.js';
+import { minorsRouter } from './routes/minors.js';
 
 app.use('/api/teams', teamsRouter);
 app.use('/api/players', playersRouter);
@@ -220,6 +224,10 @@ app.use('/api/front-office-events', frontOfficeRouter);
 app.use('/api/watch', watchRouter);
 app.use('/api/franchise', franchiseRouter);
 app.use('/api/directive', directivesRouter);
+// v0.4.0: new routes
+app.use('/api/halloffame', hallOfFameRouter);
+app.use('/api/coaches', coachesRouter);
+app.use('/api/minors', minorsRouter);
 
 // §2.9 / §3.2: Draft order endpoint — branches on phase (expansion vs annual)
 app.get('/api/draft/order', async (_req: Request, res: Response, next: NextFunction): Promise<void> => {

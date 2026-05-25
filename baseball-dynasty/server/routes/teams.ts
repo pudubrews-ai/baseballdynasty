@@ -276,15 +276,236 @@ teamsRouter.get('/:id/history', async (req: Request, res: Response, next: NextFu
     const idResult = teamIdSchema.safeParse(req.params['id']);
     if (!idResult.success) { res.status(400).json({ error: 'invalid_id' }); return; }
 
-    const history = prepared(
-      `SELECT id, event_type, departing_person, incoming_person, reason, hired_person_context,
-              season_number, created_at
-       FROM front_office_events
-       WHERE team_id = ?
-       ORDER BY created_at DESC
-       LIMIT 20`
-    ).all(idResult.data);
+    const teamId = idResult.data;
 
-    res.json(history);
+    // Existence check — 404 for unknown team
+    const teamExists = prepared('SELECT id, league_id FROM teams WHERE id = ?').get(teamId) as { id: number; league_id: number } | undefined;
+    if (!teamExists) { res.status(404).json({ error: 'Team not found' }); return; }
+
+    const leagueId = teamExists.league_id;
+
+    // Season records from franchise_season_history
+    const seasonRecords = prepared(
+      `SELECT season_number, wins, losses, division_finish, playoff_round, made_playoffs, won_championship, city_label
+       FROM franchise_season_history
+       WHERE league_id = ? AND team_id = ?
+       ORDER BY season_number ASC`
+    ).all(leagueId, teamId) as Array<{
+      season_number: number; wins: number; losses: number; division_finish: number | null;
+      playoff_round: string | null; made_playoffs: number; won_championship: number; city_label: string | null;
+    }>;
+
+    // Manager history from front_office_events + franchise_season_history for record computation
+    const managerEvents = prepared(
+      `SELECT departing_person, incoming_person, reason, season_number, created_at,
+              CASE WHEN reason LIKE '%Interim%' OR reason LIKE '%interim%' THEN 1 ELSE 0 END AS interim
+       FROM front_office_events
+       WHERE team_id = ? AND event_type = 'manager_fired'
+       ORDER BY created_at ASC`
+    ).all(teamId) as Array<{
+      departing_person: string | null; incoming_person: string | null; reason: string | null;
+      season_number: number; created_at: number; interim: number;
+    }>;
+
+    // Build manager history — each fired manager + aggregated record from franchise_season_history
+    // Spec interpretation (documented): tenure_games is approximated from full seasons under that manager.
+    // We use manager_name stored in franchise_season_history per season to attribute W/L.
+    const managerHistory = managerEvents.map(ev => {
+      const name = ev.departing_person ?? 'Unknown';
+      const seasons = prepared(
+        `SELECT SUM(wins) as wins, SUM(losses) as losses, COUNT(*) as seasons
+         FROM franchise_season_history WHERE team_id = ? AND manager_name = ?`
+      ).get(teamId, name) as { wins: number; losses: number; seasons: number } | undefined;
+      return {
+        name,
+        tenure_seasons: seasons?.seasons ?? 0,
+        tenure_games: (seasons?.wins ?? 0) + (seasons?.losses ?? 0),
+        record: { wins: seasons?.wins ?? 0, losses: seasons?.losses ?? 0 },
+        reason: ev.reason ?? null,
+        interim: ev.interim === 1,
+      };
+    });
+
+    // GM history — same pattern
+    const gmEvents = prepared(
+      `SELECT departing_person, incoming_person, reason, season_number, created_at,
+              CASE WHEN reason LIKE '%Interim%' OR reason LIKE '%interim%' THEN 1 ELSE 0 END AS interim
+       FROM front_office_events
+       WHERE team_id = ? AND event_type = 'gm_fired'
+       ORDER BY created_at ASC`
+    ).all(teamId) as Array<{
+      departing_person: string | null; incoming_person: string | null; reason: string | null;
+      season_number: number; created_at: number; interim: number;
+    }>;
+
+    const gmHistory = gmEvents.map(ev => {
+      const name = ev.departing_person ?? 'Unknown';
+      const seasons = prepared(
+        `SELECT SUM(wins) as wins, SUM(losses) as losses, COUNT(*) as seasons
+         FROM franchise_season_history WHERE team_id = ? AND gm_name = ?`
+      ).get(teamId, name) as { wins: number; losses: number; seasons: number } | undefined;
+      return {
+        name,
+        tenure_seasons: seasons?.seasons ?? 0,
+        tenure_games: (seasons?.wins ?? 0) + (seasons?.losses ?? 0),
+        record: { wins: seasons?.wins ?? 0, losses: seasons?.losses ?? 0 },
+        reason: ev.reason ?? null,
+        interim: ev.interim === 1,
+      };
+    });
+
+    // Owner history
+    const ownerEvents = prepared(
+      `SELECT departing_person, incoming_person, reason, event_type, season_number, created_at
+       FROM front_office_events
+       WHERE team_id = ? AND event_type IN ('owner_sold_team', 'owner_died')
+       ORDER BY created_at ASC`
+    ).all(teamId) as Array<{
+      departing_person: string | null; incoming_person: string | null; reason: string | null;
+      event_type: string; season_number: number; created_at: number;
+    }>;
+
+    const ownerHistory = ownerEvents.map((ev, idx) => {
+      const nextEv = ownerEvents[idx + 1];
+      return {
+        name: ev.departing_person ?? 'Unknown',
+        era_start: ev.season_number,
+        era_end: nextEv ? nextEv.season_number - 1 : 'present',
+        exit_reason: ev.event_type === 'owner_died' ? 'died' : 'sold',
+      };
+    });
+
+    // Championships from franchise_season_history
+    const championships = prepared(
+      `SELECT fsh.season_number, fsh.manager_name, fsh.gm_name
+       FROM franchise_season_history fsh
+       WHERE fsh.team_id = ? AND fsh.won_championship = 1
+       ORDER BY fsh.season_number ASC`
+    ).all(teamId) as Array<{ season_number: number; manager_name: string | null; gm_name: string | null }>;
+
+    // All-time stat leaders from franchise_player_season
+    // Most HR (career as member of this franchise)
+    const mostHr = prepared(
+      `SELECT fps.player_id, p.first_name, p.last_name, SUM(fps.home_runs) AS total
+       FROM franchise_player_season fps
+       JOIN players p ON p.id = fps.player_id
+       WHERE fps.team_id = ?
+       GROUP BY fps.player_id, p.first_name, p.last_name
+       ORDER BY total DESC LIMIT 1`
+    ).get(teamId) as { player_id: number; first_name: string; last_name: string; total: number } | undefined;
+
+    const mostHits = prepared(
+      `SELECT fps.player_id, p.first_name, p.last_name, SUM(fps.hits) AS total
+       FROM franchise_player_season fps
+       JOIN players p ON p.id = fps.player_id
+       WHERE fps.team_id = ?
+       GROUP BY fps.player_id, p.first_name, p.last_name
+       ORDER BY total DESC LIMIT 1`
+    ).get(teamId) as { player_id: number; first_name: string; last_name: string; total: number } | undefined;
+
+    const mostWins = prepared(
+      `SELECT fps.player_id, p.first_name, p.last_name, SUM(fps.wins) AS total
+       FROM franchise_player_season fps
+       JOIN players p ON p.id = fps.player_id
+       WHERE fps.team_id = ?
+       GROUP BY fps.player_id, p.first_name, p.last_name
+       ORDER BY total DESC LIMIT 1`
+    ).get(teamId) as { player_id: number; first_name: string; last_name: string; total: number } | undefined;
+
+    // Lowest ERA (min 50 IP as member of this franchise)
+    const lowestEra = prepared(
+      `SELECT fps.player_id, p.first_name, p.last_name,
+              ROUND(SUM(fps.earned_runs) * 9.0 / NULLIF(SUM(fps.innings_pitched), 0), 2) AS era,
+              SUM(fps.innings_pitched) AS ip
+       FROM franchise_player_season fps
+       JOIN players p ON p.id = fps.player_id
+       WHERE fps.team_id = ?
+       GROUP BY fps.player_id, p.first_name, p.last_name
+       HAVING ip >= 50
+       ORDER BY era ASC LIMIT 1`
+    ).get(teamId) as { player_id: number; first_name: string; last_name: string; era: number; ip: number } | undefined;
+
+    const statLeaders = {
+      most_hr: mostHr ? { player_id: mostHr.player_id, name: `${mostHr.first_name} ${mostHr.last_name}`, value: mostHr.total } : null,
+      most_hits: mostHits ? { player_id: mostHits.player_id, name: `${mostHits.first_name} ${mostHits.last_name}`, value: mostHits.total } : null,
+      most_wins: mostWins ? { player_id: mostWins.player_id, name: `${mostWins.first_name} ${mostWins.last_name}`, value: mostWins.total } : null,
+      lowest_era: lowestEra ? { player_id: lowestEra.player_id, name: `${lowestEra.first_name} ${lowestEra.last_name}`, value: lowestEra.era, ip: lowestEra.ip } : null,
+    };
+
+    res.json({
+      season_records: seasonRecords.map(r => ({
+        season_number: r.season_number,
+        wins: r.wins,
+        losses: r.losses,
+        division_finish: r.division_finish,
+        playoff_round: r.playoff_round ?? 'missed',
+        made_playoffs: r.made_playoffs === 1,
+        won_championship: r.won_championship === 1,
+        city_label: r.city_label,
+      })),
+      manager_history: managerHistory,
+      gm_history: gmHistory,
+      owner_history: ownerHistory,
+      championships: championships.map(c => ({
+        season: c.season_number,
+        manager_name: c.manager_name,
+        gm_name: c.gm_name,
+      })),
+      stat_leaders: statLeaders,
+    });
+  } catch (err) { next(err); }
+});
+
+// GET /api/teams/:id/financials — financial history year-over-year (Step 5)
+teamsRouter.get('/:id/financials', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const idResult = teamIdSchema.safeParse(req.params['id']);
+    if (!idResult.success) { res.status(400).json({ error: 'invalid_id' }); return; }
+
+    const teamId = idResult.data;
+
+    // Existence check — 404 for unknown team
+    const teamExists = prepared('SELECT id, league_id FROM teams WHERE id = ?').get(teamId) as { id: number; league_id: number } | undefined;
+    if (!teamExists) { res.status(404).json({ error: 'Team not found' }); return; }
+
+    const leagueId = teamExists.league_id;
+
+    const historyRows = prepared(
+      `SELECT season_number, revenue, attendance_avg, payroll_actual, payroll_budget, luxury_tax_paid
+       FROM franchise_season_history
+       WHERE league_id = ? AND team_id = ?
+       ORDER BY season_number ASC`
+    ).all(leagueId, teamId) as Array<{
+      season_number: number; revenue: number; attendance_avg: number;
+      payroll_actual: number; payroll_budget: number; luxury_tax_paid: number;
+    }>;
+
+    // Also expose current franchise_value from teams table
+    const teamRow = prepared(
+      'SELECT franchise_value, relocation_threat_active FROM teams WHERE id = ?'
+    ).get(teamId) as { franchise_value: number; relocation_threat_active: number } | undefined;
+
+    res.json({
+      revenue_history: historyRows.map(r => ({
+        season_number: r.season_number,
+        revenue: r.revenue,
+        attendance_avg: r.attendance_avg,
+        payroll_actual: r.payroll_actual,
+        payroll_budget: r.payroll_budget,
+        luxury_tax_paid: r.luxury_tax_paid,
+      })),
+      attendance_history: historyRows.map(r => ({
+        season_number: r.season_number,
+        attendance_avg: r.attendance_avg,
+      })),
+      payroll_history: historyRows.map(r => ({
+        season_number: r.season_number,
+        payroll_actual: r.payroll_actual,
+        payroll_budget: r.payroll_budget,
+        luxury_tax_paid: r.luxury_tax_paid,
+      })),
+      franchise_value: teamRow?.franchise_value ?? 0,
+      relocation_threat_active: (teamRow?.relocation_threat_active ?? 0) === 1,
+    });
   } catch (err) { next(err); }
 });

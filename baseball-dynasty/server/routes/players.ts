@@ -95,6 +95,52 @@ playersRouter.get('/leaders', async (req: Request, res: Response, next: NextFunc
   } catch (err) { next(err); }
 });
 
+// GET /api/players/prospects — league-wide top 50 by composite score
+// Static SQL only: weights are constants in the ORDER BY expression (check-no-template-sql.mjs gate)
+playersRouter.get('/prospects', async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const league = getActiveLeague();
+    if (!league) { res.json([]); return; }
+
+    // Potential letter → numeric: A=90, B=75, C=60, D=45
+    // Composite: potential_score*0.4 + current_overall*0.3 + (overall_rating as recent_performance proxy)*0.3
+    // Static parameterized query — weights are literals, no interpolation.
+    const prospects = prepared(
+      `SELECT p.id, p.first_name, p.last_name, p.position, p.age, p.minor_level,
+              p.overall_rating, p.potential, p.team_id,
+              t.city || ' ' || t.name AS team_name,
+              CASE p.potential WHEN 'A' THEN 90 WHEN 'B' THEN 75 WHEN 'C' THEN 60 ELSE 45 END AS potential_score,
+              (CASE p.potential WHEN 'A' THEN 90 WHEN 'B' THEN 75 WHEN 'C' THEN 60 ELSE 45 END * 0.4
+               + p.overall_rating * 0.3
+               + p.overall_rating * 0.3) AS composite_score
+       FROM players p
+       LEFT JOIN teams t ON t.id = p.team_id
+       WHERE p.league_id = ? AND p.minor_level IS NOT NULL AND p.is_drafted = 1
+         AND p.rehab_games_remaining = 0
+       ORDER BY composite_score DESC
+       LIMIT 50`
+    ).all(league.id) as Array<{
+      id: number; first_name: string; last_name: string; position: string; age: number;
+      minor_level: string | null; overall_rating: number; potential: string;
+      team_id: number | null; team_name: string | null;
+      potential_score: number; composite_score: number;
+    }>;
+
+    res.json(prospects.map((p, idx) => ({
+      rank: idx + 1,
+      player_id: p.id,
+      name: `${p.first_name} ${p.last_name}`,
+      position: p.position,
+      age: p.age,
+      level: p.minor_level,
+      team_id: p.team_id,
+      team_name: p.team_name,
+      overall: p.overall_rating,
+      potential: p.potential,
+    })));
+  } catch (err) { next(err); }
+});
+
 playersRouter.get('/search', async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const league = getActiveLeague();
