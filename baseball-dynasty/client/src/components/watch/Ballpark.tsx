@@ -165,21 +165,15 @@ export default function Ballpark({
       {/* Pitcher's mound */}
       <ellipse cx={W / 2} cy={H * 0.77} rx={14} ry={8} fill="#9a7040" />
 
-      {/* Crowd sections (3 sections: left, center, right) */}
-      {isGameActive && (
-        <>
-          <CrowdSection cx={W * 0.22} cy={H * 0.52} width={120} height={60} fillPct={attendancePct} color={crowdColor} />
-          <CrowdSection cx={W * 0.5} cy={H * 0.44} width={160} height={55} fillPct={attendancePct} color={crowdColor} />
-          <CrowdSection cx={W * 0.78} cy={H * 0.52} width={120} height={60} fillPct={attendancePct} color={crowdColor} />
-        </>
-      )}
-
-      {/* watch-crowd testid: contains crowd fill proportional to attendancePct */}
+      {/* Crowd sections (3 sections: left, center, right) — in the stands behind the outfield wall */}
       <g data-testid="watch-crowd">
-        <CrowdSection
-          cx={W * 0.5} cy={H * 0.5} width={W * 0.7} height={40}
-          fillPct={attendancePct} color={crowdColor}
-        />
+        {isGameActive && (
+          <>
+            <CrowdSection cx={W * 0.22} cy={H * 0.52} width={120} height={60} fillPct={attendancePct} color={crowdColor} />
+            <CrowdSection cx={W * 0.5}  cy={H * 0.44} width={160} height={55} fillPct={attendancePct} color={crowdColor} />
+            <CrowdSection cx={W * 0.78} cy={H * 0.52} width={120} height={60} fillPct={attendancePct} color={crowdColor} />
+          </>
+        )}
       </g>
 
       {/* Owned park glow */}
