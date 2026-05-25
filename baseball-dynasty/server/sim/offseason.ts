@@ -293,16 +293,379 @@ async function runFinancialUpdateStep(leagueId: number, seasonNumber: number, se
 }
 
 // =========================================================
-// Forward declarations (implemented below in Steps 5 and 7)
+// Step 5: Financial Update — revenue model + budget updates + franchise valuation
 // =========================================================
-async function runHofVoting(leagueId: number, seasonNumber: number, worldgenSeed: number): Promise<void> {
-  // Stub — implementation in Step 7 below
-  console.log(`[offseason] HOF voting step (stub) for season ${seasonNumber}`);
-}
+
+// Revenue constants (documented as tunable)
+const BASE_MARKET_REVENUE: Record<string, number> = { mega: 300, large: 200, medium: 130, small: 90 };
+const PERFORMANCE_BONUS_RATE = 200; // millions; (.600 - .500) * 200 = +20M
+const CHAMPIONSHIP_BONUS = 40; // millions
+const PLAYOFF_APPEARANCE_BONUS = 15; // millions
+const LOSING_STREAK_PENALTY_PER_SEGMENT = 5; // millions per 10-game sub-.500 margin segment
 
 async function runFinancialUpdate(leagueId: number, seasonNumber: number, seed: number): Promise<void> {
-  // Stub — implementation in Step 5 below
-  console.log(`[offseason] Financial update step (stub) for season ${seasonNumber}`);
+  const db = getDb();
+  const rng = seedFor('financial_update', seed);
+  const teams = prepared('SELECT * FROM teams WHERE league_id = ?').all(leagueId) as TeamRow[];
+
+  // Get prior season from franchise_season_history for 2-season revenue trend
+  const prevSeason = seasonNumber - 1;
+
+  const financialTx = db.transaction(() => {
+    for (const team of teams) {
+      // Get this season's history (just archived)
+      const thisHistory = prepared(
+        'SELECT wins, losses, made_playoffs, won_championship, revenue, payroll_budget FROM franchise_season_history WHERE league_id = ? AND team_id = ? AND season_number = ?'
+      ).get(leagueId, team.id, seasonNumber) as {
+        wins: number; losses: number; made_playoffs: number; won_championship: number;
+        revenue: number; payroll_budget: number;
+      } | undefined;
+
+      if (!thisHistory) continue; // no season data yet
+
+      const gamesPlayed = thisHistory.wins + thisHistory.losses;
+      const winPct = gamesPlayed > 0 ? thisHistory.wins / gamesPlayed : 0.5;
+
+      // Revenue formula
+      const baseRev = BASE_MARKET_REVENUE[team.market_size] ?? 90;
+      const performanceBonus = Math.max(0, (winPct - 0.500)) * PERFORMANCE_BONUS_RATE;
+      const champBonus = thisHistory.won_championship === 1 ? CHAMPIONSHIP_BONUS : 0;
+      const playoffBonus = (thisHistory.made_playoffs === 1 && thisHistory.won_championship !== 1) ? PLAYOFF_APPEARANCE_BONUS : 0;
+      const gamesUnder500 = Math.max(0, thisHistory.losses - thisHistory.wins);
+      const losingPenalty = Math.floor(gamesUnder500 / 10) * LOSING_STREAK_PENALTY_PER_SEGMENT;
+
+      const ownerMod: Record<string, number> = {
+        'win-now': 1.2, meddling: 1.2, moderate: 1.05, patient: 1.0, 'hands-off': 0.9,
+      };
+      const modifier = ownerMod[team.owner_personality] ?? 1.0;
+
+      const annualRevenue = Math.round((baseRev + performanceBonus + champBonus + playoffBonus - losingPenalty) * modifier);
+
+      // Write revenue to teams.revenue (archived next season in archive step)
+      db.prepare('UPDATE teams SET revenue = ? WHERE id = ?').run(annualRevenue * 1_000_000, team.id);
+
+      // Budget update logic — reads prior season
+      const priorHistory = prepared(
+        'SELECT revenue, payroll_budget FROM franchise_season_history WHERE league_id = ? AND team_id = ? AND season_number = ?'
+      ).get(leagueId, team.id, prevSeason) as { revenue: number; payroll_budget: number } | undefined;
+
+      const currentBudget = team.payroll_budget;
+      let newBudget = currentBudget;
+      const revMillions = annualRevenue; // already in millions
+      const budgetMillions = currentBudget / 1_000_000;
+
+      if (revMillions > budgetMillions * 1.3) {
+        // Increase budget 5-15% — analytics GM goes higher
+        const isAnalytics = team.gm_archetype === 'analytics';
+        const band = isAnalytics
+          ? 0.05 + rng() * 0.10 // 5-15%
+          : 0.05 + rng() * 0.05; // 5-10%
+
+        // Small-market hands-off owner: least likely to reinvest
+        if (team.owner_personality === 'hands-off' && team.market_size === 'small') {
+          newBudget = Math.round(currentBudget * (1 + band * 0.3)); // barely reinvests
+        } else {
+          newBudget = Math.round(currentBudget * (1 + band));
+        }
+      } else if (priorHistory && revMillions < budgetMillions * 0.8) {
+        const priorRevMillions = priorHistory.revenue / 1_000_000;
+        const priorBudgetMillions = priorHistory.payroll_budget / 1_000_000;
+        // Check if also below 0.8 last season (2 consecutive)
+        if (priorRevMillions < priorBudgetMillions * 0.8) {
+          const decreasePct = 0.05 + rng() * 0.05; // 5-10%
+          newBudget = Math.round(currentBudget * (1 - decreasePct));
+        }
+      }
+
+      // Mega-market floor: never below $120M
+      if (team.market_size === 'mega') {
+        newBudget = Math.max(newBudget, 120_000_000);
+      }
+
+      if (newBudget !== currentBudget) {
+        db.prepare('UPDATE teams SET payroll_budget = ? WHERE id = ?').run(newBudget, team.id);
+      }
+
+      // Franchise valuation — store in millions
+      const histRows = prepared(
+        'SELECT SUM(wins) as total_wins, SUM(won_championship) as championships, COUNT(*) as seasons_count FROM franchise_season_history WHERE league_id = ? AND team_id = ?'
+      ).get(leagueId, team.id) as { total_wins: number; championships: number; seasons_count: number } | undefined;
+
+      const baseMkt: Record<string, number> = { mega: 400, large: 250, medium: 150, small: 100 };
+      const baseVal = baseMkt[team.market_size] ?? 100;
+      const totalWins = histRows?.total_wins ?? 0;
+      const champs = histRows?.championships ?? 0;
+      const seasonsInLeague = Math.max(1, (histRows?.seasons_count ?? 1));
+      const attendancePremium: Record<string, number> = { mega: 100, large: 40, medium: 10, small: 0 };
+      const aPremium = attendancePremium[team.market_size] ?? 0;
+
+      const franchiseValue = Math.max(0, Math.round(
+        baseVal
+        + Math.round(totalWins * 0.1)
+        + (champs * 50)
+        + (seasonsInLeague * 2)
+        + aPremium
+      ));
+
+      db.prepare('UPDATE teams SET franchise_value = ? WHERE id = ?').run(franchiseValue, team.id);
+    }
+  });
+
+  financialTx();
+  console.log(`[offseason] Financial update complete for season ${seasonNumber}`);
+}
+
+// =========================================================
+// Step 7: Hall of Fame Voting
+// =========================================================
+
+async function runHofVoting(leagueId: number, seasonNumber: number, worldgenSeed: number): Promise<void> {
+  const db = getDb();
+
+  // Offseason note (A-7): finalizeOffseason increments season_number LAST.
+  // We are in the offseason for `seasonNumber` (just completed). Veterans committee
+  // fires at season 5, 10, 15 — check if seasonNumber % 5 === 0.
+
+  // 1. Add newly eligible players to hof_ballot (1-year wait after retirement)
+  // Find players who retired in (seasonNumber - 1), not yet on ballot, not gambling-banned,
+  // and meet HOF thresholds.
+  addEligibleToBallot(db, leagueId, seasonNumber);
+
+  // 2. Run voting for all players currently on ballot
+  runBallotVoting(db, leagueId, seasonNumber, worldgenSeed);
+
+  // 3. Veterans committee (every 5 seasons)
+  if (seasonNumber % 5 === 0) {
+    runVeteransCommittee(db, leagueId, seasonNumber, worldgenSeed);
+  }
+
+  console.log(`[offseason] HOF voting complete for season ${seasonNumber}`);
+}
+
+function computeCareerStats(db: ReturnType<typeof getDb>, leagueId: number, playerId: number): {
+  career_hr: number; career_hits: number; career_wins: number; career_k: number; career_ip: number;
+  career_era: number; seasons_played: number; ops_above_900_seasons: number; era_below_250_seasons: number;
+  position: string | null;
+} {
+  const player = prepared('SELECT position, career_hr, career_hits, career_k, career_ip, career_wins FROM players WHERE id = ?').get(playerId) as {
+    position: string; career_hr: number; career_hits: number; career_k: number; career_ip: number; career_wins: number;
+  } | undefined;
+
+  const seasonAgg = prepared(
+    `SELECT COUNT(DISTINCT season_number) as seasons,
+            SUM(earned_runs) as total_er, SUM(innings_pitched) as total_ip,
+            SUM(at_bats) as total_ab, SUM(hits) as total_hits,
+            SUM(home_runs) as total_hr, SUM(walks) as total_walks
+     FROM season_stats WHERE league_id = ? AND player_id = ?`
+  ).get(leagueId, playerId) as {
+    seasons: number; total_er: number; total_ip: number; total_ab: number;
+    total_hits: number; total_hr: number; total_walks: number;
+  } | undefined;
+
+  const career_ip = seasonAgg?.total_ip ?? player?.career_ip ?? 0;
+  const career_er = seasonAgg?.total_er ?? 0;
+  const career_era = career_ip > 0 ? (career_er * 9.0) / career_ip : 0;
+
+  // Count seasons with OPS > .900 (hitters) or ERA < 2.50 (pitchers)
+  const opsSeasonsRow = prepared(
+    `SELECT COUNT(*) as cnt FROM season_stats
+     WHERE league_id = ? AND player_id = ? AND at_bats >= 100
+       AND (CAST(hits AS REAL) / NULLIF(at_bats, 0) + CAST(walks AS REAL) / NULLIF(at_bats + walks, 0)
+            + CAST(home_runs AS REAL) * 1.6 / NULLIF(at_bats, 0)) > 0.900`
+  ).get(leagueId, playerId) as { cnt: number } | undefined;
+
+  const eraSeasonsRow = prepared(
+    `SELECT COUNT(*) as cnt FROM season_stats
+     WHERE league_id = ? AND player_id = ? AND innings_pitched >= 50
+       AND CAST(earned_runs AS REAL) * 9.0 / NULLIF(innings_pitched, 0) < 2.50`
+  ).get(leagueId, playerId) as { cnt: number } | undefined;
+
+  return {
+    career_hr: seasonAgg?.total_hr ?? player?.career_hr ?? 0,
+    career_hits: seasonAgg?.total_hits ?? player?.career_hits ?? 0,
+    career_wins: player?.career_wins ?? 0,
+    career_k: player?.career_k ?? 0,
+    career_ip,
+    career_era,
+    seasons_played: seasonAgg?.seasons ?? 0,
+    ops_above_900_seasons: opsSeasonsRow?.cnt ?? 0,
+    era_below_250_seasons: eraSeasonsRow?.cnt ?? 0,
+    position: player?.position ?? null,
+  };
+}
+
+function meetsHofThresholds(stats: ReturnType<typeof computeCareerStats>): boolean {
+  const isPitcher = stats.position && ['SP', 'RP', 'CL'].includes(stats.position);
+  if (isPitcher) {
+    return stats.career_wins >= 250
+      || stats.career_k >= 3000
+      || (stats.career_era < 3.00 && stats.seasons_played >= 10)
+      || stats.era_below_250_seasons >= 5;
+  } else {
+    return stats.career_hr >= 400
+      || stats.career_hits >= 3000
+      // OPS+ > 130 approximated as OPS > .900 over many seasons (simplified — documented)
+      || (stats.ops_above_900_seasons >= 10 && stats.seasons_played >= 10)
+      || stats.ops_above_900_seasons >= 8;
+  }
+}
+
+function addEligibleToBallot(db: ReturnType<typeof getDb>, leagueId: number, seasonNumber: number): void {
+  // Find players retired in season (seasonNumber - 1), not yet on ballot
+  const retiredLastSeason = prepared(
+    `SELECT DISTINCT p.id, p.ped_offenses, p.gambling_ban
+     FROM players p
+     JOIN transactions t ON t.player_id = p.id
+     WHERE t.league_id = ? AND t.transaction_type = 'retirement' AND t.season_number = ?
+       AND p.gambling_ban = 0
+       AND NOT EXISTS (SELECT 1 FROM hof_ballot hb WHERE hb.league_id = ? AND hb.player_id = p.id)
+       AND NOT EXISTS (SELECT 1 FROM hall_of_fame hof WHERE hof.league_id = ? AND hof.player_id = p.id)`
+  ).all(leagueId, seasonNumber - 1, leagueId, leagueId) as Array<{ id: number; ped_offenses: number; gambling_ban: number }>;
+
+  for (const player of retiredLastSeason) {
+    const stats = computeCareerStats(db, leagueId, player.id);
+    if (!meetsHofThresholds(stats)) continue;
+
+    const pedFlag = player.ped_offenses > 0 ? 1 : 0;
+    db.prepare(
+      `INSERT OR IGNORE INTO hof_ballot (league_id, player_id, ballot_since_season, years_on_ballot, best_vote_share, current_vote_share, ped_flag)
+       VALUES (?, ?, ?, 0, 0, 0, ?)`
+    ).run(leagueId, player.id, seasonNumber, pedFlag);
+  }
+}
+
+function runBallotVoting(db: ReturnType<typeof getDb>, leagueId: number, seasonNumber: number, worldgenSeed: number): void {
+  const ballotPlayers = prepared(
+    'SELECT * FROM hof_ballot WHERE league_id = ? ORDER BY player_id ASC'
+  ).all(leagueId) as Array<{ id: number; player_id: number; ballot_since_season: number; years_on_ballot: number; best_vote_share: number; current_vote_share: number; ped_flag: number }>;
+
+  if (ballotPlayers.length === 0) return;
+
+  // 30 procedural voters — deterministic personality via seed
+  const NUM_VOTERS = 30;
+  const voterPersonalities: Array<'old-school' | 'analytics'> = [];
+  for (let i = 0; i < NUM_VOTERS; i++) {
+    const voterRng = seedFor(`hof_voter_${i}`, worldgenSeed);
+    voterPersonalities.push(voterRng() < 0.5 ? 'old-school' : 'analytics');
+  }
+
+  const inductionCandidates: Array<{ player_id: number; vote_share: number; ballot_since: number }> = [];
+
+  for (const ballot of ballotPlayers) {
+    const stats = computeCareerStats(db, leagueId, ballot.player_id);
+    const isPitcher = stats.position && ['SP', 'RP', 'CL'].includes(stats.position);
+
+    // Count votes
+    let yesVotes = 0;
+    for (let i = 0; i < NUM_VOTERS; i++) {
+      const personality = voterPersonalities[i]!;
+      const voteRng = seedFor(`hof_vote_${i}_${ballot.player_id}_s${seasonNumber}`, worldgenSeed);
+      let probability = 0.5;
+
+      // Old-school: favor counting stats
+      if (personality === 'old-school') {
+        if (!isPitcher) {
+          if (stats.career_hr >= 400) probability += 0.25;
+          if (stats.career_hits >= 3000) probability += 0.30;
+          if (stats.career_hr >= 300) probability += 0.10;
+        } else {
+          if (stats.career_wins >= 250) probability += 0.30;
+          if (stats.career_k >= 3000) probability += 0.20;
+        }
+        // PED: old-school split (50/50)
+        if (ballot.ped_flag === 1) probability -= 0.15;
+      } else {
+        // Analytics: favor efficiency
+        if (!isPitcher) {
+          if (stats.ops_above_900_seasons >= 8) probability += 0.25;
+          if (stats.career_hr >= 400) probability += 0.15;
+        } else {
+          if (stats.career_era < 3.00 && stats.seasons_played >= 10) probability += 0.30;
+          if (stats.era_below_250_seasons >= 5) probability += 0.20;
+        }
+        // PED: analytics penalize heavily
+        if (ballot.ped_flag === 1) probability -= 0.35;
+      }
+
+      probability = Math.max(0, Math.min(1, probability));
+      if (voteRng() < probability) yesVotes++;
+    }
+
+    const voteShare = (yesVotes / NUM_VOTERS) * 100;
+    const newBestVoteShare = Math.max(ballot.best_vote_share, voteShare);
+    const newYearsOnBallot = ballot.years_on_ballot + 1;
+
+    // Update ballot
+    db.prepare(
+      'UPDATE hof_ballot SET current_vote_share = ?, best_vote_share = ?, years_on_ballot = ? WHERE id = ?'
+    ).run(voteShare, newBestVoteShare, newYearsOnBallot, ballot.id);
+
+    // Check for induction (>= 75%)
+    if (voteShare >= 75) {
+      inductionCandidates.push({ player_id: ballot.player_id, vote_share: voteShare, ballot_since: ballot.ballot_since_season });
+    } else if (newYearsOnBallot >= 10) {
+      // Remove from ballot after year 10 if not inducted
+      db.prepare('DELETE FROM hof_ballot WHERE id = ?').run(ballot.id);
+    }
+  }
+
+  // Induct at most 3 per offseason
+  // Tiebreaker: highest vote_share → earliest ballot_since_season → lowest player_id
+  inductionCandidates.sort((a, b) => {
+    if (b.vote_share !== a.vote_share) return b.vote_share - a.vote_share;
+    if (a.ballot_since !== b.ballot_since) return a.ballot_since - b.ballot_since;
+    return a.player_id - b.player_id;
+  });
+
+  const toInduct = inductionCandidates.slice(0, 3);
+  for (const c of toInduct) {
+    const stats = computeCareerStats(db, leagueId, c.player_id);
+    const pedFlag = ballotPlayers.find(b => b.player_id === c.player_id)?.ped_flag ?? 0;
+    db.prepare(
+      `INSERT OR IGNORE INTO hall_of_fame
+         (league_id, player_id, induction_season, vote_share, veterans_committee, ped_flag, wing, memorial, career_stats_at_induction, created_at)
+       VALUES (?, ?, ?, ?, 0, ?, 'player', 0, ?, ?)`
+    ).run(
+      leagueId, c.player_id, seasonNumber, c.vote_share, pedFlag,
+      JSON.stringify({ career_hr: stats.career_hr, career_hits: stats.career_hits, career_wins: stats.career_wins, career_k: stats.career_k, career_era: Math.round(stats.career_era * 100) / 100, seasons: stats.seasons_played, position: stats.position }),
+      Date.now()
+    );
+    // Remove from ballot
+    db.prepare('DELETE FROM hof_ballot WHERE league_id = ? AND player_id = ?').run(leagueId, c.player_id);
+  }
+}
+
+function runVeteransCommittee(db: ReturnType<typeof getDb>, leagueId: number, seasonNumber: number, worldgenSeed: number): void {
+  // E-3: tragedy victims — query via memorial=1 OR tragedy_victim=1 (no retirement required)
+  // Exclude gambling_ban=1 or ped_offenses>=3
+  // Also include ballot washouts (years_on_ballot >= 10 removed from ballot)
+
+  // Collect candidates:
+  // 1. Tragedy victims not yet inducted
+  const tragedyVictims = prepared(
+    `SELECT p.id FROM players p
+     WHERE p.league_id = ? AND (p.memorial = 1 OR p.tragedy_victim = 1)
+       AND p.gambling_ban = 0 AND p.ped_offenses < 3
+       AND NOT EXISTS (SELECT 1 FROM hall_of_fame hof WHERE hof.league_id = ? AND hof.player_id = p.id)`
+  ).all(leagueId, leagueId) as Array<{ id: number }>;
+
+  // Pick one — prioritize tragedy victims, then any available
+  if (tragedyVictims.length > 0) {
+    const rng = seedFor(`vet_committee_${seasonNumber}`, worldgenSeed);
+    const pick = tragedyVictims[Math.floor(rng() * tragedyVictims.length)]!;
+    const stats = computeCareerStats(db, leagueId, pick.id);
+
+    db.prepare(
+      `INSERT OR IGNORE INTO hall_of_fame
+         (league_id, player_id, induction_season, vote_share, veterans_committee, ped_flag, wing, memorial, career_stats_at_induction, created_at)
+       VALUES (?, ?, ?, 0, 1, 0, 'player', 1, ?, ?)`
+    ).run(
+      leagueId, pick.id, seasonNumber,
+      JSON.stringify({ career_hr: stats.career_hr, career_hits: stats.career_hits, position: stats.position, note: 'Special Induction — Veterans Committee' }),
+      Date.now()
+    );
+    console.log(`[offseason] Veterans committee inducted tragedy victim player ${pick.id} for season ${seasonNumber}`);
+  }
 }
 
 // Step 1: Retirement — players age 40+ retire
